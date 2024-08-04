@@ -1,0 +1,74 @@
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 15. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 16. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 15. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 18. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 24. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 24. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 16. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 20. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 12. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 15. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 16. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 11. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 15. Discarding old audio chunks.
+RealTimeSTT: werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.0.113:5000
+RealTimeSTT: werkzeug - INFO - [33mPress CTRL+C to quit[0m
+RealTimeSTT: root - ERROR - CUDA failed with error out of memory
+RealTimeSTT: werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.0.113:5000
+RealTimeSTT: werkzeug - INFO - [33mPress CTRL+C to quit[0m
+RealTimeSTT: werkzeug - INFO -  * Restarting with stat
+RealTimeSTT: werkzeug - WARNING -  * Debugger is active!
+RealTimeSTT: werkzeug - INFO -  * Debugger PIN: 987-822-074
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 12. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 78. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 24. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 17. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 16. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 41. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 12. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 11. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 13. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 16. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 11. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 11. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 14. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 29. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 13. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 12. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 14. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 17. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 13. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 18. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 11. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 12. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 20. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 13. Discarding old audio chunks.
+RealTimeSTT: werkzeug - INFO -  * Detected change in 'S:\\Code\\.whisper-subs\\captioner.py', reloading
+RealTimeSTT: werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.0.113:5000
+RealTimeSTT: werkzeug - INFO - [33mPress CTRL+C to quit[0m
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 12. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 13. Discarding old audio chunks.
+RealTimeSTT: root - WARNING - Audio queue size exceeds latency limit. Current size: 13. Discarding old audio chunks.
+RealTimeSTT: werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.0.113:5000
+RealTimeSTT: werkzeug - INFO - [33mPress CTRL+C to quit[0m
+RealTimeSTT: werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.0.113:5000
+RealTimeSTT: werkzeug - INFO - [33mPress CTRL+C to quit[0m
+RealTimeSTT: werkzeug - INFO -  * Restarting with stat
+RealTimeSTT: werkzeug - WARNING -  * Debugger is active!
+RealTimeSTT: werkzeug - INFO -  * Debugger PIN: 987-822-074
+RealTimeSTT: werkzeug - INFO -  * Detected change in 'S:\\Code\\.whisper-subs\\captioner.py', reloading

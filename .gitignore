@@ -1,1 +1,4 @@
 .history
+venv
+.venv
+*.mp3

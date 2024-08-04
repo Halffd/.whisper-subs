@@ -1,16 +1,85 @@
+import model
+import sys
+args = model.getName(sys.argv, 'base', True)
+
 from RealtimeSTT import AudioToTextRecorder
+from pynput import keyboard
+import threading
+from flask import Flask, render_template, jsonify, request
+import os
+import signal
+import caption.gui as gui
 
+app = Flask(__name__)
+
+# Global variables to share data between threads
+transcribed_text = []
+quit_program = False
+PORT = 5000
+ui = None
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/transcript', methods=['GET'])
+def get_transcript():
+    global transcribed_text
+    return jsonify({'text': transcribed_text})
+
+def on_press(key):
+    try:
+        if key == keyboard.Key.cmd:
+            if keyboard.Key.q in key:
+                print('Win+Q pressed')
+                end()
+    except AttributeError:
+        pass
+def end():
+    if os.name == 'nt':
+        os._exit(1)
+    else:
+        os.kill(os.getpid(), signal.SIGINT)
 def process_text(text):
-  print(text, end=" ", flush=True)
+    global transcribed_text, ui
+    print(text, end=" ", flush=True)
+    transcribed_text.append(text)
+    if ui:
+        ui.addNewLine(text)
 
-if __name__ == '__main__':
-  with AudioToTextRecorder(
-    spinner=False,
-    model="tiny.en",
-    language="en",
-    # enable_realtime_transcription=True,
-    realtime_model_type="tiny.en"
-  ) as recorder:
-    print("Say something...")
-    while True:
-      recorder.text(process_text)
+def main_program():
+    with AudioToTextRecorder(
+        spinner=False,
+        model=args['model_name'],
+        language=args['lang'],
+        # enable_realtime_transcription=True,
+        realtime_model_type=args['realtime_model'],
+    ) as recorder:
+        print("Say something...")
+        while True:
+            recorder.text(process_text)
+
+def start_server():
+    print(f"Listening on http://localhost:{PORT}")
+    app.run(debug=True, host='0.0.0.0', port=PORT)
+def input():
+    with keyboard.GlobalHotKeys({
+        '<ctrl>+<alt>+q': end}) as h:
+        h.join()
+if __name__ == "__main__":
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+
+    transcription_thread = threading.Thread(target=main_program)
+    transcription_thread.start()
+
+    input_thread = threading.Thread(target=input)
+    input_thread.start()
+    # Wait for all threads to finish
+    if args['gui']: 
+         ui = gui.draw()
+         ui.run()
+    elif args['web_server']: 
+         start_server()
+    transcription_thread.join()
+    input_thread.join()

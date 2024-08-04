@@ -1,13 +1,16 @@
+import sys
+import model
+default = 'small'
+model_name = model.getName(sys.argv, default)
+
 import os
 from pathlib import Path
 import ffmpeg
 from tkinter import Tk, filedialog
 import faster_whisper
 import torch
-import sys
 import logging
 
-model_name = 'small'
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 
@@ -81,49 +84,7 @@ if __name__ == "__main__":
     # Prompt the user to select one or more audio/video files
     root = Tk()
     root.withdraw()
-    available_models = [
-        "base",
-        "small",
-        "medium",
-        "large",
-        "large-v2",
-        "base.en",
-        "small.en",
-        "medium.en",
-        "large.en",
-        "large-v2.en",
-        "distil-whisper/distil-base",
-        "distil-whisper/distil-small",
-        "distil-whisper/distil-medium",
-        "distil-whisper/distil-large",
-        "distil-whisper/distil-large-v2",
-        "faster-distil-base",
-        "faster-distil-small",
-        "faster-distil-medium",
-        "faster-distil-large",
-        "faster-distil-large-v2"
-    ]
-
-    if len(sys.argv) > 1 and sys.argv[1] in ["-h", "--help"]:
-        print("Usage: python youtubesubs.py [model_name]")
-        print("Available models:")
-        for i, model in enumerate(available_models):
-            print(f"- {i}: {model}")
-        sys.exit(1)
-
-    if len(sys.argv) > 1:
-        if sys.argv[1].isdigit():
-            model_name = available_models[int(sys.argv[1])]
-        else:
-            model_name = sys.argv[1]
-    else:
-        model_name = "small"
-
-    print(model_name)
-    if model_name not in available_models:
-        print(f"Error: {model_name} is not a valid model name. Please choose from the available models.")
-        sys.exit(1)
-
+    
     files = filedialog.askopenfilenames(title="Select one or more files", filetypes=[("Audio/Video files", "*.mkv;*.wav;*.mp3;*.flac;*.ogg")])
 
     # Process each selected file

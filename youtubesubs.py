@@ -1,5 +1,9 @@
-import os
 import sys
+import model
+default = 'base'
+model_name = model.getName(sys.argv, default)
+ 
+import os
 import pyperclip
 import subprocess
 import faster_whisper
@@ -9,9 +13,8 @@ import logging
 import re
 import datetime
 
-model_name = 'base'
 channel_name = 'unknown'
-subs_dir = "Documents\\.Youtube-Subs"
+subs_dir = "Documents\\Youtube-Subs"
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 def transcribe_audio(audio_file, model_name):
@@ -27,7 +30,9 @@ def transcribe_audio(audio_file, model_name):
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = faster_whisper.WhisperModel(model_name, device=device, compute_type="int16")
-    segments, info = model.transcribe(audio_file)
+    segments, info = model.transcribe(audio_file,
+    vad_filter=True,
+    vad_parameters=dict(min_silence_duration_ms=500,max_speech_duration_s=8000))
     return segments
 
 def format_timestamp(timestamp):
@@ -44,9 +49,19 @@ def format_timestamp(timestamp):
     minutes = int(timestamp % 3600 // 60)
     seconds = timestamp % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
-
 def clean_filename(filename):
-    cleaned_filename = re.sub(r'[<>!@#$%^&*()]', '', filename)
+    # Remove leading/trailing spaces
+    filename = filename.strip()
+    
+    # Remove leading/trailing periods
+    filename = filename.strip('.')
+    
+    # Replace multiple consecutive periods with a single period
+    filename = re.sub(r'\.+', '.', filename)
+        
+    # Remove other special characters
+    cleaned_filename = re.sub(r"[<>!@#$%^&*(),/'?\"-;:\[\]\{\}|\\]", "", filename)
+    
     return cleaned_filename
 def download_audio(url):
     global model_name, channel_name
@@ -87,97 +102,93 @@ def remove_time_param(url):
     end_index = lambda x: url.find('&', x + 1) if x != -1 else len(url)
     new_url = url[:t_index] + url[end_index(t_index):]
     return new_url
-if __name__ == "__main__":
-    available_models = [
-        "base",
-        "small",
-        "medium",
-        "large",
-        "large-v2",
-        "base.en",
-        "small.en",
-        "medium.en",
-        "large.en",
-        "large-v2.en",
-        "distil-whisper/distil-base",
-        "distil-whisper/distil-small",
-        "distil-whisper/distil-medium",
-        "distil-whisper/distil-large",
-        "distil-whisper/distil-large-v2",
-        "faster-distil-base",
-        "faster-distil-small",
-        "faster-distil-medium",
-        "faster-distil-large",
-        "faster-distil-large-v2"
-    ]
+def get_youtube_videos(url):
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': '%(title)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,
+    }
 
-    if len(sys.argv) > 1 and sys.argv[1] in ["-h", "--help"]:
-        print("Usage: python youtubesubs.py [model_name]")
-        print("Available models:")
-        for i, model in enumerate(available_models):
-            print(f"- {i}: {model}")
-        sys.exit(1)
-
-    if len(sys.argv) > 1:
-        if sys.argv[1].isdigit():
-            model_name = available_models[int(sys.argv[1])]
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        if 'entries' in info:
+            # This is a playlist
+            video_urls = [entry['webpage_url'] for entry in info['entries']]
+            video_urls.reverse()  # Sort from newest to oldest
+            return video_urls
         else:
-            model_name = sys.argv[1]
-    else:
-        model_name = "base"
-
-    print(model_name)
-    if model_name not in available_models:
-        print(f"Error: {model_name} is not a valid model name. Please choose from the available models.")
-        sys.exit(1)
-
+            # This is a single video
+            return [info['webpage_url']]
+if __name__ == "__main__":
     # Get the YouTube URL from the clipboard
     url = pyperclip.paste()
-
-    urls = url.replace('\r','').split('\n')
+    if '@' in url:
+        urls = get_youtube_videos(url)
+    else:
+        urls = url.replace('\r','').split('\n')
     print(urls)
     for i, url in enumerate(urls):
-        url = remove_time_param(url)
-        print(f"Downloading {i+1}/{len(urls)}: {url}")
-        # Download the audio
-        audio_file = download_audio(url)
-
-        # Transcribe the audio
-        segments = transcribe_audio(audio_file, model_name)
-
-        # Create the SRT file
-        srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
-        os.makedirs(srt_dir, exist_ok=True)
-        # Create a folder for the channel name
-        folder_name = os.path.join(srt_dir, channel_name)
-        if not os.path.exists(folder_name):
-            os.makedirs(folder_name)    
-        srt_file = os.path.join(folder_name, os.path.splitext(os.path.basename(audio_file))[0] + ".srt")
-        with open(srt_file, "w", encoding="utf-8") as f:
-            for i, segment in enumerate(segments, start=1):
-                start_time = segment.start
-                end_time = segment.end
-                text = segment.text.strip()
-                f.write(f"{i}\n")
-                f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-                f.write(f"{text}\n\n")
-        print(f"SRT file saved: {srt_file}")
-
-        # Delete the audio file
-        os.remove(audio_file)
-        
-        # Get the path to the subtitle file
-        sub_file = srt_file
-
-        # Open the video and subtitle file with MPV
-        mpv = ["mpv", url, "--pause", "--sub-file=" + sub_file]
-        subprocess.Popen(mpv)
-        mpv = ' '.join(mpv)
-        print(mpv)
-        pyperclip.copy(mpv)
-        with open(file='mpvs.txt', mode='a', encoding="utf-8") as f:
+        try:
+            url = remove_time_param(url)
+            print(f"Downloading {i+1}/{len(urls)}: {url}")
+            # Download the audio
             try:
-                f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv)
-            except UnicodeEncodeError:
-                print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
-                f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
+                audio_file = download_audio(url)
+
+                # Transcribe the audio
+                segments = transcribe_audio(audio_file, model_name)
+            except Exception as e:
+                print(f"Error: {e}")
+                continue
+            # Create the SRT file
+            srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
+            os.makedirs(srt_dir, exist_ok=True)
+            # Create a folder for the channel name
+            folder_name = os.path.join(srt_dir, channel_name)
+            if not os.path.exists(folder_name):
+                os.makedirs(folder_name)    
+            srt_file = os.path.join(folder_name, os.path.splitext(os.path.basename(audio_file))[0] + ".srt")
+            with open(srt_file, "w", encoding="utf-8") as f:
+                for i, segment in enumerate(segments, start=1):
+                    start_time = segment.start
+                    end_time = segment.end
+                    text = segment.text.strip()
+                    f.write(f"{i}\n")
+                    f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
+                    f.write(f"{text}\n\n")
+            print(f"SRT file saved: {srt_file}")
+
+            # Delete the audio file
+            os.remove(audio_file)
+            
+            # Get the path to the subtitle file
+            sub_file = srt_file.replace("\\", "/")
+
+            # Open the video and subtitle file with MPV
+            mpv = ["mpv", url, "--pause", f'--sub-file="{sub_file}"']
+
+            current_time = datetime.datetime.now()
+            current_hour = current_time.hour
+
+            #if 12 <= current_hour < 18:
+                #subprocess.Popen(mpv)
+            mpv = ' '.join(mpv)
+            print(mpv)
+            pyperclip.copy(mpv)
+            bat = os.path.join(folder_name, os.path.splitext(os.path.basename(audio_file))[0] + ".bat")
+            with open(file=bat, mode='w', encoding="utf-8") as f:
+                try:
+                    f.write(mpv)
+                except UnicodeEncodeError:
+                    print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
+                    f.write(mpv.encode('ascii', 'ignore').decode('ascii'))
+            with open(file='mpvs.txt', mode='a', encoding="utf-8") as f:
+                try:
+                    f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv)
+                except UnicodeEncodeError:
+                    print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
+                    f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
+        except Exception as e:
+            print(f"Error : {e}")                    

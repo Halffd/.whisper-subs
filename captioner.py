@@ -17,6 +17,8 @@ transcribed_text = []
 quit_program = False
 PORT = 5000
 ui = None
+zoomFactor = 2
+transparencyFactor = 1
 
 @app.route('/')
 def index():
@@ -62,9 +64,37 @@ def main_program():
 def start_server():
     print(f"Listening on http://localhost:{PORT}")
     app.run(debug=True, host='0.0.0.0', port=PORT)
+def zoom(factor):
+    if not gui or factor == 0 or gui.fontSize + factor <= 0:
+        return
+    gui.fontSize += factor
+    gui.styling()
+def zoomIn():
+    zoom(zoomFactor)
+def zoomOut():
+    zoom(-zoomFactor)
+def transparency(factor):
+    if not gui or factor == 0 or gui.alphs + factor <= 0 or gui.alpha + factor > 255:
+        return
+    gui.alphs += factor
+    gui.styling()
+def transparencyAdd():
+    transparency(transparencyFactor)
+def transparencySub():
+    transparency(-transparencyFactor)
+def clear():
+    if gui:
+        gui.lines = []
+        gui.clearCaption()
 def input():
     with keyboard.GlobalHotKeys({
-        '<ctrl>+<alt>+q': end}) as h:
+        '<ctrl>+<alt>+q': end,
+        '<ctrl>+<alt>+=': zoomIn,
+        '<ctrl>+<alt>+-': zoomOut,
+        '<ctrl>+<alt>+0': transparencyAdd,
+        '<ctrl>+<alt>+9': transparencySub,
+        '<ctrl>+<alt>+x': clear
+        }) as h:
         h.join()
 if __name__ == "__main__":
     listener = keyboard.Listener(on_press=on_press)

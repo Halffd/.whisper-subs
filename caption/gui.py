@@ -1,8 +1,9 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QWidget, QStyleOption, QStyle, QScrollArea, QDesktopWidget
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QWidget, QStyleOption, QStyle, QScrollArea, QDesktopWidget, QShortcut
 from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, QEvent
-from PyQt5.QtGui import QPainter, QColor, QCursor
+from PyQt5.QtGui import QPainter, QColor, QCursor, QKeySequence
 import textwrap
+import os
 
 class CaptionerGUI(QMainWindow):
     mousePressPos = None
@@ -15,7 +16,14 @@ class CaptionerGUI(QMainWindow):
         self.alpha = 128
         self.lineLimit = 0
         self.textLimit = 50
+        self.zoomFactor = 2
+        self.transparencyFactor = 3
+        self.monitor = 2
+        self.windowHeight = 300 if self.monitor == 1 else 210
+        self.windowWidthOffset = 5
+        self.top = False
         self.language = 'en'
+        self.speech = None
         self.initUI()
 
     def initUI(self):
@@ -40,21 +48,96 @@ class CaptionerGUI(QMainWindow):
 
         self.styling()
         self.setCentralWidget(central_widget)
+
+        self.setWindowTitle("Captioner")
         
-        # Get the primary screen's geometry
-        desktop = QDesktopWidget()
-        primary_screen_geometry = desktop.screenGeometry(desktop.primaryScreen())
+        self.setup_geometry()
+        # Create shortcuts for the global hotkeys
+        end_shortcut = QShortcut(QKeySequence(Qt.CTRL + Qt.Key_Q), self)
+        end_shortcut.activated.connect(self.end)
 
-        # Get the width of the primary monitor
-        self.windowWidth = primary_screen_geometry.width() - 20
-        self.windowHeight = 300
-        y = int(primary_screen_geometry.height() - self.windowHeight)
-        self.setGeometry(10, y, self.windowWidth, self.windowHeight)
-        self.scroll_area.verticalScrollBar().setVisible(False)
+        self.esc_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.esc_shortcut.activated.connect(self.end)
+        
+        zoom_in_shortcut = QShortcut(QKeySequence(Qt.Key_Equal), self)
+        zoom_in_shortcut.activated.connect(self.zoomIn)
+
+        zoom_out_shortcut = QShortcut(QKeySequence(Qt.Key_Minus), self)
+        zoom_out_shortcut.activated.connect(self.zoomOut)
+
+        transparency_add_shortcut = QShortcut(QKeySequence(Qt.Key_0), self)
+        transparency_add_shortcut.activated.connect(self.transparencyAdd)
+
+        transparency_sub_shortcut = QShortcut(QKeySequence(Qt.Key_9), self)
+        transparency_sub_shortcut.activated.connect(self.transparencySub)
+
+        clear_shortcut = QShortcut(QKeySequence(Qt.Key_X), self)
+        clear_shortcut.activated.connect(self.clear)
+        QApplication.instance().installEventFilter(self)
     
-        # Call the update_scroll_position function whenever the caption label size changes
-        self.caption_label.heightChanged.connect(self.update_scroll_position)
+    def setup_geometry(self):
+        desktop = QDesktopWidget()
+        num_screens = desktop.screenCount()
 
+        def get_screen_geometry(monitor_index):
+            if monitor_index < num_screens:
+                return desktop.screenGeometry(monitor_index)
+            else:
+                return desktop.screenGeometry(desktop.primaryScreen())
+
+        screen_geometry = get_screen_geometry(self.monitor - 1)
+        self.windowWidth = screen_geometry.width() - self.windowWidthOffset
+
+        if self.top:
+            self.setGeometry(screen_geometry.left(), screen_geometry.top(), self.windowWidth, self.windowHeight)
+        else:
+            self.setGeometry(screen_geometry.left(), screen_geometry.bottom() - self.windowHeight, self.windowWidth, self.windowHeight)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress:
+            key_sequence = QKeySequence(event.modifiers() | event.key())
+            if key_sequence == QKeySequence(Qt.CTRL | Qt.ALT | Qt.Key_Minus):
+                self.zoomOut()
+            elif key_sequence == QKeySequence(Qt.CTRL | Qt.ALT | Qt.Key_Equal):
+                self.zoomIn()
+            elif key_sequence == QKeySequence(Qt.CTRL | Qt.ALT | Qt.Key_X):
+                self.clear()
+            elif key_sequence == QKeySequence(Qt.CTRL | Qt.ALT | Qt.Key_Q):
+                self.end()
+        return super().eventFilter(obj, event)
+    def zoom(self, factor):
+        if not self or factor == 0 or self.fontSize + factor <= 0:
+            return
+        self.fontSize += factor
+        self.styling()
+    def zoomIn(self):
+        self.zoom(self.zoomFactor)
+    def zoomOut(self):
+        self.zoom(-self.zoomFactor)
+    def transparency(self, factor):
+        if factor == 0 or self.alpha + factor <= 0 or self.alpha + factor > 255:
+            return
+        self.alpha += factor
+        self.styling()
+    def transparencyAdd(self):
+        self.transparency(self.transparencyFactor)
+    def transparencySub(self):
+        self.transparency(-self.transparencyFactor)
+    def end(self):
+        print(self.speech)
+        if self.speech:
+            self.speech.stop = True
+            print(self.speech.stop)
+            self.speech.recorder.stop()
+        QApplication.quit()
+        """if os.name == 'nt':
+            os._exit(1)
+        else:
+            os.kill(os.getpid(), signal.SIGINT)"""
+    def clear(self):
+        if self:
+            self.lines = []
+            self.clearCaption()
     # Show the scrollbar when the content is larger than the viewport
     def scrollbar_visibility(self):
         if self.scroll_area.verticalScrollBar().isVisible():

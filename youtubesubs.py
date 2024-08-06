@@ -74,6 +74,7 @@ def download_audio(url):
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
+        'cookiesfile': '.venv/cookies.txt',  # Replace with the actual path to your cookies file
         'ignoreerrors': True
     }
 
@@ -119,6 +120,7 @@ def get_youtube_videos(url):
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': True,
+        'cookiesfile': '.venv/cookies.txt',  # Replace with the actual path to your cookies file
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

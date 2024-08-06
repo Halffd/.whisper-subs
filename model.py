@@ -87,7 +87,7 @@ def getName(arg, default, captioner=False):
                 if skip:
                     i += 1
             elif arg[i] == "-w" or arg[i] == "--web":
-                result["web_server"] = True
+                result["web"] = True
             elif arg[i] == "-g" or arg[i] == "--gui":
                 result["gui"] = True
             elif arg[i] == "--debug":
@@ -95,7 +95,7 @@ def getName(arg, default, captioner=False):
             elif arg[i] == "--test":
                 result["test_mode"] = True
             elif arg[i] == "--lang" or arg[i] == arg[-1]:
-                result["lang"] = arg[j]
+                result["lang"] = arg[j] if arg[j] != 'none' else None
                 if skip:
                     i += 1
             else:

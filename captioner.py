@@ -37,11 +37,6 @@ def on_press(key):
                 end()
     except AttributeError:
         pass
-def end():
-    if os.name == 'nt':
-        os._exit(1)
-    else:
-        os.kill(os.getpid(), signal.SIGINT)
 def process_text(text):
     global transcribed_text, ui
     print(text, end=" ", flush=True)
@@ -65,27 +60,32 @@ def start_server():
     print(f"Listening on http://localhost:{PORT}")
     app.run(debug=True, host='0.0.0.0', port=PORT)
 def zoom(factor):
-    if not gui or factor == 0 or gui.fontSize + factor <= 0:
+    if not ui or factor == 0 or ui.fontSize + factor <= 0:
         return
-    gui.fontSize += factor
-    gui.styling()
+    ui.fontSize += factor
+    ui.styling()
 def zoomIn():
     zoom(zoomFactor)
 def zoomOut():
     zoom(-zoomFactor)
 def transparency(factor):
-    if not gui or factor == 0 or gui.alphs + factor <= 0 or gui.alpha + factor > 255:
+    if not ui or factor == 0 or ui.alphs + factor <= 0 or ui.alpha + factor > 255:
         return
-    gui.alphs += factor
-    gui.styling()
+    ui.alphs += factor
+    ui.styling()
 def transparencyAdd():
     transparency(transparencyFactor)
 def transparencySub():
     transparency(-transparencyFactor)
+def end():
+    if os.name == 'nt':
+        os._exit(1)
+    else:
+        os.kill(os.getpid(), signal.SIGINT)
 def clear():
-    if gui:
-        gui.lines = []
-        gui.clearCaption()
+    if ui:
+        ui.lines = []
+        ui.clearCaption()
 def input():
     with keyboard.GlobalHotKeys({
         '<ctrl>+<alt>+q': end,
@@ -107,7 +107,8 @@ if __name__ == "__main__":
     input_thread.start()
     # Wait for all threads to finish
     if args['gui']: 
-         ui = gui.draw()
+         ui = gui.initialize()
+         ui.language = args['lang']
          ui.run()
     elif args['web_server']: 
          start_server()

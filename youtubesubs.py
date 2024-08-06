@@ -12,11 +12,14 @@ import yt_dlp
 import logging
 import re
 import datetime
+import urllib.parse
 
 channel_name = 'unknown'
 subs_dir = "Documents\\Youtube-Subs"
+log_dir = "Documents"
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
+oldest = '--oldest' in sys.argv
 def transcribe_audio(audio_file, model_name):
     """
     Transcribes the audio from the given file using the specified Whisper model.
@@ -29,7 +32,8 @@ def transcribe_audio(audio_file, model_name):
         The transcription result.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = faster_whisper.WhisperModel(model_name, device=device, compute_type="int16")
+    print(device)
+    model = faster_whisper.WhisperModel(model_name, device=device, compute_type="float32")
     segments, info = model.transcribe(audio_file,
     vad_filter=True,
     vad_parameters=dict(min_silence_duration_ms=500,max_speech_duration_s=8000))
@@ -75,10 +79,15 @@ def download_audio(url):
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        video_title = clean_filename(info.get('title', 'unknown'))
         # Get the channel name
         channel_name = info.get('channel', '')
+        timestamp = info.get('timestamp', '')
+        # Convert the timestamp to a datetime object
+        date_time = datetime.datetime.fromtimestamp(timestamp)
 
+        # Format the datetime object as a date string
+        time = date_time.strftime('%Y-%m-%d')
+        video_title = time + '_' + clean_filename(info.get('title', 'unknown'))
         #video_title = info.get('title', 'unknown')
         audio_file = os.path.join(os.getcwd(), f"{video_title}.{model_name}.mp3")
     command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "-o", audio_file, url]
@@ -103,6 +112,7 @@ def remove_time_param(url):
     new_url = url[:t_index] + url[end_index(t_index):]
     return new_url
 def get_youtube_videos(url):
+    global oldest
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': '%(title)s.%(ext)s',
@@ -115,23 +125,75 @@ def get_youtube_videos(url):
         info = ydl.extract_info(url, download=False)
         if 'entries' in info:
             # This is a playlist
-            video_urls = [entry['webpage_url'] for entry in info['entries']]
-            video_urls.reverse()  # Sort from newest to oldest
+            # print(info['entries'], len(info['entries']),end="\n")
+            video_urls = []
+            for entry in info['entries']:
+                video_urls.append(entry['webpage_url'])
+            if oldest:
+                video_urls.reverse()  # Sort from newest to oldest
             return video_urls
         else:
             # This is a single video
             return [info['webpage_url']]
+def get_playlist(current_url):
+    # Check if the URL includes "youtube.com/watch?v="
+    if "youtube.com/watch?v=" in current_url:
+        # Parse the URL
+        url = urllib.parse.urlparse(current_url)
+        
+        # Update the query parameters
+        query_params = urllib.parse.parse_qs(url.query)
+        query_params["list"] = ["ULcxqQ59vzyTk"]
+        
+        # Rebuild the URL with the updated query parameters
+        updated_url = urllib.parse.urlunparse((
+            url.scheme,
+            url.netloc,
+            url.path,
+            url.params,
+            urllib.parse.urlencode(query_params, doseq=True),
+            url.fragment
+        ))
+        return updated_url
+    return '[]'
+
+def get_video_id(url):
+    """
+    Extracts the YouTube video ID from a given URL.
+    """
+    # Define a regular expression pattern to match the video ID
+    pattern = r'(?:https?://)?(?:www\.)?(?:youtu\.be/|youtube\.com/(?:watch\?v=|embed/|v/|user/\S+|[^/]+\?v=))([^&"\'<>\s]+)'
+    
+    # Use the pattern to search for the video ID in the URL
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1)
+    else:
+        return None
 if __name__ == "__main__":
     # Get the YouTube URL from the clipboard
     url = pyperclip.paste()
     if '@' in url:
+        progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{url.split('/')[-1][1:]}.txt')
         urls = get_youtube_videos(url)
     else:
         urls = url.replace('\r','').split('\n')
+        progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.txt')
     print(urls)
+    print(len(urls))
+    history_file = os.path.join(os.path.expanduser("~"), subs_dir, 'history.txt')
     for i, url in enumerate(urls):
         try:
             url = remove_time_param(url)
+            id = get_video_id(url)
+            try:
+                history = open("history.txt", "r").readlines()
+                for h in history:
+                    sep = h.split(' ')
+                    if sep[0] == id and sep[1] == model_name:
+                        continue
+            except Exception as e:
+                print(e)    
             print(f"Downloading {i+1}/{len(urls)}: {url}")
             # Download the audio
             try:
@@ -149,7 +211,8 @@ if __name__ == "__main__":
             folder_name = os.path.join(srt_dir, channel_name)
             if not os.path.exists(folder_name):
                 os.makedirs(folder_name)    
-            srt_file = os.path.join(folder_name, os.path.splitext(os.path.basename(audio_file))[0] + ".srt")
+            name = os.path.splitext(os.path.basename(audio_file))[0]
+            srt_file = os.path.join(folder_name, name + ".srt")
             with open(srt_file, "w", encoding="utf-8") as f:
                 for i, segment in enumerate(segments, start=1):
                     start_time = segment.start
@@ -184,9 +247,15 @@ if __name__ == "__main__":
                 except UnicodeEncodeError:
                     print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
                     f.write(mpv.encode('ascii', 'ignore').decode('ascii'))
-            with open(file='mpvs.txt', mode='a', encoding="utf-8") as f:
+            with open(file=history_file, mode='a', encoding="utf-8") as f:
                 try:
-                    f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv)
+                    f.write(id + ' ' + model_name + '\n')
+                except UnicodeEncodeError:
+                    print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
+                    f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
+            with open(file=progress_file, mode='a', encoding="utf-8") as f:
+                try:
+                    f.write(f'{i}: {name} {url}\n')
                 except UnicodeEncodeError:
                     print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
                     f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))

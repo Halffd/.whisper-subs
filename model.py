@@ -106,6 +106,8 @@ def getName(arg, default, captioner=False):
             print(f"Error: {result['model_name']} is not a valid model name. Please choose from the available models.")
             sys.exit(1)
     else:
+        if len(arg) <= 1:
+            arg = [0, default]
         if is_numeric(arg[1]):
             num = int(arg[1])
             if num < 0:

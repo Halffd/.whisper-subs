@@ -24,6 +24,7 @@ class CaptionerGUI(QMainWindow):
         self.top = False
         self.language = 'en'
         self.speech = None
+        self.clearSignal = pyqtSignal()
         self.initUI()
 
     def initUI(self):
@@ -70,9 +71,12 @@ class CaptionerGUI(QMainWindow):
 
         transparency_sub_shortcut = QShortcut(QKeySequence(Qt.Key_9), self)
         transparency_sub_shortcut.activated.connect(self.transparencySub)
-
+        
         clear_shortcut = QShortcut(QKeySequence(Qt.Key_X), self)
-        clear_shortcut.activated.connect(self.clear)
+        clear_shortcut.activated.connect(self.clearSignal.emit)
+        self.clearSignal.connect(self.clear)
+        
+        self.scroll_area.verticalScrollBar().setVisible(False)
         QApplication.instance().installEventFilter(self)
     
     def setup_geometry(self):

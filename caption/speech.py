@@ -6,6 +6,7 @@ import os
 import signal
 import caption.web as web
 import caption.gui as gui
+import logging
 
 class Speech:
     def __init__(self, args):
@@ -24,11 +25,15 @@ class Speech:
 
     def main_program(self):
         with AudioToTextRecorder(
-            spinner=False,
+            spinner=True,
             model=self.args['model_name'],
             language=self.args['lang'],
-            # enable_realtime_transcription=True,
+            #enable_realtime_transcription=True,
             realtime_model_type=self.args['realtime_model'],
+            #level=logging.DEBUG,
+            #webrtc_sensitivity=1,
+            min_length_of_recording=0.1,
+            silero_sensitivity=0.2,
         ) as recorder:
             self.recorder = recorder
             print("Say something...")

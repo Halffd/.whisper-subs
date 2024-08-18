@@ -1,6 +1,6 @@
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QWidget, QStyleOption, QStyle, QScrollArea, QDesktopWidget, QShortcut
-from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, QEvent
+from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, pyqtSlot, QEvent
 from PyQt5.QtGui import QPainter, QColor, QCursor, QKeySequence
 import textwrap
 import os
@@ -9,6 +9,7 @@ class CaptionerGUI(QMainWindow):
     mousePressPos = None
     mouseMovePos = None
 
+    clearSignal = pyqtSignal()
     def __init__(self):
         super().__init__()
         self.lines = []
@@ -24,7 +25,6 @@ class CaptionerGUI(QMainWindow):
         self.top = False
         self.language = 'en'
         self.speech = None
-        self.clearSignal = pyqtSignal()
         self.initUI()
 
     def initUI(self):
@@ -66,6 +66,12 @@ class CaptionerGUI(QMainWindow):
         zoom_out_shortcut = QShortcut(QKeySequence(Qt.Key_Minus), self)
         zoom_out_shortcut.activated.connect(self.zoomOut)
 
+        top_shortcut = QShortcut(QKeySequence(Qt.Key_Home), self)
+        top_shortcut.activated.connect(self.toTop)
+
+        bottom_shortcut = QShortcut(QKeySequence(Qt.Key_End), self)
+        bottom_shortcut.activated.connect(self.toBottom)
+        
         transparency_add_shortcut = QShortcut(QKeySequence(Qt.Key_0), self)
         transparency_add_shortcut.activated.connect(self.transparencyAdd)
 
@@ -73,10 +79,10 @@ class CaptionerGUI(QMainWindow):
         transparency_sub_shortcut.activated.connect(self.transparencySub)
         
         clear_shortcut = QShortcut(QKeySequence(Qt.Key_X), self)
-        clear_shortcut.activated.connect(self.clearSignal.emit)
-        self.clearSignal.connect(self.clear)
-        
+        clear_shortcut.activated.connect(self.clearEmit)
         self.scroll_area.verticalScrollBar().setVisible(False)
+        self.previous_value = self.scroll_area.verticalScrollBar().value()
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self.new_scroll)
         QApplication.instance().installEventFilter(self)
     
     def setup_geometry(self):
@@ -127,6 +133,11 @@ class CaptionerGUI(QMainWindow):
         self.transparency(self.transparencyFactor)
     def transparencySub(self):
         self.transparency(-self.transparencyFactor)
+    def toBottom(self):
+        max_value = self.scroll_area.verticalScrollBar().maximum()
+        self.scroll_area.verticalScrollBar().setValue(max_value)
+    def toTop(self):
+        self.scroll_area.verticalScrollBar().setValue(0)
     def end(self):
         print(self.speech)
         if self.speech:
@@ -138,10 +149,15 @@ class CaptionerGUI(QMainWindow):
             os._exit(1)
         else:
             os.kill(os.getpid(), signal.SIGINT)"""
+    @pyqtSlot()
+    def clearEmit(self):
+        self.clearSignal.emit()
+    @pyqtSlot()
     def clear(self):
         if self:
             self.lines = []
-            self.clearCaption()
+            self.caption_label.setText("")
+            #self.clearCaption()
     # Show the scrollbar when the content is larger than the viewport
     def scrollbar_visibility(self):
         if self.scroll_area.verticalScrollBar().isVisible():
@@ -201,8 +217,12 @@ class CaptionerGUI(QMainWindow):
 
         # Scroll to the bottom if the text exceeds the height of the label and the user has not scrolled up
         self.update_scroll_position()
+    def new_scroll(self):
+        current_value = self.scroll_area.verticalScrollBar().value()
+        max_value = self.scroll_area.verticalScrollBar().maximum()
+        if current_value == max_value:
+            self.previous_value = max_value
     def update_scroll_position(self):
-        # Get the height of the caption label and the scroll area viewport
         caption_height = self.caption_label.height()
         viewport_height = self.scroll_area.viewport().height()
 
@@ -215,10 +235,15 @@ class CaptionerGUI(QMainWindow):
             # If the scroll bar is already at the bottom, update the value to the maximum
             if current_value == max_value:
                 self.scroll_area.verticalScrollBar().setValue(max_value)
+                self.previous_value = max_value
             else:
-                # Scroll to the bottom of the content
-                self.scroll_area.verticalScrollBar().setValue(caption_height - viewport_height)
-
+                # Check if the scroll position has changed
+                if current_value == self.previous_value:
+                    # Scroll to the bottom of the content
+                    self.scroll_area.verticalScrollBar().setValue(caption_height - viewport_height)
+                    current_value = self.scroll_area.verticalScrollBar().value()
+                    # Get the previous scroll bar value
+                    self.previous_value = current_value
     def run(self):
         sys.exit(self.app.exec_())
 
@@ -226,5 +251,6 @@ def initialize():
     app = QApplication(sys.argv)
     gui = CaptionerGUI()
     gui.show()
+    gui.clearSignal.connect(gui.clear)
     gui.app = app
     return gui

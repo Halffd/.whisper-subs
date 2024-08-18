@@ -32,7 +32,7 @@ class Speech:
             realtime_model_type=self.args['realtime_model'],
             #level=logging.DEBUG,
             #webrtc_sensitivity=1,
-            min_length_of_recording=0.1,
+            min_length_of_recording=0.75 if self.args['lang'] is None or 'en' in self.args['lang'] else 3,
             silero_sensitivity=0.2,
         ) as recorder:
             self.recorder = recorder

@@ -1,19 +1,18 @@
 import sys
 import model
 default = 'small'
-model_name = model.getName(sys.argv, default)
-
+print(sys.argv)
+args = model.getName(sys.argv, default)
+if type(args) == dict:
+    model_name = args['model_name']
+    lang = args['lang']
+else:
+    model_name = args
 import os
 from pathlib import Path
 import ffmpeg
 from tkinter import Tk, filedialog
-import faster_whisper
-import torch
-import logging
-
-logging.basicConfig()
-logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
-
+import transcribe
 def convert_mkv_to_mp3(input_file, output_file):
     """
     Converts an MKV file to an MP3 file using ffmpeg.
@@ -36,23 +35,6 @@ def convert_mkv_to_mp3(input_file, output_file):
     except Exception as e:
         print(f"Error converting {input_file}: {e}")
 
-def transcribe_audio(audio_file):
-    """
-    Transcribes the audio from the given file using the faster_whisper model.
-
-    Args:
-        audio_file (str): Path to the audio file.
-
-    Returns:
-        The transcription result.
-    """
-    global model_name
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = faster_whisper.WhisperModel(model_name, device=device, compute_type="int16")
-    
-    segments, info = model.transcribe(audio_file)
-    return segments
-
 def format_timestamp(timestamp):
     """
     Formats a timestamp in seconds to the HH:MM:SS.xxx format.
@@ -69,7 +51,7 @@ def format_timestamp(timestamp):
     return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 def process(file):
     global model_name
-    segments = transcribe_audio(file)
+    segments = transcribe.transcribe_audio(file, model_name)
     srt_file = os.path.splitext(file)[0] + "." + model_name + ".srt"
     with open(srt_file, "w", encoding="utf-8") as f:
         for i, segment in enumerate(segments, start=1):

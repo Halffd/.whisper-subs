@@ -6,38 +6,16 @@ model_name = model.getName(sys.argv, default)
 import os
 import pyperclip
 import subprocess
-import faster_whisper
-import torch
 import yt_dlp
-import logging
 import re
 import datetime
 import urllib.parse
+import transcribe
 
 channel_name = 'unknown'
 subs_dir = "Documents\\Youtube-Subs"
 log_dir = "Documents"
-logging.basicConfig()
-logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 oldest = '--oldest' in sys.argv
-def transcribe_audio(audio_file, model_name):
-    """
-    Transcribes the audio from the given file using the specified Whisper model.
-
-    Args:
-        audio_file (str): Path to the audio file.
-        model_name (str): The name of the Whisper model to use.
-
-    Returns:
-        The transcription result.
-    """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(device)
-    model = faster_whisper.WhisperModel(model_name, device=device, compute_type="float32")
-    segments, info = model.transcribe(audio_file,
-    vad_filter=True,
-    vad_parameters=dict(min_silence_duration_ms=500,max_speech_duration_s=8000))
-    return segments
 
 def format_timestamp(timestamp):
     """
@@ -202,7 +180,7 @@ if __name__ == "__main__":
                 audio_file = download_audio(url)
 
                 # Transcribe the audio
-                segments = transcribe_audio(audio_file, model_name)
+                segments = transcribe.transcribe_audio(audio_file, model_name)
             except Exception as e:
                 print(f"Error: {e}")
                 continue

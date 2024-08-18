@@ -1,15 +1,19 @@
 import sys
 import re
+import inspect
 
-def is_numeric(input_str):
-    try:
-        float(input_str)
-        return True
-    except ValueError:
-        return False
+first = True
+print("Started  - ",first)
 
-def getName(arg, default, captioner=False):
-    available_models = [
+frame = inspect.currentframe()
+caller_frame = inspect.getouterframes(frame)[1]
+caller_filename = caller_frame.filename
+caller_lineno = caller_frame.lineno
+caller_function = caller_frame.function
+
+print(f"Called from: {caller_filename}:{caller_lineno} in {caller_function}")
+
+model_names = [
         "tiny",
         "base",
         "small",
@@ -37,6 +41,25 @@ def getName(arg, default, captioner=False):
         "faster-distil-large-v3",
         "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"
     ]
+def __getattr__(name):
+    global model_names
+    if name == "model_names":
+        return model_names
+    else:
+        return None #super().__getattr__(name)
+def is_numeric(input_str):
+    try:
+        float(input_str)
+        return True
+    except ValueError:
+        return False
+
+def getName(arg, default, captioner = False):
+    global first
+    print("getName  - ", first)
+    if not first:
+        return
+    available_models = model_names
 
     result = {
         "model_name": default,
@@ -47,9 +70,6 @@ def getName(arg, default, captioner=False):
     if len(arg) > 1 and (arg[1] in ["-h", "--help"] or arg[1] == '-1'):
         main_module = sys.modules['__main__'].__file__
         print(f"Usage: python {main_module}.py [options] [model] [realtime_model] [language]")
-        print("Available models:")
-        for i, model in enumerate(available_models):
-            print(f"- {i}: {model}")
         print("     -1: Default model")
         if captioner:
             print("     -w, --web: Web server available")
@@ -60,22 +80,31 @@ def getName(arg, default, captioner=False):
             arg[1] = input("Choose a model: ")
         else:
             sys.exit(1)
+    if "-1" in arg:
+        print("Available models:")
+        for i, model in enumerate(available_models):
+            print(f"- {i}: {model}")
     if captioner:
+        result["lang"] = None
         for i in range(1, len(arg)):
+            rem = len(arg) - i
             skip = i < len(arg) - 3
             j = i + 1 if skip else i
-            if arg[i] == "-m" or arg[i] == "--model" or arg[i] == arg[-3]:
+            # print(i, '/',len(arg), arg[i], j, arg[j], rem)
+            if arg[i] == "-m" or arg[i] == "--model" or rem == 3:
                 if is_numeric(arg[j]):
                     num = int(arg[j])
                     if num < 0:
-                        result["model_name"] = default
+                        num = int(input("Model: "))
+                        result["model_name"] = available_models[num]
+                        result["realtime_model"] = result["model_name"]
                     else:
                         result["model_name"] = available_models[num]
                 else:
                     result["model_name"] = arg[j]
                 if skip:
                     i += 1
-            elif arg[i] == "--realtime-model" or arg[i] == arg[-2]:
+            elif arg[i] == "--realtime-model" or rem == 2:
                 if is_numeric(arg[j]):
                     num = int(arg[j])
                     if num < 0:
@@ -94,7 +123,9 @@ def getName(arg, default, captioner=False):
                 result["debug_mode"] = True
             elif arg[i] == "--test":
                 result["test_mode"] = True
-            elif arg[i] == "--lang" or arg[i] == arg[-1]:
+            elif arg[i] == "--lang" or rem == 1:
+                if arg[j] == "-1":
+                    arg[j] = input("Language: ")
                 result["lang"] = arg[j] if arg[j] != 'none' else None
                 if skip:
                     i += 1
@@ -107,14 +138,24 @@ def getName(arg, default, captioner=False):
             sys.exit(1)
     else:
         if len(arg) <= 1:
-            arg = [0, default]
-        if is_numeric(arg[1]):
-            num = int(arg[1])
+            return default
+        name = arg[1]
+        args = name.split(' ')
+        if len(args) > 1:
+            name = args[0]
+        if is_numeric(name):
+            num = int(name)
             if num < 0:
                 result = default
             else:
                 result= available_models[num]
         else:
             result = arg[1]
+        if len(args) > 1:
+            result = {
+                "model_name": result,
+                "lang": args[1]
+            }
     print(result)
+    first = False
     return result

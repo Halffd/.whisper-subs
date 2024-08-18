@@ -42,37 +42,42 @@ def clean_filename(filename):
     filename = re.sub(r'\.+', '.', filename)
         
     # Remove other special characters
-    cleaned_filename = re.sub(r"[<>!@#$%^&*(),/'?\"-;:\[\]\{\}|\\]", "", filename)
-    
+    cleaned_filename = re.sub(r"[<>!@#$%^&*(),/'?\"\-;:\[\]\{\}|\\]", "", filename)
+    if cleaned_filename[-1] == ".":
+        cleaned_filename = cleaned_filename[:-1]
     return cleaned_filename
 def download_audio(url):
     global model_name, channel_name
-    ydl_opts = {
-        'outtmpl': '%(title)s.%(ext)s',
-        'format': 'bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'cookiesfrombrowser': ('chrome', 'default'),  # Replace with the actual path to your cookies file
-        'ignoreerrors': True
-    }
+    try:
+        ydl_opts = {
+            'outtmpl': '%(title)s.%(ext)s',
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'cookiesfrombrowser': ('chrome', 'default'),  # Replace with the actual path to your cookies file
+            'ignoreerrors': True
+        }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        # Get the channel name
-        channel_name = info.get('channel', '')
-        timestamp = info.get('timestamp', '')
-        # Convert the timestamp to a datetime object
-        date_time = datetime.datetime.fromtimestamp(timestamp)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            # Get the channel name
+            channel_name = info.get('channel', '')
+            timestamp = info.get('timestamp', '')
+            # Convert the timestamp to a datetime object
+            date_time = datetime.datetime.fromtimestamp(timestamp)
 
-        # Format the datetime object as a date string
-        time = date_time.strftime('%Y-%m-%d')
-        video_title = time + '_' + clean_filename(info.get('title', 'unknown'))
-        #video_title = info.get('title', 'unknown')
-        audio_file = os.path.join(os.getcwd(), f"{video_title}.{model_name}.mp3")
-    command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "-o", audio_file, url]
-    subprocess.run(command, check=True)
+            # Format the datetime object as a date string
+            time = date_time.strftime('%Y-%m-%d')
+            video_title = time + '_' + clean_filename(info.get('title', 'unknown'))
+            #video_title = info.get('title', 'unknown')
+            audio_file = os.path.join(os.getcwd(), f"{video_title}.{model_name}.mp3")
+        command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "-o", audio_file, url]
+        subprocess.run(command, check=True)
 
-    return audio_file
+        return audio_file
+    except Exception as e:
+        print(e)
+        download_audio(url)
 def remove_time_param(url):
     """
     Removes the '&t=' parameter from a given URL.
@@ -92,29 +97,37 @@ def remove_time_param(url):
     return new_url
 def get_youtube_videos(url):
     global oldest
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': '%(title)s.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-        'ignoreerrors': True,
-        'cookiesfrombrowser': ('chrome', 'default'),  # Replace with the actual path to your cookies file
-    }
+    try:
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': '%(title)s.%(ext)s',
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': True,
+            'cookiesfrombrowser': ('chrome', 'default'),  # Replace with the actual path to your cookies file
+        }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if 'entries' in info:
-            # This is a playlist
-            # print(info['entries'], len(info['entries']),end="\n")
-            video_urls = []
-            for entry in info['entries']:
-                video_urls.append(entry['webpage_url'])
-            if oldest:
-                video_urls.reverse()  # Sort from newest to oldest
-            return video_urls
-        else:
-            # This is a single video
-            return [info['webpage_url']]
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if 'entries' in info:
+                # This is a playlist
+                # print(info['entries'], len(info['entries']),end="\n")
+                video_urls = []
+                for entry in info['entries']:
+                    try:
+                        if entry['subtitles'] == {}:
+                            video_urls.append(entry['webpage_url'])
+                    except Exception as err:
+                        print(err)
+                if oldest:
+                    video_urls.reverse()  # Sort from newest to oldest
+                return video_urls
+            else:
+                # This is a single video
+                return [info['webpage_url']]
+    except Exception as e:
+        print(e)
+        get_youtube_videos(url)
 def get_playlist(current_url):
     # Check if the URL includes "youtube.com/watch?v="
     if "youtube.com/watch?v=" in current_url:
@@ -150,6 +163,25 @@ def get_video_id(url):
         return match.group(1)
     else:
         return None
+def create_redirect_html_file(filename, url):
+  """Creates an HTML file with a meta refresh tag to redirect to the specified URL.
+
+  Args:
+    filename: The name of the HTML file to create.
+    url: The URL to redirect to.
+  """
+
+  with open(filename, "w") as f:
+    f.write(f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta http-equiv="refresh" content="0; URL='{url}'" />
+    </head>
+    <body>
+    </body>
+    </html>
+    """)
 if __name__ == "__main__":
     # Get the YouTube URL from the clipboard
     url = pyperclip.paste()
@@ -167,7 +199,7 @@ if __name__ == "__main__":
             url = remove_time_param(url)
             id = get_video_id(url)
             try:
-                history = open("history.txt", "r").readlines()
+                history = open(history_file, "r").readlines()
                 for h in history:
                     sep = h.split(' ')
                     if sep[0] == id and sep[1] == model_name:
@@ -220,7 +252,8 @@ if __name__ == "__main__":
             mpv = ' '.join(mpv)
             print(mpv)
             pyperclip.copy(mpv)
-            bat = os.path.join(folder_name, os.path.splitext(os.path.basename(audio_file))[0] + ".bat")
+            create_redirect_html_file(os.path.join(folder_name, name + ".htm"), url)
+            bat = os.path.join(folder_name, name + ".bat")
             with open(file=bat, mode='w', encoding="utf-8") as f:
                 try:
                     f.write(mpv)

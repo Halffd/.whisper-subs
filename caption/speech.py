@@ -6,6 +6,7 @@ import os
 import signal
 import caption.web as web
 import caption.gui as gui
+import caption.input as input
 import logging
 
 class Speech:
@@ -41,6 +42,8 @@ class Speech:
                 recorder.text(self.process_text)
 
     def start(self):
+        control = input.Input(self.args)
+        
         transcription_thread = threading.Thread(target=self.main_program)
         transcription_thread.start()
 

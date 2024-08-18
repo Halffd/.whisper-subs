@@ -1,18 +1,7 @@
 import sys
 import re
-import inspect
 
 first = True
-print("Started  - ",first)
-
-frame = inspect.currentframe()
-caller_frame = inspect.getouterframes(frame)[1]
-caller_filename = caller_frame.filename
-caller_lineno = caller_frame.lineno
-caller_function = caller_frame.function
-
-print(f"Called from: {caller_filename}:{caller_lineno} in {caller_function}")
-
 model_names = [
         "tiny",
         "base",
@@ -56,7 +45,6 @@ def is_numeric(input_str):
 
 def getName(arg, default, captioner = False):
     global first
-    print("getName  - ", first)
     if not first:
         return
     available_models = model_names
@@ -66,8 +54,7 @@ def getName(arg, default, captioner = False):
         "realtime_model": None,
         "lang": None
     }
-
-    if len(arg) > 1 and (arg[1] in ["-h", "--help"] or arg[1] == '-1'):
+    if len(arg) > 1 and (arg[1] in ["-h", "--help"] or "-1" in arg):
         main_module = sys.modules['__main__'].__file__
         print(f"Usage: python {main_module}.py [options] [model] [realtime_model] [language]")
         print("     -1: Default model")
@@ -76,21 +63,21 @@ def getName(arg, default, captioner = False):
             print("     -g, --gui: User interface")
             print('     --debug: Debug mode')
             print('     --test: Test mode')
-        if arg[1] == '-1':
-            arg[1] = input("Choose a model: ")
-        else:
-            sys.exit(1)
-    if "-1" in arg:
-        print("Available models:")
-        for i, model in enumerate(available_models):
-            print(f"- {i}: {model}")
+        if "-1" in arg:
+            print("Available models:")
+            for i, model in enumerate(available_models):
+                print(f"- {i}: {model}")
+            if arg[1] == '-1':
+                arg[1] = input("Choose a model: ")
+            elif '-h' in arg[1]:
+                sys.exit(1)
     if captioner:
         result["lang"] = None
         for i in range(1, len(arg)):
             rem = len(arg) - i
             skip = i < len(arg) - 3
             j = i + 1 if skip else i
-            # print(i, '/',len(arg), arg[i], j, arg[j], rem)
+            #print(i, '/',len(arg), arg[i], j, arg[j], rem)
             if arg[i] == "-m" or arg[i] == "--model" or rem == 3:
                 if is_numeric(arg[j]):
                     num = int(arg[j])

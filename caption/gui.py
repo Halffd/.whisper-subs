@@ -4,7 +4,6 @@ from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, pyqtSlot, QEvent
 from PyQt5.QtGui import QPainter, QColor, QCursor, QKeySequence
 import textwrap
 import os
-
 class CaptionerGUI(QMainWindow):
     mousePressPos = None
     mouseMovePos = None
@@ -21,10 +20,11 @@ class CaptionerGUI(QMainWindow):
         self.transparencyFactor = 3
         self.monitor = 2
         self.windowHeight = 300 if self.monitor == 1 else 210
-        self.windowWidthOffset = 5
+        self.windowWidthOffset = 300
         self.top = False
         self.language = 'en'
         self.speech = None
+        self.log = None
         self.initUI()
 
     def initUI(self):
@@ -80,16 +80,32 @@ class CaptionerGUI(QMainWindow):
         
         clear_shortcut = QShortcut(QKeySequence(Qt.Key_X), self)
         clear_shortcut.activated.connect(self.clearEmit)
+        
+        top_shortcut = QShortcut(QKeySequence(Qt.Key_B), self)
+        top_shortcut.activated.connect(self.toggleTop)
+        
+        move_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        move_shortcut.activated.connect(self.move_monitor)
+        
+        fullscreen_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self)
+        fullscreen_shortcut.activated.connect(self.fullscreen)
+        
         self.scroll_area.verticalScrollBar().setVisible(False)
         self.previous_value = self.scroll_area.verticalScrollBar().value()
         self.scroll_area.verticalScrollBar().valueChanged.connect(self.new_scroll)
         QApplication.instance().installEventFilter(self)
-    
-    def setup_geometry(self):
+    def fullscreen(self):
+        pos = self.pos()
+        if pos.x() < 0:
+            self.monitor = 2
+        else:
+            self.monitor = 1
+        self.setup_geometry(True)
+    def setup_geometry(self, fullscreen = False):
         desktop = QDesktopWidget()
         num_screens = desktop.screenCount()
 
-        def get_screen_geometry(monitor_index):
+        def get_screen_geometry(monitor_index, fullscreen = False):
             if monitor_index < num_screens:
                 return desktop.screenGeometry(monitor_index)
             else:
@@ -98,11 +114,31 @@ class CaptionerGUI(QMainWindow):
         screen_geometry = get_screen_geometry(self.monitor - 1)
         self.windowWidth = screen_geometry.width() - self.windowWidthOffset
 
-        if self.top:
-            self.setGeometry(screen_geometry.left(), screen_geometry.top(), self.windowWidth, self.windowHeight)
+        if fullscreen:
+            windowHeight = screen_geometry.height()
+            windowWidth = screen_geometry.width()
+            self.setGeometry(screen_geometry.left(), screen_geometry.top(), windowWidth, windowHeight)
         else:
-            self.setGeometry(screen_geometry.left(), screen_geometry.bottom() - self.windowHeight, self.windowWidth, self.windowHeight)
-
+            if self.top:
+                self.setGeometry(screen_geometry.left(), screen_geometry.top(), self.windowWidth, self.windowHeight)
+            else:
+                self.setGeometry(screen_geometry.left(), screen_geometry.bottom() - self.windowHeight, self.windowWidth, self.windowHeight)
+    def move_monitor(self):
+        pos = self.pos()
+        if pos.x() < 0:
+            self.monitor = 1
+        else:
+            self.monitor = 2
+        self.setup_geometry()
+    def toggleTop(self):
+        self.top = not self.top
+        pos = self.pos()
+        #print(pos.x(),'\n')
+        if pos.x() < 0:
+            self.monitor = 2
+        else:
+            self.monitor = 1
+        self.setup_geometry()
     def eventFilter(self, obj, event):
         if event.type() == QEvent.KeyPress:
             key_sequence = QKeySequence(event.modifiers() | event.key())
@@ -139,10 +175,11 @@ class CaptionerGUI(QMainWindow):
     def toTop(self):
         self.scroll_area.verticalScrollBar().setValue(0)
     def end(self):
-        print(self.speech)
+        #print(self.speech)
+        self.log.close_log_file()
         if self.speech:
             self.speech.stop = True
-            print(self.speech.stop)
+            #print(self.speech.stop)
             self.speech.recorder.stop()
         QApplication.quit()
         """if os.name == 'nt':
@@ -157,6 +194,7 @@ class CaptionerGUI(QMainWindow):
         if self:
             self.lines = []
             self.caption_label.setText("")
+            self.log.write_log('-- Clear --')
             #self.clearCaption()
     # Show the scrollbar when the content is larger than the viewport
     def scrollbar_visibility(self):
@@ -214,24 +252,31 @@ class CaptionerGUI(QMainWindow):
                 del self.lines[0]
 
         self.caption_label.setText('\n'.join(self.lines))
-
+        self.log.write_log(f'{text}')
         # Scroll to the bottom if the text exceeds the height of the label and the user has not scrolled up
         self.update_scroll_position()
     def new_scroll(self):
         current_value = self.scroll_area.verticalScrollBar().value()
         max_value = self.scroll_area.verticalScrollBar().maximum()
+        #print('=', current_value, self.previous_value, max_value)
         if current_value == max_value:
             self.previous_value = max_value
     def update_scroll_position(self):
+        max_value = self.scroll_area.verticalScrollBar().maximum()
+        """
+        if (type(self.lines) == list and len(self.lines <= 3)):
+            self.scroll_area.verticalScrollBar().setValue(max_value)
+            self.previous_value = max_value
+            return
+        """
         caption_height = self.caption_label.height()
         viewport_height = self.scroll_area.viewport().height()
-
+        #print('---',caption_height, viewport_height)
         # Check if the caption label height exceeds the viewport height
         if caption_height > viewport_height:
             # Get the current scroll bar value and the maximum value
             current_value = self.scroll_area.verticalScrollBar().value()
-            max_value = self.scroll_area.verticalScrollBar().maximum()
-
+            #print('---------', current_value, self.previous_value, max_value)
             # If the scroll bar is already at the bottom, update the value to the maximum
             if current_value == max_value:
                 self.scroll_area.verticalScrollBar().setValue(max_value)
@@ -240,7 +285,7 @@ class CaptionerGUI(QMainWindow):
                 # Check if the scroll position has changed
                 if current_value == self.previous_value:
                     # Scroll to the bottom of the content
-                    self.scroll_area.verticalScrollBar().setValue(caption_height - viewport_height)
+                    self.scroll_area.verticalScrollBar().setValue(max_value)
                     current_value = self.scroll_area.verticalScrollBar().value()
                     # Get the previous scroll bar value
                     self.previous_value = current_value

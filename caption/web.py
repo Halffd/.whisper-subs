@@ -1,6 +1,6 @@
 from flask import Flask, render_template, jsonify, request
 
-class WebApp:
+class Web:
     def __init__(self, args):
         self.app = Flask(__name__)
         self.transcribed_text = []

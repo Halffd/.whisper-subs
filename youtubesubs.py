@@ -11,11 +11,14 @@ import re
 import datetime
 import urllib.parse
 import transcribe
+import time
 
 channel_name = 'unknown'
 subs_dir = "Documents\\Youtube-Subs"
 log_dir = "Documents"
 oldest = '--oldest' in sys.argv
+delay = 30
+start_delay = delay
 
 def format_timestamp(timestamp):
     """
@@ -46,8 +49,10 @@ def clean_filename(filename):
     if cleaned_filename[-1] == ".":
         cleaned_filename = cleaned_filename[:-1]
     return cleaned_filename
-def download_audio(url):
-    global model_name, channel_name
+def download_audio(url, rec = False):
+    global model_name, channel_name, delay, start_delay
+    if not rec or delay > 3600:
+        delay = start_delay
     try:
         ydl_opts = {
             'outtmpl': '%(title)s.%(ext)s',
@@ -67,8 +72,8 @@ def download_audio(url):
             date_time = datetime.datetime.fromtimestamp(timestamp)
 
             # Format the datetime object as a date string
-            time = date_time.strftime('%Y-%m-%d')
-            video_title = time + '_' + clean_filename(info.get('title', 'unknown'))
+            timeday = date_time.strftime('%Y-%m-%d')
+            video_title = timeday + '_' + clean_filename(info.get('title', 'unknown'))
             #video_title = info.get('title', 'unknown')
             audio_file = os.path.join(os.getcwd(), f"{video_title}.{model_name}.mp3")
         command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "-o", audio_file, url]
@@ -76,8 +81,10 @@ def download_audio(url):
 
         return audio_file
     except Exception as e:
-        print(e)
-        download_audio(url)
+        print(delay, e)
+        time.sleep(delay)
+        delay *= 2
+        download_audio(url, True)
 def remove_time_param(url):
     """
     Removes the '&t=' parameter from a given URL.
@@ -95,8 +102,10 @@ def remove_time_param(url):
     end_index = lambda x: url.find('&', x + 1) if x != -1 else len(url)
     new_url = url[:t_index] + url[end_index(t_index):]
     return new_url
-def get_youtube_videos(url):
-    global oldest
+def get_youtube_videos(url, rec = False):
+    global oldest, delay, start_delay
+    if not rec or delay > 3600:
+        delay = start_delay
     try:
         ydl_opts = {
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -126,8 +135,10 @@ def get_youtube_videos(url):
                 # This is a single video
                 return [info['webpage_url']]
     except Exception as e:
-        print(e)
-        get_youtube_videos(url)
+        print(delay, e)
+        time.sleep(delay)
+        delay *= 2
+        get_youtube_videos(url, False)
 def get_playlist(current_url):
     # Check if the URL includes "youtube.com/watch?v="
     if "youtube.com/watch?v=" in current_url:
@@ -185,6 +196,7 @@ def create_redirect_html_file(filename, url):
 if __name__ == "__main__":
     # Get the YouTube URL from the clipboard
     url = pyperclip.paste()
+    print(url)
     if '@' in url:
         progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{url.split('/')[-1][1:]}.txt')
         urls = get_youtube_videos(url)

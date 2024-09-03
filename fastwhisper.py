@@ -58,6 +58,7 @@ def process(file):
             start_time = segment.start
             end_time = segment.end
             text = segment.text.strip()
+            print(start_time,end_time,text)
             f.write(f"{i}\n")
             f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
             f.write(f"{text}\n\n")

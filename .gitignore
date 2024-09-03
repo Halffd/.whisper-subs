@@ -1,4 +1,10 @@
 .history
 venv
 .venv
+.idea
+.vscode
 *.mp3
+media
+__pycache__
+caption/__pycache__
+caption/Logs

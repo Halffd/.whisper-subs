@@ -1,6 +1,9 @@
 import sys
 import re
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+
 first = True
 model_names = [
         "tiny",
@@ -48,11 +51,19 @@ def getName(arg, default, captioner = False):
     if not first:
         return
     available_models = model_names
+    pattern = r"^(.*?)\\[^\\]*\.py$"
+    path = arg[0]
+    match = re.match(pattern, path)
 
+    if match:
+        path = match.group(1)  # Get the captured group
+
+    print(path)
     result = {
         "model_name": default,
         "realtime_model": None,
-        "lang": None
+        "lang": None,
+        "path": path,
     }
     if len(arg) > 1 and (arg[1] in ["-h", "--help"] or "-1" in arg):
         main_module = sys.modules['__main__'].__file__

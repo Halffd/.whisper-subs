@@ -1,8 +1,11 @@
 import sys
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QWidget, QStyleOption, QStyle, QScrollArea, QDesktopWidget, QShortcut
-from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, pyqtSlot, QEvent
+from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, pyqtSlot, QEvent, QMetaObject
 from PyQt5.QtGui import QPainter, QColor, QCursor, QKeySequence
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import textwrap
+import string
 import os
 class CaptionerGUI(QMainWindow):
     mousePressPos = None
@@ -22,6 +25,8 @@ class CaptionerGUI(QMainWindow):
         self.windowHeight = 300 if self.monitor == 1 else 210
         self.windowWidthOffset = 300
         self.top = False
+        self.scrolling = False
+        self.previous_value = -1
         self.language = 'en'
         self.speech = None
         self.log = None
@@ -171,8 +176,14 @@ class CaptionerGUI(QMainWindow):
         self.transparency(-self.transparencyFactor)
     def toBottom(self):
         max_value = self.scroll_area.verticalScrollBar().maximum()
+        current_value = self.scroll_area.verticalScrollBar().value()
+        self.write('___', self.previous_value, current_value, max_value)
         self.scroll_area.verticalScrollBar().setValue(max_value)
+        self.previous_value = max_value
     def toTop(self):
+        """
+        Scroll to the top of the text area.
+        """
         self.scroll_area.verticalScrollBar().setValue(0)
     def end(self):
         #print(self.speech)
@@ -238,59 +249,92 @@ class CaptionerGUI(QMainWindow):
     def clearCaption(self):
         self.caption_label.clear()
 
-    def addNewLine(self, text):
-        if len(text) > self.textLimit and self.language not in ['zh-CN', 'zh-TW', 'ja', 'th', 'my', 'lo', 'km', 'bo', 'mn', 'mn-Mong', 'dz', 'aii']:
-            # Split the text into multiple lines without splitting words
-            lines = textwrap.wrap(text, width=self.textLimit, break_long_words=False)
-            self.lines.extend(lines)
-        else:
-            self.lines.append(text)
+    @pyqtSlot()
+    def call_adjust_size(self):
+        self.caption_label.adjustSize()
+        self.max_value = self.scroll_area.verticalScrollBar().maximum()
+        self.scroll_area.verticalScrollBar().setValue(self.max_value)
+    
+    def normalize_text(self, text):
+        # Normalize the text: lower case, strip spaces, and remove punctuation
+        return text.lower().strip().translate(str.maketrans('', '', string.punctuation))
 
+    def is_similar(self, new_text, existing_lines, threshold=0.8, recent_count=7):
+        # Get the most recent lines
+        recent_lines = existing_lines[-recent_count:]
+        vectorizer = TfidfVectorizer().fit_transform([new_text] + recent_lines)
+        vectors = vectorizer.toarray()
+        csim = cosine_similarity(vectors)
+        return any(csim[0][i] > threshold for i in range(1, len(csim)))
+    
+    def addNewLine(self, text):
+        if len(self.lines) > 0:
+            # Normalize the incoming text
+            normalized_text = self.normalize_text(text)
+            # Create a list of normalized lines for similarity checking
+            normalized_lines = [self.normalize_text(line) for line in self.lines]
+
+            # Check for similarity with existing lines
+            if self.is_similar(normalized_text, normalized_lines):
+                return
+
+        # Handle text length limit and specific languages
+        #if len(text) > self.textLimit and self.language not in ['zh-CN', 'zh-TW', 'ja', 'th', 'my', 'lo', 'km', 'bo', 'mn', 'mn-Mong', 'dz', 'aii']:
+            # Split the text into multiple lines without splitting words
+        #    lines = textwrap.wrap(text, width=self.textLimit, break_long_words=False)
+        #    self.lines.extend(lines)
+        #else:
+        self.lines.append(text)
+
+        # Ensure the number of lines does not exceed the limit
         if self.lineLimit > 0:
-            # Remove the oldest lines if there are more than the limit
             while len(self.lines) > self.lineLimit:
                 del self.lines[0]
 
         self.caption_label.setText('\n'.join(self.lines))
         self.log.write_log(f'{text}')
-        # Scroll to the bottom if the text exceeds the height of the label and the user has not scrolled up
         self.update_scroll_position()
-    def new_scroll(self):
+    def new_scroll(self) -> None:
+        self.write(self.scrolling)
         current_value = self.scroll_area.verticalScrollBar().value()
         max_value = self.scroll_area.verticalScrollBar().maximum()
-        #print('=', current_value, self.previous_value, max_value)
+        self.write('=', current_value, self.previous_value, max_value)
         if current_value == max_value:
             self.previous_value = max_value
     def update_scroll_position(self):
-        max_value = self.scroll_area.verticalScrollBar().maximum()
-        """
-        if (type(self.lines) == list and len(self.lines <= 3)):
-            self.scroll_area.verticalScrollBar().setValue(max_value)
-            self.previous_value = max_value
-            return
-        """
+        self.scrolling = True
         caption_height = self.caption_label.height()
         viewport_height = self.scroll_area.viewport().height()
-        #print('---',caption_height, viewport_height)
+        self.write('---',caption_height, viewport_height)
         # Check if the caption label height exceeds the viewport height
+        
         if caption_height > viewport_height:
+            self.write('   VIEW')
             # Get the current scroll bar value and the maximum value
             current_value = self.scroll_area.verticalScrollBar().value()
-            #print('---------', current_value, self.previous_value, max_value)
+            max_value = self.scroll_area.verticalScrollBar().maximum()
+            self.write('---------', current_value, self.previous_value, max_value)
             # If the scroll bar is already at the bottom, update the value to the maximum
             if current_value == max_value:
-                self.scroll_area.verticalScrollBar().setValue(max_value)
-                self.previous_value = max_value
+                self.write('   MAX')
+                QMetaObject.invokeMethod(self, "call_adjust_size", Qt.QueuedConnection)
+                QApplication.processEvents()  # Process all pending events, ensuring the layout is updated
+                self.previous_value = self.max_value
             else:
                 # Check if the scroll position has changed
-                if current_value == self.previous_value:
+                if current_value == self.previous_value or self.previous_value < 0:
+                    self.write('   SAME')
                     # Scroll to the bottom of the content
-                    self.scroll_area.verticalScrollBar().setValue(max_value)
-                    current_value = self.scroll_area.verticalScrollBar().value()
-                    # Get the previous scroll bar value
-                    self.previous_value = current_value
+                    QMetaObject.invokeMethod(self, "call_adjust_size", Qt.QueuedConnection)
+                    QApplication.processEvents()  # Process all pending events, ensuring the layout is updated
+                    
+                    self.previous_value = self.max_value
+        self.scrolling = False
     def run(self):
         sys.exit(self.app.exec_())
+    def write(self, *kwargs):
+        #print(*kwargs)
+        self.log.write_log(' '.join(map(str, kwargs)), self.log.test)
 
 def initialize():
     app = QApplication(sys.argv)

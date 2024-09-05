@@ -4,8 +4,21 @@ import torch
 import logging
 import psutil
 import time
+import sys
+import subprocess
+
+audiofile, modelname, langcode = '', 'base', None
+"""
+def on_error(exc_type, exc_value, tb):
+    global audiofile, modelname, langcode
+    import traceback
+    traceback.print_exception(exc_type, exc_value, tb)
+    print(audiofile, modelname, langcode, '\nrestarting')
+    transcribe_audio(audiofile, modelname, langcode)
 
 
+sys.excepthook = on_error
+"""
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 
@@ -28,6 +41,10 @@ def transcribe_audio(audio_file, model_name, language = None):
     Returns:
         The transcription result.
     """
+    global audiofile, modelname, langcode
+    audiofile = audio_file
+    modelname = model_name
+    langcode = language
     delay = 1
     model_names = model.model_names
     if model_name in model_names:
@@ -69,3 +86,10 @@ def transcribe_audio(audio_file, model_name, language = None):
     else:
         print(f"Model '{model_name}' not found in the available model names.")
     return None
+def process_create(file, model_name, language):
+    own_module = os.module
+    subprocess.Popen(own_module)
+if __name__ == "__main__":
+    path, file, model_name, language = sys.argv[0], sys.argv[1], sys.argv[2], sys.arv[3]
+    print(f"{path}: Transctribing {file} using model {model_name} and language {language}")
+    transcribe_audio(file, model_name, language)

@@ -1,6 +1,44 @@
 import subprocess
 from manim import *
 
+class SpotlightScene(Scene):
+    def construct(self):
+        axis(self, 3)
+        # Define the spotlight direction and position
+        spotlight_direction = np.array([0.5, 0.92, -0.4])
+        spotlight_position = np.array([0.0, 1.0, 0.5])
+        
+        # Create a light cone (represented as a triangle for simplicity)
+        cone_base = Circle(radius=2, color=WHITE, fill_opacity=0.5)
+        cone_tip = Dot3D(point=spotlight_position, color=YELLOW, radius=0.1)
+
+        # Create a visual representation of the light direction
+        light_direction_line = Arrow(
+            start=spotlight_position,
+            end=spotlight_position + spotlight_direction,
+            color=YELLOW,
+            buff=0
+        )
+
+        # Create a surface to represent the ground
+        ground = Square(side_length=4, fill_color=BLUE, fill_opacity=0.5).shift(DOWN)
+
+        # Add elements to the scene
+        self.add(ground)
+        self.add(cone_base)
+        self.add(cone_tip)
+        self.add(light_direction_line)
+
+        # Animate the spotlight effect
+        self.play(Create(cone_base), Create(cone_tip), Create(light_direction_line))
+        self.wait(1)
+
+        # Simulate the spotlight effect by changing the direction
+        new_direction = np.array([-0.5, 0.5, -0.4])
+        new_light_direction_line = light_direction_line.copy().set_end(spotlight_position + new_direction)
+
+        self.play(Transform(light_direction_line, new_light_direction_line))
+        self.wait(1)
 class LineAngle(Scene):
     def construct(self):
         axis(self)
@@ -199,15 +237,25 @@ class DotProductScene(Scene):
         # End scene
         self.play(FadeOut(vector_a), FadeOut(vector_b), FadeOut(label_a), FadeOut(label_b), FadeOut(dot_product_text), FadeOut(result_value), FadeOut(axes))
         
-def axis(anim):
-    axes = Axes(
-        x_range=(-10, 10),
-        y_range=(-10, 10),
-        axis_config={"color": BLUE},
-    )
-    anim.play(Create(axes))
-    return axes
+def axis(self, dimension=2, lim=10):
+    if dimension == 2:
+        axes = Axes(
+            x_range=(-lim, lim),
+            y_range=(-lim, lim),
+            axis_config={"color": BLUE},
+        )
+    elif dimension == 3:
+        axes = ThreeDAxes(
+            x_range=(-lim, lim),
+            y_range=(-lim, lim),
+            z_range=(-lim, lim),
+            axis_config={"color": BLUE},
+        )
+    else:
+        raise ValueError("Dimension must be 2 or 3.")
 
+    self.play(Create(axes))
+    return axes
 if __name__ == '__main__':
     anim = '' #input("Animation: ")
     if anim != '':

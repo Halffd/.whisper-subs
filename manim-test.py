@@ -1,6 +1,84 @@
 import subprocess
 from manim import *
 
+class VectorProjection(Scene):
+    def construct(self):
+        axis(self)
+        # Define vectors v and w
+        v = np.array([4, 1, 0])
+        w = np.array([2, -1, 0])
+        
+        # Create vector objects
+        vec_v = Arrow(ORIGIN, v, buff=0, color=YELLOW)
+        vec_w = Arrow(ORIGIN, w, buff=0, color=PINK)
+        
+        # Calculate the projection of v onto w
+        projection_length = np.dot(v, w) / np.linalg.norm(w)
+        proj_w = projection_length * w / np.linalg.norm(w)
+        vec_proj_w = Arrow(ORIGIN, proj_w, buff=0, color=GREEN)
+        
+        # Create labels
+        label_v = MathTex(r"\vec{v}", color=YELLOW).next_to(vec_v.get_end(), UP)
+        label_w = MathTex(r"\vec{w}", color=PINK).next_to(vec_w.get_end(), DOWN)
+        label_proj_w = MathTex(r"\text{Proj}_{\vec{w}} \vec{v}", color=GREEN).next_to(vec_proj_w.get_end(), DOWN)
+        
+        # Create the grid
+        grid = NumberPlane()
+        
+        # Display objects
+        self.play(Create(grid))
+        self.play(Create(vec_v), Write(label_v))
+        self.play(Create(vec_w), Write(label_w))
+        
+        # Show the projection
+        self.play(Create(vec_proj_w), Write(label_proj_w))
+        
+        # Show the length of the projection
+        length_of_proj = np.dot(v, w) / np.linalg.norm(w)**2
+        length_label = MathTex(f"Length = {round(length_of_proj, 2)}").to_edge(UP)
+        self.play(Write(length_label))
+        
+        self.wait(2)
+
+class AngleBetweenLines(Scene):
+    def construct(self):
+        # Definindo os vetores
+        axis(self)
+        v_r = np.array([-1, -1, 0])  # Vetor diretor da reta r
+        v_s = np.array([3, 6, 0])     # Vetor diretor da reta s
+
+        # Criando os vetores
+        vector_r = Arrow(ORIGIN, v_r, color=BLUE)
+        vector_s = Arrow(ORIGIN, v_s, color=RED)
+
+        # Adicionando os vetores à cena
+        self.add(vector_r, vector_s)
+
+        # Calculando o produto escalar
+        dot_product = np.dot(v_r, v_s)
+
+        # Calculando as normas
+        norm_r = np.linalg.norm(v_r)
+        norm_s = np.linalg.norm(v_s)
+
+        # Calculando o cosseno do ângulo
+        cos_theta = dot_product / (norm_r * norm_s)
+
+        # Calculando o ângulo em graus
+        theta = np.arccos(cos_theta) * (180 / np.pi)
+
+        # Exibindo o ângulo
+        angle_label = MathTex(f"\\theta \\approx {theta:.2f}^\\circ").next_to(vector_r, RIGHT)
+        self.add(angle_label)
+
+        # Adicionando o título
+        title = Text("Angle Between Lines").to_edge(UP)
+        self.add(title)
+
+        # Mostrando a cena
+        self.wait(2)
+
+# Para executar, você precisará usar o comando `manim -pql your_file.py AngleBetweenLines`
 class SpotlightScene(Scene):
     def construct(self):
         axis(self, 3)

@@ -87,7 +87,7 @@ def transcribe_audio(audio_file, model_name, language = None):
         print(f"Model '{model_name}' not found in the available model names.")
     return None
 def process_create(file, model_name, language):
-    own_module = os.module
+    own_module = '' #os.module
     subprocess.Popen(own_module)
 if __name__ == "__main__":
     path, file, model_name, language = sys.argv[0], sys.argv[1], sys.argv[2], sys.arv[3]

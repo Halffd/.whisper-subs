@@ -59,7 +59,7 @@ def download_audio(url, rec = False):
             'format': 'bestaudio/best',
             'quiet': True,
             'no_warnings': True,
-            'cookiesfrombrowser': ('chrome', 'default'),  # Replace with the actual path to your cookies file
+            'cookies': 'media/cookies.txt',  # Replace with the actual path to your cookies file
             'ignoreerrors': True
         }
 

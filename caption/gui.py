@@ -177,16 +177,18 @@ class CaptionerGUI(QMainWindow):
     def toBottom(self):
         max_value = self.scroll_area.verticalScrollBar().maximum()
         current_value = self.scroll_area.verticalScrollBar().value()
-        self.write('___', self.previous_value, current_value, max_value)
+        self.write('toBottom ', self.previous_value, current_value, max_value)
         self.scroll_area.verticalScrollBar().setValue(max_value)
         self.previous_value = max_value
     def toTop(self):
         """
         Scroll to the top of the text area.
         """
+        self.write("toTop")
         self.scroll_area.verticalScrollBar().setValue(0)
     def end(self):
         #print(self.speech)
+        self.write("End")
         self.log.close_log_file()
         if self.speech:
             self.speech.stop = True
@@ -234,6 +236,7 @@ class CaptionerGUI(QMainWindow):
             event.accept()
 
     def styling(self):
+        self.write("Style change ", self.fontSize, self.alpha)
         self.scroll_area.setStyleSheet(f"font-size: {self.fontSize}px; color: white; background-color: rgba(0, 0, 0, {self.alpha});")
         self.caption_label.setStyleSheet(f"background-color: rgba(0, 0, 0, {self.alpha});")
 
@@ -295,35 +298,28 @@ class CaptionerGUI(QMainWindow):
         self.log.write_log(f'{text}')
         self.update_scroll_position()
     def new_scroll(self) -> None:
-        self.write(self.scrolling)
         current_value = self.scroll_area.verticalScrollBar().value()
         max_value = self.scroll_area.verticalScrollBar().maximum()
-        self.write('=', current_value, self.previous_value, max_value)
         if current_value == max_value:
             self.previous_value = max_value
     def update_scroll_position(self):
         self.scrolling = True
         caption_height = self.caption_label.height()
         viewport_height = self.scroll_area.viewport().height()
-        self.write('---',caption_height, viewport_height)
         # Check if the caption label height exceeds the viewport height
         
         if caption_height > viewport_height:
-            self.write('   VIEW')
             # Get the current scroll bar value and the maximum value
             current_value = self.scroll_area.verticalScrollBar().value()
             max_value = self.scroll_area.verticalScrollBar().maximum()
-            self.write('---------', current_value, self.previous_value, max_value)
             # If the scroll bar is already at the bottom, update the value to the maximum
             if current_value == max_value:
-                self.write('   MAX')
                 QMetaObject.invokeMethod(self, "call_adjust_size", Qt.QueuedConnection)
                 QApplication.processEvents()  # Process all pending events, ensuring the layout is updated
                 self.previous_value = self.max_value
             else:
                 # Check if the scroll position has changed
                 if current_value == self.previous_value or self.previous_value < 0:
-                    self.write('   SAME')
                     # Scroll to the bottom of the content
                     QMetaObject.invokeMethod(self, "call_adjust_size", Qt.QueuedConnection)
                     QApplication.processEvents()  # Process all pending events, ensuring the layout is updated
@@ -334,7 +330,8 @@ class CaptionerGUI(QMainWindow):
         sys.exit(self.app.exec_())
     def write(self, *kwargs):
         #print(*kwargs)
-        self.log.write_log(' '.join(map(str, kwargs)), self.log.test)
+        if self.log is not None and self.log.test is not None:
+            self.log.write_log(' '.join(map(str, kwargs)), self.log.test)
 
 def initialize():
     app = QApplication(sys.argv)

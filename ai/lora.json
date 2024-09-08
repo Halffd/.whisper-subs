@@ -1,0 +1,7 @@
+{
+    "negative_prompt": "realistic",
+    "prompt": "megumin",
+    "learning_rate": 0.0005,
+    "epochs": 15,
+    "enable_prompt_input": false
+}

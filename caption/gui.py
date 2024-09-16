@@ -5,6 +5,7 @@ from PyQt5.QtGui import QPainter, QColor, QCursor, QKeySequence
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import textwrap
+
 import string
 import os
 class CaptionerGUI(QMainWindow):
@@ -27,6 +28,7 @@ class CaptionerGUI(QMainWindow):
         self.top = False
         self.scrolling = False
         self.previous_value = -1
+        self.max_value = -1
         self.language = 'en'
         self.speech = None
         self.log = None

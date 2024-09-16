@@ -55,10 +55,12 @@ class Speech:
             spinner=True,
             model=self.args['model_name'],
             language=self.args['lang'],
+            compute_type="float32",
             #enable_realtime_transcription=True,
             realtime_model_type=self.args['realtime_model'],
             #level=logging.DEBUG,
-            #webrtc_sensitivity=1, if self.args['lang'] is None or 
+            #debug_mode=True,
+            webrtc_sensitivity=0, #if self.args['lang'] is None or 
             min_length_of_recording=self.get_min_length_of_recording(), #0.2 if 'en' in self.args['lang'] else 3 if 'base' in self.args['model_name'] or 'tiny' in self.args['model_name'] else 10,
             silero_sensitivity=0.1,
         ) as recorder:
@@ -71,8 +73,6 @@ class Speech:
     def start(self):
         control = input.Input(self.args)
         logger = log.Log(self.args)
-        
-        logger.create_log_file()
         
         transcription_thread = threading.Thread(target=self.main_program)
         transcription_thread.start()

@@ -30,7 +30,7 @@ def convert_mkv_to_mp3(input_file, output_file):
         output_stream = ffmpeg.output(audio_stream, output_file, vcodec='libmp3lame')
 
         # Run the ffmpeg conversion
-        ffmpeg.run(output_stream)
+        ffmpeg.run(output_stream, overwrite_output=True)
         print(f"Conversion successful: {input_file} -> {output_file}")
     except Exception as e:
         print(f"Error converting {input_file}: {e}")
@@ -51,7 +51,7 @@ def format_timestamp(timestamp):
     return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 def process(file):
     global model_name
-    segments = transcribe.transcribe_audio(file, model_name)
+    segments = transcribe.process_create(file, model_name)
     srt_file = os.path.splitext(file)[0] + "." + model_name + ".srt"
     with open(srt_file, "w", encoding="utf-8") as f:
         for i, segment in enumerate(segments, start=1):

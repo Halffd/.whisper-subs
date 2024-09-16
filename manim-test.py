@@ -1,6 +1,180 @@
 import subprocess
 from manim import *
+import sys
 
+class DotCrossProduct(Scene):
+    def construct(self):
+        # Define vectors
+        axis(self)
+        a = np.array([2, 3, 0])
+        b = np.array([-1, 1, 0])
+        
+        # Create vector objects
+        vector_a = Arrow(ORIGIN, a, buff=0, color=BLUE)
+        vector_b = Arrow(ORIGIN, b, buff=0, color=GREEN)
+        
+        # Create labels
+        label_a = Tex(r"$\mathbf{a} = [2, 3]$", color=BLUE).next_to(vector_a, UP)
+        label_b = Tex(r"$\mathbf{b} = [-1, 1]$", color=GREEN).next_to(vector_b, UP)
+
+        # Calculate dot product and cross product
+        dot_product = np.dot(a, b)
+        cross_product = np.cross(a, b)
+
+        # Display vectors
+        self.play(Create(vector_a), Write(label_a))
+        self.play(Create(vector_b), Write(label_b))
+        self.wait(1)
+
+        # Display dot product result
+        dot_result = Tex(r"Dot Product: $\mathbf{a} \cdot \mathbf{b} = $" + str(dot_product)).to_edge(UP)
+        self.play(Write(dot_result))
+        self.wait(1)
+
+        # Display cross product result
+        cross_result = Tex(r"Cross Product: $\mathbf{a} \times \mathbf{b} = $" + str(cross_product)).to_edge(DOWN)
+        self.play(Write(cross_result))
+        self.wait(1)
+
+        # Show area of parallelogram for cross product
+        parallelogram = Polygon(ORIGIN, a, a + b, b, color=YELLOW, fill_opacity=0.3)
+        self.play(Create(parallelogram))
+        self.wait(2)
+
+        # End scene
+        self.play(FadeOut(vector_a), FadeOut(vector_b), FadeOut(parallelogram), FadeOut(dot_result), FadeOut(cross_result))
+        self.wait(1)
+
+# To run this code, save it to a .py file and use the command:
+# manim -pql your_script.py DotCrossProduct
+class ThreeAxisCrossProduct(Scene):
+    def construct(self):
+        # Create 3D axes
+        axes = ThreeDAxes()
+
+        # Define unit vectors along the axes
+        x_vector = np.array([1, 2, -1])  # x-axis
+        y_vector = np.array([-2, 1, 0])  # y-axis
+        z_vector = np.array([3, -1, 1])  # z-axis
+
+        # Create arrows for unit vectors
+        arrow_x = Arrow3D(ORIGIN, x_vector, color=BLUE)
+        arrow_y = Arrow3D(ORIGIN, y_vector, color=RED)
+        arrow_z = Arrow3D(ORIGIN, z_vector, color=GREEN)
+
+        # Calculate cross products
+        cross_xy = np.cross(x_vector, y_vector)  # Should point in the z direction
+        cross_yz = np.cross(y_vector, z_vector)  # Should point in the x direction
+        cross_zx = np.cross(z_vector, x_vector)  # Should point in the y direction
+
+        # Create arrows for cross products
+        arrow_cross_xy = Arrow3D(ORIGIN, cross_xy, color=YELLOW)
+        arrow_cross_yz = Arrow3D(ORIGIN, cross_yz, color=PURPLE)
+        arrow_cross_zx = Arrow3D(ORIGIN, cross_zx, color=ORANGE)
+
+        # Add the axes and arrows to the scene
+        self.play(Create(axes))
+        self.play(Create(arrow_x), Create(arrow_y), Create(arrow_z))
+        self.wait(1)
+        
+        # Show cross products
+        self.play(Create(arrow_cross_xy), Create(arrow_cross_yz), Create(arrow_cross_zx))
+        self.wait(2)
+
+        # Add labels for the vectors
+        label_x = MathTex(r"\mathbf{i} = [1, 0, 0]").next_to(arrow_x, UP)
+        label_y = MathTex(r"\mathbf{j} = [0, 1, 0]").next_to(arrow_y, LEFT)
+        label_z = MathTex(r"\mathbf{k} = [0, 0, 1]").next_to(arrow_z, BACK)
+
+        label_cross_xy = MathTex(r"\mathbf{i} \times \mathbf{j} = \mathbf{k}").next_to(arrow_cross_xy, UP)
+        label_cross_yz = MathTex(r"\mathbf{j} \times \mathbf{k} = \mathbf{i}").next_to(arrow_cross_yz, LEFT)
+        label_cross_zx = MathTex(r"\mathbf{k} \times \mathbf{i} = \mathbf{j}").next_to(arrow_cross_zx, BACK)
+
+        self.play(Write(label_x), Write(label_y), Write(label_z))
+        self.wait(1)
+        self.play(Write(label_cross_xy), Write(label_cross_yz), Write(label_cross_zx))
+        self.wait(2)
+
+        # Clear the scene
+        self.clear()
+class CrossProductScene(Scene):
+    def construct(self):
+        axis(self, 3)
+        # Define the vectors
+        a = np.array([-1, 2, 1])
+        b = np.array([1, -2, -1])
+        
+        # Calculate the cross product
+        cross_product = np.cross(a, b)
+
+        # Create arrows for vectors a, b, and their cross product
+        vector_a = Arrow(ORIGIN, a, color=BLUE, buff=0)
+        vector_b = Arrow(ORIGIN, b, color=RED, buff=0)
+        vector_cross = Arrow(ORIGIN, cross_product, color=GREEN, buff=0)
+
+        # Add the arrows to the scene
+        self.play(Create(vector_a), Create(vector_b))
+        self.wait(1)
+        self.play(Create(vector_cross))
+        self.wait(2)
+
+        # Add labels for the vectors
+        label_a = MathTex(r"\mathbf{a} = [-4, 2, 1]").next_to(vector_a, UP)
+        label_b = MathTex(r"\mathbf{b} = [2, 3, -4]").next_to(vector_b, UP)
+        label_cross = MathTex(r"\mathbf{a} \times \mathbf{b}").next_to(vector_cross, UP)
+
+        self.play(Write(label_a), Write(label_b))
+        self.wait(1)
+        self.play(Write(label_cross))
+        self.wait(2)
+
+        # Highlight the cross product vector
+        self.play(vector_cross.animate.set_color(YELLOW))
+        self.wait(2)
+
+        # Clear the scene
+        self.clear()
+class VectorProjection2(Scene):
+    def construct(self):
+        axis(self)
+        # Define the vectors
+        p = np.array([4, 2, 0])
+        q = np.array([-1, -3, 0])
+        
+        # Create the vectors using Arrow
+        vector_p = Arrow(ORIGIN, p, color=BLUE, buff=0)
+        vector_q = Arrow(ORIGIN, q, color=RED, buff=0)
+        
+        # Calculate the projection of q onto p
+        dot_product = np.dot(p, q)
+        p_magnitude_squared = np.dot(p, p)
+        proj_q_on_p = (dot_product / p_magnitude_squared) * p
+
+        # Create the projection vector
+        projection_vector = Arrow(ORIGIN, proj_q_on_p, color=GREEN, buff=0)
+
+        # Add the vectors to the scene
+        self.play(Create(vector_p), Create(vector_q))
+        self.wait(1)
+        self.play(Create(projection_vector))
+        self.wait(2)
+
+        # Adding labels
+        label_p = MathTex(r"\mathbf{p} = [4, 2]").next_to(vector_p, UP)
+        label_q = MathTex(r"\mathbf{q} = [-1, 3]").next_to(vector_q, UP)
+        label_proj = MathTex(r"\text{proj}_{\mathbf{p}} \mathbf{q}").next_to(projection_vector, UP)
+
+        self.play(Write(label_p), Write(label_q))
+        self.wait(1)
+        self.play(Write(label_proj))
+        self.wait(2)
+
+        # Highlight the projection
+        self.play(projection_vector.animate.set_color(YELLOW))
+        self.wait(2)
+
+        # End scene
+        self.clear()
 class VectorProjection(Scene):
     def construct(self):
         axis(self)
@@ -335,7 +509,7 @@ def axis(self, dimension=2, lim=10):
     self.play(Create(axes))
     return axes
 if __name__ == '__main__':
-    anim = '' #input("Animation: ")
+    anim = '' if len(sys.argv) == 1 else sys.argv[1] #input("Animation: ")
     if anim != '':
         anim = ' ' + anim
     subprocess.call(f"manim -pql manim-test.py{anim}")

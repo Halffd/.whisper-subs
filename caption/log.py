@@ -20,7 +20,43 @@ class Log:
         self.test = None
         self.current_date = None  # Track the current date
         self.encoding = 'utf-8'  # Specify the encoding
+        date = datetime.now().strftime("%d-%m-%Y")
 
+        # Assuming self.path, self.log_dir, and self.filename are already defined
+        matching_files = [
+            item for item in os.listdir(os.path.join(self.path, self.log_dir))
+            if item.startswith(date)
+        ]
+        # Define the lambda function to find unique parts in file paths
+        
+        find_unique_parts = lambda path1, path2: (
+            (set(part for part in os.path.splitext(os.path.basename(path1))[0].replace('-', '_').replace('+','_').split('_') if part),
+            set(part for part in os.path.splitext(os.path.basename(path2))[0].replace('-', '_').replace('+','_').split('_') if part)
+            )
+        )
+        if len(matching_files) > 0:
+            for file in matching_files:
+                file_path = os.path.join(self.path, self.log_dir, self.filename)
+                match_path = os.path.join(self.path, self.log_dir, file)
+                if os.path.exists(match_path):        # Process the file since it doesn't exist
+                    if file_path != match_path:
+                        # Get unique parts
+                        unique_parts = find_unique_parts(file_path, match_path)
+                        # Calculate unique parts
+                        unique_to_file = unique_parts[0] - unique_parts[1]
+                        parts = os.path.splitext(os.path.basename(match_path))
+                        if len(unique_to_file) < 1 or unique_to_file == set():
+                            self.filename = parts[0].split('_')[1]
+                            continue
+                        #unique_to_match = unique_parts[1] - unique_parts[0]
+                        self.filename = parts[0] + '-' + '+'.join(unique_to_file) + parts[1]
+                        combined = os.path.join(self.path, self.log_dir, self.filename)
+                        os.rename(match_path, combined)
+                        time = datetime.now().strftime("%H:%M:%S")
+                        self.file = open(combined, 'a', encoding=self.encoding)
+                        self.file.write(f'\n{args['model_name']} + {args['lang']}\n{date} {time} :  {args}\n')
+        if not self.file:
+            self.create_log_file()
     def set_path(self, path):
         """Sets the path for log files."""
         self.path = path

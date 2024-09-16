@@ -8,3 +8,4 @@ media
 __pycache__
 caption/__pycache__
 caption/Logs
+segments.json

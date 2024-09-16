@@ -1,10 +1,21 @@
 import sys
 import model
 default = 'base'
+device = 'cuda'
+if 'cpu' in sys.argv:
+    device = 'cpu'
 model_name = model.getName(sys.argv, default)
- 
-import os
+
+
 import pyperclip
+url = pyperclip.paste()
+print(url)
+urls = url.replace('\r','').split('\n')
+print(urls)
+print("Video count: " + str(len(urls)))
+
+
+import os
 import subprocess
 import yt_dlp
 import re
@@ -19,6 +30,10 @@ log_dir = "Documents"
 oldest = '--oldest' in sys.argv
 delay = 30
 start_delay = delay
+
+progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.txt')
+history_file = os.path.join(os.path.expanduser("~"), subs_dir, 'history.txt')
+
 
 def format_timestamp(timestamp):
     """
@@ -65,6 +80,8 @@ def download_audio(url, rec = False):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if info['subtitles'] != {}:
+                return None
             # Get the channel name
             channel_name = info.get('channel', '')
             timestamp = info.get('timestamp', '')
@@ -112,8 +129,8 @@ def get_youtube_videos(url, rec = False):
             'outtmpl': '%(title)s.%(ext)s',
             'quiet': True,
             'no_warnings': True,
-            'ignoreerrors': True,
-            'cookiesfrombrowser': ('chrome', 'default'),  # Replace with the actual path to your cookies file
+            'ignoreerrors': True,            
+            'cookies': 'media/cookies.txt'  # Replace with the actual path to your cookies file
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -193,96 +210,99 @@ def create_redirect_html_file(filename, url):
     </body>
     </html>
     """)
+def generate(url, i = 0):
+    global history_file, progress_file
+    url = remove_time_param(url)
+    id = get_video_id(url)
+    try:
+        history = open(history_file, "r").readlines()
+        for h in history:
+            sep = h.replace('\n','').split(' ')
+            if sep[0] == id and sep[1] == model_name:
+                continue
+    except Exception as e:
+        print(e)    
+    # Download the audio
+    try:
+        audio_file = download_audio(url)
+        if audio_file is None:
+            raise FileNotFoundError("No audio file, subtitles may be available")
+        # Transcribe the audio
+        segments = transcribe.process_create(audio_file, model_name, 'none', device)
+        #transcribe_audio(audio_file, model_name)
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+    # Create the SRT file
+    srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
+    os.makedirs(srt_dir, exist_ok=True)
+    # Create a folder for the channel name
+    folder_name = os.path.join(srt_dir, channel_name)
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name)    
+    name = os.path.splitext(os.path.basename(audio_file))[0]
+    srt_file = os.path.join(folder_name, name + ".srt")
+    with open(srt_file, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(segments, start=1):
+            start_time = segment.start
+            end_time = segment.end
+            text = segment.text.strip()
+            f.write(f"{i}\n")
+            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
+            f.write(f"{text}\n\n")
+    print(f"SRT file saved: {srt_file}")
+
+    # Delete the audio file
+    os.remove(audio_file)
+    
+    # Get the path to the subtitle file
+    sub_file = srt_file.replace("\\", "/")
+
+    # Open the video and subtitle file with MPV
+    mpv = ["mpv", url, "--pause", f'--sub-file="{sub_file}"']
+
+    current_time = datetime.datetime.now()
+    current_hour = current_time.hour
+
+    #if 12 <= current_hour < 18:
+        #subprocess.Popen(mpv)
+    mpv = ' '.join(mpv)
+    print(mpv)
+    pyperclip.copy(mpv)
+    create_redirect_html_file(os.path.join(folder_name, name + ".htm"), url)
+    bat = os.path.join(folder_name, name + ".bat")
+    with open(file=bat, mode='w', encoding="utf-8") as f:
+        try:
+            f.write(mpv)
+        except UnicodeEncodeError:
+            print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
+            f.write(mpv.encode('ascii', 'ignore').decode('ascii'))
+    with open(file=history_file, mode='a', encoding="utf-8") as f:
+        try:
+            f.write(id + ' ' + model_name + '\n')
+        except UnicodeEncodeError:
+            print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
+            f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
+    with open(file=progress_file, mode='a', encoding="utf-8") as f:
+        try:
+            f.write(f'{i}: {name} {url}\n')
+        except UnicodeEncodeError:
+            print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
+            f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
 if __name__ == "__main__":
     # Get the YouTube URL from the clipboard
-    url = pyperclip.paste()
-    print(url)
-    if '@' in url:
-        progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{url.split('/')[-1][1:]}.txt')
-        urls = get_youtube_videos(url)
-    else:
-        urls = url.replace('\r','').split('\n')
-        progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.txt')
-    print(urls)
-    print(len(urls))
-    history_file = os.path.join(os.path.expanduser("~"), subs_dir, 'history.txt')
     for i, url in enumerate(urls):
         try:
-            url = remove_time_param(url)
-            id = get_video_id(url)
-            try:
-                history = open(history_file, "r").readlines()
-                for h in history:
-                    sep = h.split(' ')
-                    if sep[0] == id and sep[1] == model_name:
-                        continue
-            except Exception as e:
-                print(e)    
-            print(f"Downloading {i+1}/{len(urls)}: {url}")
-            # Download the audio
-            try:
-                audio_file = download_audio(url)
-
-                # Transcribe the audio
-                segments = transcribe.transcribe_audio(audio_file, model_name)
-            except Exception as e:
-                print(f"Error: {e}")
+            if not 'youtu' in url:
                 continue
-            # Create the SRT file
-            srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
-            os.makedirs(srt_dir, exist_ok=True)
-            # Create a folder for the channel name
-            folder_name = os.path.join(srt_dir, channel_name)
-            if not os.path.exists(folder_name):
-                os.makedirs(folder_name)    
-            name = os.path.splitext(os.path.basename(audio_file))[0]
-            srt_file = os.path.join(folder_name, name + ".srt")
-            with open(srt_file, "w", encoding="utf-8") as f:
-                for i, segment in enumerate(segments, start=1):
-                    start_time = segment.start
-                    end_time = segment.end
-                    text = segment.text.strip()
-                    f.write(f"{i}\n")
-                    f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-                    f.write(f"{text}\n\n")
-            print(f"SRT file saved: {srt_file}")
-
-            # Delete the audio file
-            os.remove(audio_file)
-            
-            # Get the path to the subtitle file
-            sub_file = srt_file.replace("\\", "/")
-
-            # Open the video and subtitle file with MPV
-            mpv = ["mpv", url, "--pause", f'--sub-file="{sub_file}"']
-
-            current_time = datetime.datetime.now()
-            current_hour = current_time.hour
-
-            #if 12 <= current_hour < 18:
-                #subprocess.Popen(mpv)
-            mpv = ' '.join(mpv)
-            print(mpv)
-            pyperclip.copy(mpv)
-            create_redirect_html_file(os.path.join(folder_name, name + ".htm"), url)
-            bat = os.path.join(folder_name, name + ".bat")
-            with open(file=bat, mode='w', encoding="utf-8") as f:
-                try:
-                    f.write(mpv)
-                except UnicodeEncodeError:
-                    print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
-                    f.write(mpv.encode('ascii', 'ignore').decode('ascii'))
-            with open(file=history_file, mode='a', encoding="utf-8") as f:
-                try:
-                    f.write(id + ' ' + model_name + '\n')
-                except UnicodeEncodeError:
-                    print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
-                    f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
-            with open(file=progress_file, mode='a', encoding="utf-8") as f:
-                try:
-                    f.write(f'{i}: {name} {url}\n')
-                except UnicodeEncodeError:
-                    print(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
-                    f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
+            if '@' in url:
+                progress_file = os.path.join(os.path.expanduser("~"), subs_dir, f'progress-{url.split('/')[-1][1:]}.txt')
+                urls2 = get_youtube_videos(url)
+                for j, u in enumerate(urls):
+                    print(f"Downloading {i+1}/{j+1}/{len(urls2)}/{len(urls)}: {u}")
+                    generate(u)
+            else:
+                print(f"Downloading {i+1}/{len(urls)}: {url}")
+                generate(url)            
         except Exception as e:
             print(f"Error : {e}")                    

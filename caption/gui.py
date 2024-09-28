@@ -1,5 +1,5 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QWidget, QStyleOption, QStyle, QScrollArea, QDesktopWidget, QShortcut
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QLabel, QWidget, QStyleOption, QStyle, QScrollArea, QDesktopWidget, QShortcut, QSizePolicy
 from PyQt5.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal, pyqtSlot, QEvent, QMetaObject
 from PyQt5.QtGui import QPainter, QColor, QCursor, QKeySequence
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -25,6 +25,7 @@ class CaptionerGUI(QMainWindow):
         self.monitor = 2
         self.windowHeight = 300 if self.monitor == 1 else 210
         self.windowWidthOffset = 300
+        self.lastGeometry = QRect(0, 0, 0, 0)
         self.top = False
         self.scrolling = False
         self.previous_value = -1
@@ -40,10 +41,13 @@ class CaptionerGUI(QMainWindow):
 
         central_widget = QWidget()
         layout = QVBoxLayout(central_widget)
-
+        layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
+        layout.setSpacing(0)  # Set spacing to zero
+        
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.caption_label = QLabel("Caption goes here")
         self.caption_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -94,20 +98,59 @@ class CaptionerGUI(QMainWindow):
         move_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
         move_shortcut.activated.connect(self.move_monitor)
         
-        fullscreen_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), self)
+        
+        # Setup fullscreen shortcut
+        fullscreen_shortcut = QShortcut(QKeySequence("Return"), self)
         fullscreen_shortcut.activated.connect(self.fullscreen)
+        fullwidth_shortcut = QShortcut(QKeySequence(Qt.Key_W), self)
+        fullwidth_shortcut.activated.connect(self.fullwidth)
+        fullheight_shortcut = QShortcut(QKeySequence(Qt.Key_H), self)
+        fullheight_shortcut.activated.connect(self.fullheight)
         
         self.scroll_area.verticalScrollBar().setVisible(False)
         self.previous_value = self.scroll_area.verticalScrollBar().value()
         self.scroll_area.verticalScrollBar().valueChanged.connect(self.new_scroll)
         QApplication.instance().installEventFilter(self)
     def fullscreen(self):
-        pos = self.pos()
-        if pos.x() < 0:
-            self.monitor = 2
+        # Get the current screen geometry
+        desktop = QDesktopWidget()
+        screen_geometry = desktop.screenGeometry(self.monitor - 1)
+        if self.lastGeometry.width() <= 0:
+            self.lastGeometry = self.geometry()
+            # Set the window to cover the entire screen
+            self.setGeometry(screen_geometry)
+            self.showFullScreen()
         else:
-            self.monitor = 1
-        self.setup_geometry(True)
+            self.setGeometry(self.lastGeometry)
+            self.lastGeometry = QRect(0, 0, 0, 0)
+        self.write(f"Set to fullscreen with geometry: {screen_geometry}")
+    def fullwidth(self):
+        # Get the current screen geometry
+        desktop = QDesktopWidget()
+        screen_geometry = desktop.screenGeometry(self.monitor - 1)
+        if self.lastGeometry.width() <= 0:
+            self.lastGeometry = self.geometry()
+            # Set the window to cover the entire screen
+            self.setGeometry(screen_geometry.left(), self.y(), screen_geometry.width(), self.height())
+        else:
+            self.setGeometry(self.lastGeometry)
+            self.lastGeometry = QRect(0, 0, 0, 0)
+        
+        # Set the window to full width and maintain its current height
+        self.write(f"Set to full width: {screen_geometry.width()} at position {self.y()}")
+
+    def fullheight(self):
+        # Get the current screen geometry
+        desktop = QDesktopWidget()
+        screen_geometry = desktop.screenGeometry(self.monitor - 1)
+        if self.lastGeometry.width() <= 0:
+            self.lastGeometry = self.geometry()       
+            # Set the window to full height and maintain its current width
+            self.setGeometry(self.x(), screen_geometry.top(), self.width(), screen_geometry.height())
+        else:
+            self.setGeometry(self.lastGeometry)
+            self.lastGeometry = QRect(0, 0, 0, 0)
+        self.write(f"Set to full height: {screen_geometry.height()} at position {screen_geometry.top()}")
     def setup_geometry(self, fullscreen = False):
         desktop = QDesktopWidget()
         num_screens = desktop.screenCount()
@@ -136,6 +179,7 @@ class CaptionerGUI(QMainWindow):
             self.monitor = 1
         else:
             self.monitor = 2
+        self.setup_geometry()
         self.setup_geometry()
     def toggleTop(self):
         self.top = not self.top

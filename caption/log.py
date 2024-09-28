@@ -4,7 +4,7 @@ from datetime import date, datetime
 class Log:
     """A class for logging messages to a file with date management."""
 
-    def __init__(self, args):
+    def __init__(self, args, path = '', log_dir = 'Logs', filename = '', test = 'test', unique = True):
         """
         Initializes the Log object.
         
@@ -12,10 +12,10 @@ class Log:
             args (dict): Dictionary containing logging parameters.
         """
         self.args = args
-        self.path = os.path.join(args['path'], 'caption')
-        self.log_dir = 'Logs'
-        self.filename = f'speech{'-' + args["lang"] + '-' if args['lang'] else "-"}{args["model_name"]}'
-        self.test_name = 'test'
+        self.path = path if path != '' else os.path.join(args['path'], 'caption')
+        self.log_dir = log_dir
+        self.filename = filename if filename != '' else f'speech{'-' + args["lang"] + '-' if args['lang'] else "-"}{args["model_name"]}'
+        self.test_name = test
         self.file = None
         self.test = None
         self.current_date = None  # Track the current date
@@ -30,11 +30,11 @@ class Log:
         # Define the lambda function to find unique parts in file paths
         
         find_unique_parts = lambda path1, path2: (
-            (set(part for part in os.path.splitext(os.path.basename(path1))[0].replace('-', '_').replace('+','_').split('_') if part),
-            set(part for part in os.path.splitext(os.path.basename(path2))[0].replace('-', '_').replace('+','_').split('_') if part)
+            (set(part for part in os.path.splitext(os.path.basename(path1))[0].replace('-', '_').replace('+','_').replace('.', '_').split('_') if part),
+            set(part for part in os.path.splitext(os.path.basename(path2))[0].replace('-', '_').replace('+','_').replace('.', '_').split('_') if part)
             )
         )
-        if len(matching_files) > 0:
+        if len(matching_files) > 0 and unique:
             for file in matching_files:
                 file_path = os.path.join(self.path, self.log_dir, self.filename)
                 match_path = os.path.join(self.path, self.log_dir, file)

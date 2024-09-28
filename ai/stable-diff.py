@@ -1,28 +1,46 @@
-import torch
 from diffusers import FluxPipeline
-import os
+import torch
+import logging
 
-# Set the desired directory for Hugging Face models
-os.environ["HF_HOME"] = "D:/HuggingFace"
-os.environ["TRANSFORMERS_CACHE"] = "D:/HuggingFace"
+# Enable logging
+logging.basicConfig(level=logging.DEBUG)
 
-# Load the pipeline with mixed precision
-pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.float16)
+try:
+    # Load the pipeline
+    pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.float32)
+    pipe.enable_model_cpu_offload()
 
-# Enable model CPU offload to save VRAM
-pipe.enable_model_cpu_offload()
+    # Define the prompt
+    prompt = "Megumin"
 
-# Define the prompt and optimized parameters
-prompt = "Megumin"
-image = pipe(
-    prompt,
-    height=256,  # Reduced height
-    width=256,   # Reduced width
-    guidance_scale=1.0,  # Lower guidance scale
-    num_inference_steps=1,  # Reduced steps
-    max_sequence_length=256,  # Lower max sequence length
-    generator=torch.Generator("cuda").manual_seed(0)
-).images[0]
+    # Generate the image
+    out = pipe(
+        prompt=prompt,
+        guidance_scale=0.0,
+        height=320,
+        width=640,
+        num_inference_steps=2,
+        max_sequence_length=16,
+    ).images[0]
 
-# Save the generated image
-image.save("flux-dev-optimized.png")
+    # Save the output image
+    out.save("image.png")
+    print("Image saved as image.png")
+
+except Exception as e:
+    logging.error(f"An error occurred: {e}")
+"""
+# Load model
+pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16)
+pipe.enable_sequential_cpu_offload()
+#pipe = DiffusionPipeline.from_single_file("black-forest-labs/FLUX.1-schnell", use_safetensors=True, torch_dtype=torch.float8_e4m3fn, token=hf_token)
+#pipe.save_pretrained("FLUX1-schnell", safe_serialization=True, use_safetensors=True)
+
+# Generate output
+input_text = "Yunyun"
+output = pipe(input_text, num_return_sequences=1, max_length=50, temperature=0.7)
+
+# Display the output
+for i, sample in enumerate(output):
+    print(f"Output {i + 1}: {sample['generated_text']}")
+    """

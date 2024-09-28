@@ -66,6 +66,20 @@ def write(text, mpv = 'err'):
         except Exception as e:
             print(e)
             f.write(e + '\n')
+def format_timestamp(timestamp):
+    """
+    Formats a timestamp in seconds to the HH:MM:SS.xxx format.
+
+    Args:
+        timestamp (float): The timestamp in seconds.
+
+    Returns:
+        The formatted timestamp.
+    """
+    hours = int(timestamp // 3600)
+    minutes = int(timestamp % 3600 // 60)
+    seconds = timestamp % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 def clean_filename(filename):
     # Remove leading/trailing spaces
     filename = filename.strip()

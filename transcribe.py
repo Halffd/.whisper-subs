@@ -97,71 +97,23 @@ def transcribe_audio(audio_file, model_name, language = None, device = 'cuda', c
         print(f"Trying model {model_name} on {device}", file=sys.stderr)
         whisper_model = faster_whisper.WhisperModel(model_name, device=device, compute_type=compute)
         if language is not None:
-            segments, info = whisper_model.transcribe(audio_file, language=language, vad_filter=True,
-                                                      vad_parameters=dict(min_silence_duration_ms=500,
-                                                                          max_speech_duration_s=5))
+            segments, info = whisper_model.transcribe(audio_file,
+                                            language=language, 
+                                            vad_filter=True,
+                                            vad_parameters=dict(min_silence_duration_ms=500,
+                                                                max_speech_duration_s=5))
+            return segments
         else:
-            segments, info = whisper_model.transcribe(audio_file, vad_filter=True,
-                                                      vad_parameters=dict(min_silence_duration_ms=500,
-                                                                          max_speech_duration_s=5))
-        for segment in segments:
-            yield segment
+            segments, info = whisper_model.transcribe(audio_file,
+                                            vad_filter=True,
+                                            vad_parameters=dict(min_silence_duration_ms=500,
+                                                                max_speech_duration_s=5))
+            return segments
     except RuntimeError as e:
         print(e, file=sys.stderr)   
     except Exception as e:
         print(e, file=sys.stderr)
     return None
-def format_timestamp(timestamp):
-    """
-    Formats a timestamp in seconds to the HH:MM:SS.xxx format.
-
-    Args:
-        timestamp (float): The timestamp in seconds.
-
-    Returns:
-        The formatted timestamp.
-    """
-    hours = int(timestamp // 3600)
-    minutes = int(timestamp % 3600 // 60)
-    seconds = timestamp % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
-def save_srt_file(audio_file, model_name, language=None, device='cuda', compute='int8_float32', subs_dir="subtitles"):
-    """
-    Transcribe audio in real-time and save the SRT file incrementally.
-
-    Args:
-        audio_file (str): Path to the audio file.
-        model_name (str): The Whisper model name to use.
-        language (str, optional): Language code. Defaults to None.
-        device (str, optional): Device to run the model on. Defaults to 'cuda'.
-        compute (str, optional): Compute type. Defaults to 'int8_float32'.
-        subs_dir (str, optional): Directory to save the SRT file. Defaults to "subtitles".
-    """
-    # Create the SRT file in the appropriate directory
-    srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
-    os.makedirs(srt_dir, exist_ok=True)
-    
-    # Create folder based on the audio file's name
-    name = os.path.splitext(os.path.basename(audio_file))[0]
-    srt_file = os.path.join(srt_dir, name + "-unfinished.srt")
-    
-    with open(srt_file, "w", encoding="utf-8") as f:
-        # Start transcribing and writing each segment to the SRT file
-        for i, segment in enumerate(transcribe_audio(audio_file, model_name, language, device, compute), start=1):
-            start_time = segment.start
-            end_time = segment.end
-            text = segment.text.strip()
-            
-            # Write the segment to the SRT file
-            f.write(f"{i}\n")
-            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-            f.write(f"{text}\n\n")
-            
-            print(f"Segment {i} saved to {srt_file}: [{start_time} - {end_time}] {text}")
-    new = os.path.join(srt_dir, name + ".srt")
-    os.rename(srt_file, new)
-    print(f"SRT file completed: {srt_file}")
-
 def process_create(file, model_name, language = 'none', device = 'cuda', compute = 'int8_float32', write = print):
     """Creates a new process to retry the transcription."""
     

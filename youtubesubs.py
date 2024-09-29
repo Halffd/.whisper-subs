@@ -39,10 +39,10 @@ progress_name = f'progress-{start}'
 progress_file = os.path.join(ytsubs, f'{progress_name}.log')
 history_file = os.path.join(ytsubs, 'history.txt')
 
-def rename(name):
+def rename(name, repl = False):
     global progress_file, progress_name
     try:
-        progress_name = f'progress-{name}'
+        vprogress_name = name if repl else f'progress-{name}'
         new = os.path.join(ytsubs, f'{progress_name}.log')
         if os.path.exists(progress_file):
             os.rename(progress_file, new)
@@ -66,20 +66,6 @@ def write(text, mpv = 'err'):
         except Exception as e:
             print(e)
             f.write(e + '\n')
-def format_timestamp(timestamp):
-    """
-    Formats a timestamp in seconds to the HH:MM:SS.xxx format.
-
-    Args:
-        timestamp (float): The timestamp in seconds.
-
-    Returns:
-        The formatted timestamp.
-    """
-    hours = int(timestamp // 3600)
-    minutes = int(timestamp % 3600 // 60)
-    seconds = timestamp % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 def clean_filename(filename):
     # Remove leading/trailing spaces
     filename = filename.strip()
@@ -268,36 +254,29 @@ def generate(url, i = 0):
     try:
         audio_file = download_audio(url)
         progress_file = progress_file.replace("___", video_title)
-        rename(progress_file)
+        rename(progress_file, True)
         if audio_file is None:
             raise FileNotFoundError("No audio file, subtitles may be available")
         # Transcribe the audio
-        segments = transcribe.process_create(audio_file, model_name, write=write)
+        # Create the SRT file
+        srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
+        # Create a folder for the channel name
+        folder_name = os.path.join(srt_dir, channel_name)
+        name = os.path.splitext(os.path.basename(audio_file))[0]
+        srt_file = os.path.join(folder_name, name + ".srt")
+        segments = 'segments-0.json'
+        cd = os.getcwd()
+        s = 0
+        while os.path.exists(os.path.join(ytsubs, segments)):
+            segments = f'segments-{s}.json'
+        segments = os.path.join(ytsubs, segments)
+        transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
         #transcribe_audio(audio_file, model_name)
+        # Delete the audio file
+        os.remove(audio_file)
     except Exception as e:
         write(f"Error: {e}")
         return
-    # Create the SRT file
-    srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
-    os.makedirs(srt_dir, exist_ok=True)
-    # Create a folder for the channel name
-    folder_name = os.path.join(srt_dir, channel_name)
-    if not os.path.exists(folder_name):
-        os.makedirs(folder_name)    
-    name = os.path.splitext(os.path.basename(audio_file))[0]
-    srt_file = os.path.join(folder_name, name + ".srt")
-    with open(srt_file, "w", encoding="utf-8") as f:
-        for i, segment in enumerate(segments, start=1):
-            start_time = segment.start
-            end_time = segment.end
-            text = segment.text.strip()
-            f.write(f"{i}\n")
-            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-            f.write(f"{text}\n\n")
-    write(f"SRT file saved: {srt_file}")
-
-    # Delete the audio file
-    os.remove(audio_file)
     
     # Get the path to the subtitle file
     sub_file = srt_file.replace("\\", "/")

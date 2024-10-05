@@ -11,7 +11,9 @@ import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List
+import io
 
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 
@@ -76,59 +78,41 @@ def check_memory_usage():
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
         check_memory_usage()  # Recursively check again
-def transcribe_audio(audio_file, model_name, language=None, device='cuda', compute='int8_float32', json_file="segments.json"):
-    """ 
-    Transcribe audio and yield segments while writing to a JSON file in real-time.
- 
+def transcribe_audio(audio_file, model_name, language = None, device = 'cuda', compute = 'int8_float32'):
+    """
+    Transcribes the audio from the given file using the specified Whisper model.
+
     Args:
         audio_file (str): Path to the audio file.
-        model_name (str): The Whisper model name to use.
-        language (str, optional): Language code. Defaults to None.
-        device (str, optional): Device to run the model on ('cuda' or 'cpu'). Defaults to 'cuda'.
-        compute (str, optional): Compute type. Defaults to 'int8_float32'.
-        json_file (str, optional): Path to save the JSON file with segments. Defaults to 'segments.json'.
-    
-    Yields:
-        dict: The transcription segment as a dictionary with start, end, and text keys.
-    """
-    whisper_model = faster_whisper.WhisperModel(model_name, device=device, compute_type=compute)
-    
-    segments = []
-    
-    try:
-        if language:
-            result_segments, _ = whisper_model.transcribe(audio_file, language=language)
-        else:
-            result_segments, _ = whisper_model.transcribe(audio_file)
-        
-        # Process each segment
-        for segment in result_segments:
-            segment_data = {
-                'start': segment.start,
-                'end': segment.end,
-                'text': segment.text
-            }
-            segments.append(segment_data)
-            
-            # Write each segment to the JSON file
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(segments, f, indent=4)
-            
-            # Yield the segment for further processing
-            yield segment_data
+        model_name (str): The name of the Whisper model to use.
 
-    except Exception as e:
-        print(f"Error during transcription: {e}", file=sys.stderr)
-        return None
-def read_segments_from_json(json_file: str) -> List[Segment]:
-    """Reads the JSON file and converts it to a list of Segment objects."""
+    Returns:
+        The transcription result.
+    """
+    global audiofile, modelname, langcode
+    audiofile = audio_file
+    modelname = model_name
+    langcode = language
+    if device == 'cuda':
+        torch.cuda.empty_cache()
     try:
-        with open(json_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return [Segment(**segment) for segment in data]
-    except (IOError, json.JSONDecodeError) as e:
-        print(f"Error reading JSON file: {e}", file=sys.stderr)
-        return []
+        print(f"Trying model {model_name} on {device}", file=sys.stderr)
+        whisper_model = faster_whisper.WhisperModel(model_name, device=device, compute_type=compute)
+        if language is not None:
+            segments, info = whisper_model.transcribe(audio_file, language=language, vad_filter=True,
+                                                      vad_parameters=dict(min_silence_duration_ms=500,
+                                                                          max_speech_duration_s=5))
+        else:
+            segments, info = whisper_model.transcribe(audio_file, vad_filter=True,
+                                                      vad_parameters=dict(min_silence_duration_ms=500,
+                                                                          max_speech_duration_s=5))
+        for segment in segments:
+            yield segment
+    except RuntimeError as e:
+        print(e, file=sys.stderr)   
+    except Exception as e:
+        print(e, file=sys.stderr)
+    return None
 def format_timestamp(timestamp):
     """
     Formats a timestamp in seconds to the HH:MM:SS.xxx format.
@@ -143,21 +127,44 @@ def format_timestamp(timestamp):
     minutes = int(timestamp % 3600 // 60)
     seconds = timestamp % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
-# Save SRT file incrementally as audio is being transcribed
-def write_srt(segments_file, srt):
-    if os.path.exists(segments_file):
-        # Read the JSON segments file to fetch transcribed segments
-        segments = read_segments_from_json(segments_file)
-        for i, segment in enumerate(segments, start=1):
-            start_time = format_timestamp(segment.start)
-            end_time = format_timestamp(segment.end)
-            text = segment.text.strip()
+def save_srt_file(audio_file, model_name, language=None, device='cuda', compute='int8_float32', subs_dir="subtitles"):
+    """
+    Transcribe audio in real-time and save the SRT file incrementally.
 
+    Args:
+        audio_file (str): Path to the audio file.
+        model_name (str): The Whisper model name to use.
+        language (str, optional): Language code. Defaults to None.
+        device (str, optional): Device to run the model on. Defaults to 'cuda'.
+        compute (str, optional): Compute type. Defaults to 'int8_float32'.
+        subs_dir (str, optional): Directory to save the SRT file. Defaults to "subtitles".
+    """
+    # Create the SRT file in the appropriate directory
+    srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
+    os.makedirs(srt_dir, exist_ok=True)
+    
+    # Create folder based on the audio file's name
+    name = os.path.splitext(os.path.basename(audio_file))[0]
+    srt_file = os.path.join(srt_dir, name + "-unfinished.srt")
+    
+    with open(srt_file, "w", encoding="utf-8") as f:
+        # Start transcribing and writing each segment to the SRT file
+        for i, segment in enumerate(transcribe_audio(audio_file, model_name, language, device, compute), start=1):
+            start_time = segment.start
+            end_time = segment.end
+            text = segment.text.strip()
+            
             # Write the segment to the SRT file
-            srt.write(f"{i}\n")
-            srt.write(f"{start_time} --> {end_time}\n")
-            srt.write(f"{text}\n\n")                                        
-def process_create(file, model_name, srt_file = 'none', segments_file = 'segments.json', language = 'none', device = 'cuda', compute = 'int8_float32', write = print):
+            f.write(f"{i}\n")
+            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
+            f.write(f"{text}\n\n")
+            
+            print(f"Segment {i} saved to {srt_file}: [{start_time} - {end_time}] {text}")
+    new = os.path.join(srt_dir, name + ".srt")
+    os.rename(srt_file, new)
+    print(f"SRT file completed: {srt_file}")
+
+def process_create(file, model_name, language = 'none', device = 'cuda', compute = 'int8_float32', write = print):
     """Creates a new process to retry the transcription."""
     
     # Check if file is None and raise an informative error
@@ -180,7 +187,7 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
                     write(' '.join([str(i), str(j), str(c), compute, device, language]))
                     write(model_name)
                     write(f"Starting subprocess with model: {model_name}")
-                    args = [sys.executable, __file__, file, model_name, language, segments_file , device, compute]
+                    args = [sys.executable, __file__, file, model_name, language, device, compute]
                     write(args)
                     # Run the subprocess and capture its output
                     # Run the subprocess and capture its output with UTF-8 encoding
@@ -204,105 +211,81 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
                     stdout_thread.start()
                     stderr_thread.start()
 
-                     # Reading the subprocess output and updating JSON and SRT files
                     try:
-                        srt_temp_file = srt_file.replace(".srt", "-unfinished.srt")
+                        while True:
+                            # Check if the process has finished
+                            if process.poll() is not None:
+                                break  # Process has finished
 
-                        with open(srt_temp_file, "w", encoding="utf-8") as srt:
-                            while process.poll() is None:
-                                write_srt(segments_file, srt)
-                                # Read stderr output for errors
-                                while not stderr_queue.empty():
-                                    error_msg = stderr_queue.get()
-                                    print(f"Error: {error_msg}", file=sys.stderr)
+                            # Check for stderr output and print it
+                            while not stderr_queue.empty():
+                                output = stderr_queue.get()
+                                write(output.strip())
 
-                                # Read stdout output and write to SRT incrementally
-                                while not stdout_queue.empty():
-                                    output = stdout_queue.get()
-                                    if output:
-                                        write(f"Out : {output}")
-                                time.sleep(5)
+                            # Check for stdout output (if needed)
+                            while not stdout_queue.empty():
+                                output = stdout_queue.get()
+                                write(output.strip())
 
-                        # Finalize and rename the SRT file
-                        os.rename(srt_temp_file, srt_file)
-                        write(f"SRT file completed: {srt_file}")
+                            # Sleep briefly to avoid busy-waiting
+                            time.sleep(0.1)
 
-                    finally:
+                        # Wait for the process to complete and capture any remaining output
                         stdout_thread.join()
                         stderr_thread.join()
-
+                        # Wait for the process to complete and capture any remaining output
                         stdout, stderr = process.communicate()
                         exit_code = process.returncode
 
-                        if exit_code != 0:
-                            write(f"Process exited with error: {stderr}", file=sys.stderr)
+                        if exit_code == 0:
+                            # Handle empty output
+                            try:
+                                with open('segments.json', 'r') as file:
+                                    loaded_segments = json.load(file)  # Load the JSON data
+                                    write("Data successfully loaded from segments.json")
+                                    write(loaded_segments)  # Print the loaded segments
+                                    return convert_dict_to_segments(loaded_segments)
+                            except (IOError, json.JSONDecodeError) as e:
+                                write(f"Error reading from file: {e}")
                         else:
-                            with open(srt_file, 'w') as srt:
-                                write_srt(segments_file, srt)
-                            os.remove(segments_file)
-                            return
+                            write(f"Process exited with error code: {exit_code}. Error: {stderr}")
+                    except Exception as e:
+                        write(f"An error occurred while handling: {e}")
                 except Exception as e:
                     write(f"An error occurred on creation: {e}")
     else:
         write('No model')
 
 if __name__ == "__main__":
-    if len(sys.argv) < 5:
+    if len(sys.argv) < 4:
         print("Usage: python script.py <audio_file> <model_name> <language> <device> <compute>")
         sys.exit(1)
 
-    path, file, model_name, language, segments_file = sys.argv[0], sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    path, file, model_name, language = sys.argv[0], sys.argv[1], sys.argv[2], sys.argv[3]
     if language == 'none':
         language = None
-    device = sys.argv[5] if len(sys.argv) > 4 else 'cuda'
-    compute = sys.argv[6] if len(sys.argv) > 5 else 'int8_float32'
+    device = sys.argv[4] if len(sys.argv) > 4 else 'cuda'
+    compute = sys.argv[5] if len(sys.argv) > 5 else 'int8_float32'
     
     print(f"{path}: Transcribing {file} using model {model_name} and language {language}", file=sys.stderr)
     
-    result = transcribe_audio(file, model_name, language, device, compute, segments_file)
+    result = transcribe_audio(file, model_name, language, device, compute)
     
     if result is None:
         raise RuntimeError("Transcription failed")
+
     
     # Convert segments to a list of dictionaries
     segments_dict = [
-        {'start': segment['start'], 'end': segment['end'], 'text': segment['text']}
+        {'start': segment.start, 'end': segment.end, 'text': segment.text}
         for segment in result
     ]
     
     # Save to a file with error handling
     try:
-        with open(segments_file, 'w') as file:
-            json.dump(segments_dict, file)  # Write the JSON data
+        with open('segments.json', 'w', encoding='utf-8') as file:
+            json.dump(segments_dict, file, ensure_ascii=False)  # Write the JSON data
         print("Data successfully saved to segments.json")
     except IOError as e:
         print(f"Error saving to file: {e}")
-    print(segments_dict)
-
-"""def save_srt_file(audio_file, model_name, srt_file="subtitles.srt", language=None, device='cuda', compute='int8_float32'):
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(srt_file), exist_ok=True)
-
-    # Prepare file paths
-    original = srt_file
-    srt_file = srt_file.replace(".srt", "-unfinished.srt")
-
-    # Open the SRT file to write
-    with open(srt_file, "w", encoding="utf-8") as f:
-        segments = []
-        for i, segment in enumerate(transcribe_audio(audio_file, model_name, language, device, compute), start=1):
-            # Extract segment data
-            start_time = segment['start']
-            end_time = segment['end']
-            text = segment['text'].strip()
-
-            # Write the segment to the SRT file
-            f.write(f"{i}\n")
-            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-            f.write(f"{text}\n\n")
-
-            print(f"Segment {i} saved to {srt_file}: [{start_time} - {end_time}] {text}")
-    # Once the transcription is done, rename the file to its final name
-    os.rename(srt_file, original)
-    print(f"SRT file completed: {original}")
-"""
+    print(json.dumps(segments_dict, ensure_ascii=False))  # Use ensure_ascii=False to allow Unicode characters

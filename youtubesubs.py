@@ -264,13 +264,26 @@ def generate(url, i = 0):
         folder_name = os.path.join(srt_dir, channel_name)
         name = os.path.splitext(os.path.basename(audio_file))[0]
         srt_file = os.path.join(folder_name, name + ".srt")
-        segments = 'segments-0.json'
-        cd = os.getcwd()
-        s = 0
-        while os.path.exists(os.path.join(ytsubs, segments)):
-            segments = f'segments-{s}.json'
-        segments = os.path.join(ytsubs, segments)
-        transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
+        segments = transcribe.process_create(audio_file, model_name, write=write)
+        #transcribe_audio(audio_file, model_name)
+        srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
+        os.makedirs(srt_dir, exist_ok=True)
+        # Create a folder for the channel name
+        folder_name = os.path.join(srt_dir, channel_name)
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)    
+        name = os.path.splitext(os.path.basename(audio_file))[0]
+        srt_file = os.path.join(folder_name, name + ".srt")
+        with open(srt_file, "w", encoding="utf-8") as f:
+            for i, segment in enumerate(segments, start=1):
+                start_time = segment.start
+                end_time = segment.end
+                text = segment.text.strip()
+                f.write(f"{i}\n")
+                f.write(f"{transcribe.format_timestamp(start_time)} --> {transcribe.format_timestamp(end_time)}\n")
+                f.write(f"{text}\n\n")
+        write(f"SRT file saved: {srt_file}")
+
         #transcribe_audio(audio_file, model_name)
         # Delete the audio file
         os.remove(audio_file)

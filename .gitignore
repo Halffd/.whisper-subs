@@ -4,6 +4,11 @@ venv
 .idea
 .vscode
 *.mp3
+*.mp4
+*.webm
+*.mkv
+*.£Pt
+*.ass
 media
 __pycache__
 caption/__pycache__

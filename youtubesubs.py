@@ -33,7 +33,7 @@ oldest = '--oldest' in sys.argv
 delay = 30
 start_delay = delay
 
-ytsubs =  os.path.join(os.path.expanduser("~"), subs_dir)
+ytsubs = os.path.join(os.path.expanduser("~"), subs_dir)
 start = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 progress_name = f'progress-{start}'
 progress_file = os.path.join(ytsubs, f'{progress_name}.log')
@@ -226,7 +226,7 @@ def create_redirect_html_file(filename, url):
     url: The URL to redirect to.
   """
   write(filename)
-  with open(filename, "w") as f:
+  with open(filename, "w", encoding='utf-8') as f:
     f.write(f"""
     <!DOCTYPE html>
     <html>
@@ -243,7 +243,7 @@ def generate(url, i = 0):
     id = get_video_id(url)
     write(url, id)
     try:
-        history = open(history_file, "r").readlines()
+        history = open(history_file, "r", encoding='utf-8').readlines()
         for h in history:
             sep = h.replace('\n','').split(' ')
             if sep[0] == id and sep[1] == model_name:
@@ -269,6 +269,7 @@ def generate(url, i = 0):
         s = 0
         while os.path.exists(os.path.join(ytsubs, segments)):
             segments = f'segments-{s}.json'
+            s += 1
         segments = os.path.join(ytsubs, segments)
         transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
         #transcribe_audio(audio_file, model_name)

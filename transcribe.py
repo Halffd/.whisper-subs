@@ -112,7 +112,7 @@ def transcribe_audio(audio_file, model_name, language=None, device='cuda', compu
             
             # Write each segment to the JSON file
             with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(segments, f, indent=4)
+                json.dump(segments, f, indent=4, ensure_ascii=False)
             
             # Yield the segment for further processing
             yield segment_data
@@ -247,7 +247,19 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
         write('No model')
 
 if __name__ == "__main__":
-    if len(sys.argv) < 5:
+    if sys.argv[1] == '--write-srt':
+        json_file = sys.argv[2]
+        srt_file = sys.argv[3]
+        if not ':' in json_file or not ':' in srt_file:
+            subs_dir = "Documents\\Youtube-Subs"
+            if not ':' in json_file:
+                json_file = os.path.join(os.path.expanduser("~"), subs_dir, json_file)
+            if not ':' in srt_file:
+                srt_file = os.path.join(os.path.expanduser("~"), subs_dir, srt_file)
+        with open(srt_file, mode='w', encoding='utf-8') as srt:
+            write_srt(json_file, srt)
+        sys.exit(0)
+    elif len(sys.argv) < 5:
         print("Usage: python script.py <audio_file> <model_name> <language> <device> <compute>")
         sys.exit(1)
 
@@ -269,11 +281,11 @@ if __name__ == "__main__":
         {'start': segment['start'], 'end': segment['end'], 'text': segment['text']}
         for segment in result
     ]
-    
+   
     # Save to a file with error handling
     try:
-        with open(segments_file, 'w') as file:
-            json.dump(segments_dict, file)  # Write the JSON data
+        with open(segments_file, 'w', encoding='utf-8') as file:
+            json.dump(segments_dict, file, ensure_ascii=False)  # Write the JSON data
         print("Data successfully saved to segments.json")
     except IOError as e:
         print(f"Error saving to file: {e}")

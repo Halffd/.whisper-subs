@@ -1,5 +1,3 @@
-Here’s an updated version of the README for your **.whisper-subs** project, reflecting the use of `yt-dlp` and omitting the license and support sections:
-
 ```markdown
 # .whisper-subs
 

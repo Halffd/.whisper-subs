@@ -5,7 +5,7 @@ device = 'cuda'
 if 'cpu' in sys.argv:
     device = 'cpu'
 model_name = model.getName(sys.argv, default)
-
+start_time = '00:00:00'
 
 import pyperclip
 url = pyperclip.paste()
@@ -42,19 +42,24 @@ history_file = os.path.join(ytsubs, 'history.txt')
 def rename(name, repl = False):
     global progress_file, progress_name
     try:
-        vprogress_name = name if repl else f'progress-{name}'
+        progress_name = name if repl else f'progress-{name}'
         new = os.path.join(ytsubs, f'{progress_name}.log')
         if os.path.exists(progress_file):
             os.rename(progress_file, new)
         progress_file = new
     except Exception as e:
         write(e)
-def write(text, mpv = 'err'):
+
+def write(*text, mpv = 'err'):
     global progress_file
+    text = [str(item) if not isinstance(item, re.Match) else item.group(0) for item in text] # Convert Match objects to strings
+    text = ' '.join(text)
+
     if len(str(text)) < 100:
         print(text)
     else:
         print(str(text)[0:100])
+
     with open(file=progress_file, mode='a', encoding="utf-8") as f:
         try:
             f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')} :  {str(text)}\n")
@@ -77,12 +82,19 @@ def clean_filename(filename):
     filename = re.sub(r'\.+', '.', filename)
         
     # Remove other special characters
-    cleaned_filename = re.sub(r"[<>!@#$%^&*(),/'?\"\-;:\[\]\{\}|\\]", "", filename)
+    cleaned_filename = re.sub(r"[<>!@#$%^&*(),/'?\|\"\-;:\[\]\{\}|\\]", "", filename)
     if cleaned_filename[-1] == ".":
         cleaned_filename = cleaned_filename[:-1]
     write(cleaned_filename)
     return cleaned_filename
-def download_audio(url, rec = False):
+def convert_to_seconds(time_str):
+    """Convert hh:mm:ss format to seconds."""
+    if not time_str:
+        return 0
+    h, m, s = map(int, time_str.split(':'))
+    return h * 3600 + m * 60 + s
+
+def download_audio(url, rec=False, audio_start_time='00:00:00'):
     global model_name, channel_name, delay, start_delay, video_title
     if not rec or delay > 3600:
         delay = start_delay
@@ -104,45 +116,69 @@ def download_audio(url, rec = False):
                     return None
                 elif any(lang in info['subtitles'] for lang in ['en', 'pt', 'pt-BR']):
                     return None
+
             # Get the channel name
             channel_name = info.get('channel', '')
             timestamp = info.get('timestamp', '')
-            # Convert the timestamp to a datetime object
             date_time = datetime.datetime.fromtimestamp(timestamp)
-
-            # Format the datetime object as a date string
             timeday = date_time.strftime('%Y-%m-%d')
             video_title = timeday + '_' + clean_filename(info.get('title', 'unknown'))
-            #video_title = info.get('title', 'unknown')
             audio_file = os.path.join(os.getcwd(), f"{video_title}.{model_name}.mp3")
+
             write(' '.join([str(delay), channel_name, str(timestamp), str(date_time), video_title, audio_file]))
+
         command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "-o", audio_file, url]
         subprocess.run(command, check=True)
+
+        # Convert the audio start time from hh:mm:ss to seconds
+        start_time_seconds = convert_to_seconds(audio_start_time)
+
+        # Use ffmpeg to mute the audio before the specified start time
+        if start_time_seconds > 0:
+            muted_audio_file = os.path.join(os.getcwd(), f"{video_title}_muted.mp3")
+            ffmpeg_command = [
+                'ffmpeg', '-i', audio_file,
+                '-af', f"volume=0:enable='between(t,0,{start_time_seconds})'",
+                muted_audio_file,
+                '-y'  # Overwrite output file if it exists
+            ]
+            subprocess.run(ffmpeg_command, check=True)
+
+            # Replace original audio file with the muted version
+            os.replace(muted_audio_file, audio_file)
 
         return audio_file
     except Exception as e:
         delay *= 2
         write(delay, e)
         time.sleep(delay)
-        download_audio(url, True)
+        download_audio(url, True, audio_start_time)
 def remove_time_param(url):
     """
-    Removes the '&t=' parameter from a given URL.
+    Simplifies a YouTube URL to include only the base URL and the video ID,
+    supporting both 'youtube.com' and 'youtu.be' formats.
     
     Args:
-        url (str): The URL to be processed.
+        url (str): The YouTube URL to be processed.
         
     Returns:
-        str: The modified URL with the '&t=' parameter removed.
+        str: The simplified URL containing only the base URL and video ID.
     """
-    t_index = url.find('&t=')
-    if t_index == -1:
-        return url
-    
-    end_index = lambda x: url.find('&', x + 1) if x != -1 else len(url)
-    new_url = url[:t_index] + url[end_index(t_index):]
-    write(url + ' = ' + new_url)
-    return new_url
+    if "youtu.be" in url:
+        # Extract video ID from youtu.be format
+        video_id = url.split('/')[-1]
+        return f"https://www.youtube.com/watch?v={video_id}"
+    else:
+        # Extract video ID from youtube.com format
+        v_index = url.find('v=')
+        if v_index == -1:
+            return url  # Return original if 'v=' not found
+        
+        start_index = v_index + 2
+        end_index = url.find('&', start_index)
+        video_id = url[start_index:end_index] if end_index != -1 else url[start_index:]
+        
+        return f"https://www.youtube.com/watch?v={video_id}"
 def get_youtube_videos(url, rec = False):
     global oldest, delay, start_delay
     if not rec or delay > 3600:
@@ -252,7 +288,7 @@ def generate(url, i = 0):
         write(e)    
     # Download the audio
     try:
-        audio_file = download_audio(url)
+        audio_file = download_audio(url, False, start_time)
         progress_file = progress_file.replace("___", video_title)
         rename(progress_file, True)
         if audio_file is None:
@@ -262,6 +298,7 @@ def generate(url, i = 0):
         srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
         # Create a folder for the channel name
         folder_name = os.path.join(srt_dir, channel_name)
+        os.makedirs(folder_name, exist_ok=True)
         name = os.path.splitext(os.path.basename(audio_file))[0]
         srt_file = os.path.join(folder_name, name + ".srt")
         segments = 'segments-0.json'

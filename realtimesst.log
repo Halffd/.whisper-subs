@@ -1,0 +1,139 @@
+2024-10-08 22:32:43.336 - RealTimeSTT: root - INFO - Starting RealTimeSTT
+2024-10-08 22:32:43.351 - RealTimeSTT: root - INFO - Initializing audio recording (creating pyAudio input stream, sample rate: 16000 buffer size: 512
+2024-10-08 22:32:43.913 - RealTimeSTT: root - INFO - Initializing WebRTC voice with Sensitivity 0
+2024-10-08 22:32:43.921 - RealTimeSTT: root - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2024-10-08 22:32:44.472 - RealTimeSTT: torio._extension.utils - DEBUG - Loading FFmpeg6
+2024-10-08 22:32:44.483 - RealTimeSTT: torio._extension.utils - DEBUG - Failed to load FFmpeg6 extension.
+Traceback (most recent call last):
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torch\_ops.py", line 1032, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'S:\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\lib\libtorio_ffmpeg6.pyd' (or one of its dependencies). Try using the full path with constructor syntax.
+2024-10-08 22:32:44.487 - RealTimeSTT: torio._extension.utils - DEBUG - Loading FFmpeg5
+2024-10-08 22:32:44.494 - RealTimeSTT: torio._extension.utils - DEBUG - Failed to load FFmpeg5 extension.
+Traceback (most recent call last):
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torch\_ops.py", line 1032, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'S:\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\lib\libtorio_ffmpeg5.pyd' (or one of its dependencies). Try using the full path with constructor syntax.
+2024-10-08 22:32:44.494 - RealTimeSTT: torio._extension.utils - DEBUG - Loading FFmpeg4
+2024-10-08 22:32:44.499 - RealTimeSTT: torio._extension.utils - DEBUG - Failed to load FFmpeg4 extension.
+Traceback (most recent call last):
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 108, in _find_versionsed_ffmpeg_extension
+    _load_lib(lib)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 94, in _load_lib
+    torch.ops.load_library(path)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torch\_ops.py", line 1032, in load_library
+    ctypes.CDLL(path)
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\ctypes\__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: Could not find module 'S:\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\lib\libtorio_ffmpeg4.pyd' (or one of its dependencies). Try using the full path with constructor syntax.
+2024-10-08 22:32:44.500 - RealTimeSTT: torio._extension.utils - DEBUG - Loading FFmpeg
+2024-10-08 22:32:44.500 - RealTimeSTT: torio._extension.utils - DEBUG - Failed to load FFmpeg extension.
+Traceback (most recent call last):
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 116, in _find_ffmpeg_extension
+    ext = _find_versionsed_ffmpeg_extension(ffmpeg_ver)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\halff\AppData\Local\Programs\Python\Python312\Lib\site-packages\torio\_extension\utils.py", line 106, in _find_versionsed_ffmpeg_extension
+    raise RuntimeError(f"FFmpeg{version} extension is not available.")
+RuntimeError: FFmpeg extension is not available.
+2024-10-08 22:32:44.847 - RealTimeSTT: root - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2024-10-08 22:32:44.848 - RealTimeSTT: root - DEBUG - Starting realtime worker
+2024-10-08 22:32:44.848 - RealTimeSTT: root - DEBUG - Waiting for main transcription model to start
+2024-10-08 22:33:05.985 - RealTimeSTT: root - DEBUG - Main transcription model ready
+2024-10-08 22:33:05.986 - RealTimeSTT: root - DEBUG - RealtimeSTT initialization completed successfully
+2024-10-08 22:33:05.986 - RealTimeSTT: root - INFO - Setting listen time
+2024-10-08 22:33:05.987 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'listening'
+2024-10-08 22:33:07.148 - RealTimeSTT: root - DEBUG - Waiting for recording start
+2024-10-08 22:33:09.953 - RealTimeSTT: root - INFO - voice activity detected
+2024-10-08 22:33:09.953 - RealTimeSTT: root - INFO - recording started
+2024-10-08 22:33:09.953 - RealTimeSTT: root - INFO - State changed from 'listening' to 'recording'
+2024-10-08 22:33:09.954 - RealTimeSTT: root - DEBUG - Waiting for recording stop
+2024-10-08 22:33:17.573 - RealTimeSTT: root - INFO - recording stopped
+2024-10-08 22:33:17.573 - RealTimeSTT: root - INFO - State changed from 'recording' to 'listening'
+2024-10-08 22:33:17.574 - RealTimeSTT: root - INFO - State changed from 'listening' to 'inactive'
+2024-10-08 22:33:17.576 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'transcribing'
+2024-10-08 22:33:17.578 - RealTimeSTT: root - DEBUG - Adding transcription request, no early transcription started
+2024-10-08 22:33:17.581 - RealTimeSTT: root - DEBUG - Receive from parent_transcription_pipe after sendiung transcription request, transcribe_count: 1
+2024-10-08 22:33:17.653 - RealTimeSTT: root - INFO - State changed from 'transcribing' to 'inactive'
+2024-10-08 22:33:18.664 - RealTimeSTT: root - INFO - voice activity detected
+2024-10-08 22:33:18.664 - RealTimeSTT: root - INFO - recording started
+2024-10-08 22:33:18.664 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'recording'
+2024-10-08 22:33:51.524 - RealTimeSTT: root - INFO - State changed from 'recording' to 'inactive'
+2024-10-08 22:33:51.526 - RealTimeSTT: root - DEBUG - Model medium.en completed transcription in 33.95 seconds
+2024-10-08 22:33:51.528 - RealTimeSTT: root - INFO - Setting listen time
+2024-10-08 22:33:51.528 - RealTimeSTT: root - DEBUG - Waiting for recording stop
+2024-10-08 22:33:53.473 - RealTimeSTT: root - INFO - recording stopped
+2024-10-08 22:33:53.473 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'listening'
+2024-10-08 22:33:53.476 - RealTimeSTT: root - INFO - State changed from 'listening' to 'inactive'
+2024-10-08 22:33:53.477 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'transcribing'
+2024-10-08 22:33:53.480 - RealTimeSTT: root - DEBUG - Adding transcription request, no early transcription started
+2024-10-08 22:33:53.503 - RealTimeSTT: root - DEBUG - Receive from parent_transcription_pipe after sendiung transcription request, transcribe_count: 1
+2024-10-08 22:33:53.533 - RealTimeSTT: root - INFO - State changed from 'transcribing' to 'inactive'
+2024-10-08 22:33:54.242 - RealTimeSTT: root - INFO - voice activity detected
+2024-10-08 22:33:54.243 - RealTimeSTT: root - INFO - recording started
+2024-10-08 22:33:54.243 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'recording'
+2024-10-08 22:34:47.750 - RealTimeSTT: root - INFO - State changed from 'recording' to 'inactive'
+2024-10-08 22:34:47.846 - RealTimeSTT: root - DEBUG - Model medium.en completed transcription in 54.37 seconds
+2024-10-08 22:34:47.846 - RealTimeSTT: root - INFO - Setting listen time
+2024-10-08 22:34:47.846 - RealTimeSTT: root - DEBUG - Waiting for recording stop
+2024-10-08 22:34:52.362 - RealTimeSTT: root - INFO - recording stopped
+2024-10-08 22:34:52.362 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'listening'
+2024-10-08 22:34:52.368 - RealTimeSTT: root - INFO - State changed from 'listening' to 'inactive'
+2024-10-08 22:34:52.619 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'transcribing'
+2024-10-08 22:34:52.622 - RealTimeSTT: root - DEBUG - Adding transcription request, no early transcription started
+2024-10-08 22:34:52.625 - RealTimeSTT: root - INFO - State changed from 'transcribing' to 'inactive'
+2024-10-08 22:34:52.627 - RealTimeSTT: root - DEBUG - Receive from parent_transcription_pipe after sendiung transcription request, transcribe_count: 1
+2024-10-08 22:34:52.673 - RealTimeSTT: root - INFO - voice activity detected
+2024-10-08 22:34:52.673 - RealTimeSTT: root - INFO - recording started
+2024-10-08 22:34:52.673 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'recording'
+2024-10-08 22:36:04.304 - RealTimeSTT: root - INFO - State changed from 'recording' to 'inactive'
+2024-10-08 22:36:04.342 - RealTimeSTT: root - DEBUG - Model medium.en completed transcription in 71.72 seconds
+2024-10-08 22:36:04.343 - RealTimeSTT: root - INFO - Setting listen time
+2024-10-08 22:36:04.343 - RealTimeSTT: root - DEBUG - Waiting for recording stop
+2024-10-08 22:36:06.853 - RealTimeSTT: root - INFO - recording stopped
+2024-10-08 22:36:06.853 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'listening'
+2024-10-08 22:36:06.858 - RealTimeSTT: root - INFO - State changed from 'listening' to 'inactive'
+2024-10-08 22:36:07.111 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'transcribing'
+2024-10-08 22:36:07.113 - RealTimeSTT: root - INFO - State changed from 'transcribing' to 'inactive'
+2024-10-08 22:36:07.114 - RealTimeSTT: root - DEBUG - Adding transcription request, no early transcription started
+2024-10-08 22:36:07.120 - RealTimeSTT: root - DEBUG - Receive from parent_transcription_pipe after sendiung transcription request, transcribe_count: 1
+2024-10-08 22:36:08.843 - RealTimeSTT: root - INFO - voice activity detected
+2024-10-08 22:36:08.843 - RealTimeSTT: root - INFO - recording started
+2024-10-08 22:36:08.843 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'recording'
+2024-10-08 22:37:52.699 - RealTimeSTT: root - INFO - State changed from 'recording' to 'inactive'
+2024-10-08 22:37:52.774 - RealTimeSTT: root - DEBUG - Model medium.en completed transcription in 105.66 seconds
+2024-10-08 22:37:52.775 - RealTimeSTT: root - INFO - Setting listen time
+2024-10-08 22:37:52.775 - RealTimeSTT: root - DEBUG - Waiting for recording stop
+2024-10-08 22:37:53.103 - RealTimeSTT: root - INFO - recording stopped
+2024-10-08 22:37:53.103 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'listening'
+2024-10-08 22:37:53.112 - RealTimeSTT: root - INFO - State changed from 'listening' to 'inactive'
+2024-10-08 22:37:53.360 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'transcribing'
+2024-10-08 22:37:53.365 - RealTimeSTT: root - DEBUG - Adding transcription request, no early transcription started
+2024-10-08 22:37:53.376 - RealTimeSTT: root - DEBUG - Receive from parent_transcription_pipe after sendiung transcription request, transcribe_count: 1
+2024-10-08 22:37:53.403 - RealTimeSTT: root - INFO - State changed from 'transcribing' to 'inactive'
+2024-10-08 22:37:55.283 - RealTimeSTT: root - INFO - voice activity detected
+2024-10-08 22:37:55.284 - RealTimeSTT: root - INFO - recording started
+2024-10-08 22:37:55.284 - RealTimeSTT: root - INFO - State changed from 'inactive' to 'recording'

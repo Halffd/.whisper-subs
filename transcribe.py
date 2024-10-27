@@ -16,20 +16,9 @@ from typing import Any, Dict, List
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 
 audiofile, modelname, langcode = '', 'base', None
-"""
-def on_error(exc_type, exc_value, tb):
-    global audiofile, modelname, langcode
-    import traceback
-    traceback.print_exception(exc_type, exc_value, tb)
-    print(audiofile, modelname, langcode, '\nrestarting')
-    transcribe_audio(audiofile, modelname, langcode)
-
-
-sys.excepthook = on_error
-"""
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
-
+done = False
 @dataclass
 class Segment:
     start: float
@@ -76,50 +65,62 @@ def check_memory_usage():
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
         check_memory_usage()  # Recursively check again
-def transcribe_audio(audio_file, model_name, language=None, device='cuda', compute='int8_float32', json_file="segments.json"):
-    """ 
-    Transcribe audio and yield segments while writing to a JSON file in real-time.
- 
+def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cuda', compute='int8_float32'):
+    """  
+    Transcribe audio and yield segments in real-time.
+    
     Args:
         audio_file (str): Path to the audio file.
         model_name (str): The Whisper model name to use.
         language (str, optional): Language code. Defaults to None.
         device (str, optional): Device to run the model on ('cuda' or 'cpu'). Defaults to 'cuda'.
         compute (str, optional): Compute type. Defaults to 'int8_float32'.
-        json_file (str, optional): Path to save the JSON file with segments. Defaults to 'segments.json'.
     
-    Yields:
+    Yields:         
         dict: The transcription segment as a dictionary with start, end, and text keys.
     """
-    whisper_model = faster_whisper.WhisperModel(model_name, device=device, compute_type=compute)
-    
-    segments = []
-    
-    try:
-        if language:
-            result_segments, _ = whisper_model.transcribe(audio_file, language=language)
-        else:
-            result_segments, _ = whisper_model.transcribe(audio_file)
-        
-        # Process each segment
-        for segment in result_segments:
-            segment_data = {
-                'start': segment.start,
-                'end': segment.end,
-                'text': segment.text
-            }
-            segments.append(segment_data)
-            
-            # Write each segment to the JSON file
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(segments, f, indent=4, ensure_ascii=False)
-            
-            # Yield the segment for further processing
-            yield segment_data
+    global done
+    done = False
+    original = srt_file
+    srt_file = srt_file.replace('.srt','-unfinished.srt')
 
-    except Exception as e:
-        print(f"Error during transcription: {e}", file=sys.stderr)
-        return None
+    with open(srt_file, "w", encoding="utf-8") as srt:
+        whisper_model = faster_whisper.WhisperModel(model_name, device=device, compute_type=compute)
+
+        try:
+            result_segments, _ = whisper_model.transcribe(audio_file, language=language)
+            
+            for i, segment in enumerate(result_segments, start=1):
+                start_time = format_timestamp(segment.start)
+                end_time = format_timestamp(segment.end)
+
+                # Write each segment to the SRT file
+                srt.write(f"{i}\n")
+                srt.write(f"{start_time} --> {end_time}\n")
+                srt.write(f"{segment.text}\n\n")
+
+                srt.flush()  # Ensure everything is written out
+        except Exception as e:
+            print(f"Error during transcription: {e}", file=sys.stderr)
+            return None
+    os.rename(srt_file, original)
+    done = True
+
+def format_timestamp(timestamp):
+    """
+    Formats a timestamp in seconds to the HH:MM:SS,mmm format for SRT.
+
+    Args:
+        timestamp (float): The timestamp in seconds.
+
+    Returns:
+        str: The formatted timestamp in SRT format.
+    """
+    hours = int(timestamp // 3600)
+    minutes = int(timestamp % 3600 // 60)
+    seconds = int(timestamp % 60)
+    milliseconds = int((timestamp % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 def read_segments_from_json(json_file: str) -> List[Segment]:
     """Reads the JSON file and converts it to a list of Segment objects."""
     try:
@@ -129,21 +130,6 @@ def read_segments_from_json(json_file: str) -> List[Segment]:
     except (IOError, json.JSONDecodeError) as e:
         print(f"Error reading JSON file: {e}", file=sys.stderr)
         return []
-def format_timestamp(timestamp):
-    """
-    Formats a timestamp in seconds to the HH:MM:SS.xxx format.
-
-    Args:
-        timestamp (float): The timestamp in seconds.
-
-    Returns:
-        The formatted timestamp.
-    """
-    hours = int(timestamp // 3600)
-    minutes = int(timestamp % 3600 // 60)
-    seconds = timestamp % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
-# Save SRT file incrementally as audio is being transcribed
 def write_srt(segments_file, srt):
     if os.path.exists(segments_file):
         # Read the JSON segments file to fetch transcribed segments
@@ -159,7 +145,7 @@ def write_srt(segments_file, srt):
             srt.write(f"{text}\n\n")                                        
 def process_create(file, model_name, srt_file = 'none', segments_file = 'segments.json', language = 'none', device = 'cuda', compute = 'int8_float32', write = print):
     """Creates a new process to retry the transcription."""
-    
+    global done
     # Check if file is None and raise an informative error
     write(file)
     if file is None:
@@ -170,9 +156,9 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
         for j in range(i, -1, -1):
             for c in range(0, 3):
                 model_name = model_names[j]
-                if c == 1:
+                if c == 1 or 'large-' in model_name:
                     device = 'cpu'
-                elif c == 2:
+                if c == 2:
                     compute = 'int8'
                     if model_name == 'large-v3':
                         model_name = 'large-v2'
@@ -180,7 +166,7 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
                     write(' '.join([str(i), str(j), str(c), compute, device, language]))
                     write(model_name)
                     write(f"Starting subprocess with model: {model_name}")
-                    args = [sys.executable, __file__, file, model_name, language, segments_file , device, compute]
+                    args = [sys.executable, __file__, file, model_name, language, srt_file, device, compute]
                     write(args)
                     # Run the subprocess and capture its output
                     # Run the subprocess and capture its output with UTF-8 encoding
@@ -208,25 +194,18 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
                     try:
                         srt_temp_file = srt_file.replace(".srt", "-unfinished.srt")
 
-                        with open(srt_temp_file, "w", encoding="utf-8") as srt:
-                            while process.poll() is None:
-                                write_srt(segments_file, srt)
-                                # Read stderr output for errors
-                                while not stderr_queue.empty():
-                                    error_msg = stderr_queue.get()
-                                    print(f"Error: {error_msg}", file=sys.stderr)
+                        while process.poll() is None:
+                            # Read stderr output for errors
+                            while not stderr_queue.empty():
+                                error_msg = stderr_queue.get()
+                                print(f"Error: {error_msg}", file=sys.stderr)
 
-                                # Read stdout output and write to SRT incrementally
-                                while not stdout_queue.empty():
-                                    output = stdout_queue.get()
-                                    if output:
-                                        write(f"Out : {output}")
-                                time.sleep(5)
-
-                        # Finalize and rename the SRT file
-                        os.rename(srt_temp_file, srt_file)
-                        write(f"SRT file completed: {srt_file}")
-
+                            # Read stdout output and write to SRT incrementally
+                            while not stdout_queue.empty():
+                                output = stdout_queue.get()
+                                if output:
+                                    write(f"Out : {output}")
+                            time.sleep(1)
                     finally:
                         stdout_thread.join()
                         stderr_thread.join()
@@ -234,17 +213,27 @@ def process_create(file, model_name, srt_file = 'none', segments_file = 'segment
                         stdout, stderr = process.communicate()
                         exit_code = process.returncode
 
-                        if exit_code != 0:
-                            write(f"Process exited with error: {stderr}", file=sys.stderr)
+                        if exit_code != 0 and not done:
+                            write(f"Process exited {str(exit_code)} with error: {stderr}")
                         else:
-                            with open(srt_file, 'w') as srt:
-                                write_srt(segments_file, srt)
-                            os.remove(segments_file)
+                            #with open(srt_file, 'w') as srt:
+                            #    write_srt(segments_file, srt)
+                            #os.remove(segments_file)
                             return
                 except Exception as e:
                     write(f"An error occurred on creation: {e}")
     else:
         write('No model')
+def write_srt_from_segments(segments, srt):
+    """Writes the transcription segments to an SRT file."""
+    for i, segment in enumerate(segments, start=1):
+        start_time = format_timestamp(segment.start)
+        end_time = format_timestamp(segment.end)
+
+        # Write each segment to the SRT file
+        srt.write(f"{i}\n")
+        srt.write(f"{start_time} --> {end_time}\n")
+        srt.write(f"{segment.text}\n\n")
 
 if __name__ == "__main__":
     if sys.argv[1] == '--write-srt':
@@ -262,59 +251,14 @@ if __name__ == "__main__":
     elif len(sys.argv) < 5:
         print("Usage: python script.py <audio_file> <model_name> <language> <device> <compute>")
         sys.exit(1)
-
-    path, file, model_name, language, segments_file = sys.argv[0], sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-    if language == 'none':
-        language = None
+    audio_file = sys.argv[1]
+    model_name = sys.argv[2]
+    language = sys.argv[3] if sys.argv[3] != 'none' else None
+    srt_file = sys.argv[4] if len(sys.argv) > 6 else 'transcription.srt'
     device = sys.argv[5] if len(sys.argv) > 4 else 'cuda'
     compute = sys.argv[6] if len(sys.argv) > 5 else 'int8_float32'
-    
-    print(f"{path}: Transcribing {file} using model {model_name} and language {language}", file=sys.stderr)
-    
-    result = transcribe_audio(file, model_name, language, device, compute, segments_file)
-    
-    if result is None:
-        raise RuntimeError("Transcription failed")
-    
-    # Convert segments to a list of dictionaries
-    segments_dict = [
-        {'start': segment['start'], 'end': segment['end'], 'text': segment['text']}
-        for segment in result
-    ]
-   
-    # Save to a file with error handling
-    try:
-        with open(segments_file, 'w', encoding='utf-8') as file:
-            json.dump(segments_dict, file, ensure_ascii=False)  # Write the JSON data
-        print("Data successfully saved to segments.json")
-    except IOError as e:
-        print(f"Error saving to file: {e}")
-    print(segments_dict)
 
-"""def save_srt_file(audio_file, model_name, srt_file="subtitles.srt", language=None, device='cuda', compute='int8_float32'):
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(srt_file), exist_ok=True)
+    print(f"Transcribing {audio_file} using model {model_name} and language {language}", file=sys.stderr)
 
-    # Prepare file paths
-    original = srt_file
-    srt_file = srt_file.replace(".srt", "-unfinished.srt")
-
-    # Open the SRT file to write
-    with open(srt_file, "w", encoding="utf-8") as f:
-        segments = []
-        for i, segment in enumerate(transcribe_audio(audio_file, model_name, language, device, compute), start=1):
-            # Extract segment data
-            start_time = segment['start']
-            end_time = segment['end']
-            text = segment['text'].strip()
-
-            # Write the segment to the SRT file
-            f.write(f"{i}\n")
-            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-            f.write(f"{text}\n\n")
-
-            print(f"Segment {i} saved to {srt_file}: [{start_time} - {end_time}] {text}")
-    # Once the transcription is done, rename the file to its final name
-    os.rename(srt_file, original)
-    print(f"SRT file completed: {original}")
-"""
+    # Call the transcribe_audio generator
+    transcribe_audio(audio_file, model_name, srt_file, language, device, compute)

@@ -7,8 +7,10 @@ venv
 *.mp4
 *.webm
 *.mkv
-*.£Pt
+*.srt
 *.ass
+*.log
+*.pyc
 media
 __pycache__
 caption/__pycache__
@@ -16,4 +18,8 @@ caption/Logs
 segments.json
 Scripts
 Youtube-Subs
+AppData
 ai/ai
+ai/Lib
+__pycache__
+ai/__pycache__

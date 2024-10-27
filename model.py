@@ -17,20 +17,20 @@ model_names = [
         "base.en",
         "small.en",
         "medium.en",
-        "whisper-medium-portuguese",
-        "whisper-large-v2-japanese",
-        "distil-medium.en",
-        "distil-small.en",
-        "distil-base",
-        "distil-small",
-        "distil-medium",
-        "distil-large",
-        "distil-large-v2",
-        "distil-large-v3",
-        "faster-distil-medium",
-        "faster-distil-large",
-        "faster-distil-large-v2",
-        "faster-distil-large-v3",
+        "jlondonobo/whisper-medium-pt",
+        "clu-ling/whisper-large-v2-japanese-5k-steps",
+        "distil-whisper/distil-medium.en",
+        "distil-whisper/distil-small.en",
+        "distil-whisper/distil-base",
+        "distil-whisper/distil-small",
+        "distil-whisper/distil-medium",
+        "distil-whisper/distil-large",
+        "distil-whisper/distil-large-v2",
+        "distil-whisper/distil-large-v3",
+        "Systran/faster-distil-medium",
+        "Systran/faster-distil-large",
+        "Systran/faster-distil-large-v2",
+        "Systran/faster-distil-large-v3",
         "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"
     ]
 def __getattr__(name):
@@ -93,9 +93,16 @@ def getName(arg, default, captioner = False):
                 if is_numeric(arg[j]):
                     num = int(arg[j])
                     if num < 0:
-                        num = int(input("Model: "))
+                        num = str(input("Model: "))
+                        nums = num.split(' ')
+                        num2 = None
+                        if len(nums) > 1:
+                            num = int(nums[0])
+                            num2 = int(nums[1])
+                        else:
+                            num = int(num)
                         result["model_name"] = available_models[num]
-                        result["realtime_model"] = result["model_name"]
+                        result["realtime_model"] = result["model_name"] if not num2 else num2
                     else:
                         result["model_name"] = available_models[num]
                 else:

@@ -21,12 +21,17 @@ class Log:
         self.current_date = None  # Track the current date
         self.encoding = 'utf-8'  # Specify the encoding
         date = datetime.now().strftime("%d-%m-%Y")
-
-        # Assuming self.path, self.log_dir, and self.filename are already defined
-        matching_files = [
-            item for item in os.listdir(os.path.join(self.path, self.log_dir))
-            if item.startswith(date)
-        ]
+        logdir = os.path.join(self.path, self.log_dir)
+        if not os.path.exists(logdir):
+            logdir = os.getcwd()
+        try:
+            # Assuming self.path, self.log_dir, and self.filename are already defined
+            matching_files = [
+                item for item in os.listdir(logdir)
+                if item.startswith(date)
+            ]
+        except Exception as e:
+            matching_files = []
         # Define the lambda function to find unique parts in file paths
         
         find_unique_parts = lambda path1, path2: (
@@ -50,10 +55,10 @@ class Log:
                             continue
                         #unique_to_match = unique_parts[1] - unique_parts[0]
                         self.filename = parts[0] + '-' + '+'.join(unique_to_file) + parts[1]
-                        combined = os.path.join(self.path, self.log_dir, self.filename)
-                        os.rename(match_path, combined)
+                        self.file_path = os.path.join(self.path, self.log_dir, self.filename)
+                        os.rename(match_path, self.file_path)
                         time = datetime.now().strftime("%H:%M:%S")
-                        self.file = open(combined, 'a', encoding=self.encoding)
+                        self.file = open(self.file_path, 'a', encoding=self.encoding)
                         self.file.write(f'\n{args['model_name']} + {args['lang']}\n{date} {time} :  {args}\n')
         if not self.file:
             self.create_log_file()
@@ -83,18 +88,19 @@ class Log:
         formatted_date = today.strftime("%d-%m-%Y")
         formatted_time = now.strftime("%H:%M:%S")
         weekday = now.strftime("%A")
-        log_file_path = os.path.join(self.path, self.log_dir, f"{formatted_date}_{self.filename}.log")
+        self.file_path = os.path.join(self.path, self.log_dir, f"{formatted_date}_{self.filename}.log")
 
         if self.test_name:
             test_file_path = os.path.join(self.path, self.log_dir, f"{self.test_name}.txt")
+            os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
             self.test = open(test_file_path, 'w', encoding=self.encoding)
             self.test.write(f"{formatted_date} {formatted_time}\n{self.args}\n")
 
-        if os.path.exists(log_file_path):
-            self.file = open(log_file_path, 'a', encoding=self.encoding)
+        if os.path.exists(self.path):
+            self.file = open(self.file_path, 'a', encoding=self.encoding)
             self.file.write(f"\n{formatted_time} Rerun\n")
         else:
-            self.file = open(log_file_path, 'w', encoding=self.encoding)
+            self.file = open(self.file_path, 'w', encoding=self.encoding)
             self.file.write(f"{weekday} {formatted_date} {formatted_time}\n")
             self.file.write(f"Args: {self.args}\n")
 
@@ -125,10 +131,14 @@ class Log:
             self.create_log_file()  # Create a new log file
 
         current_time = datetime.now().strftime("%H:%M:%S")
+        if file.closed:
+            #self.file = open(self.file_path, 'a', encoding=self.encoding)
+            self.create_log_file()
         try:
             file.write(f"{current_time} ({message})\n")
             file.flush()
         except IOError as e:
+            self.create_log_file()
             raise IOError(f"Error writing to log file: {e}") from e
 
     def close_log_file(self):

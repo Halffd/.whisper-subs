@@ -52,36 +52,13 @@ def convert_mkv_to_mp3(input_file, output_file):
         write(f"Conversion successful: {input_file} -> {output_file}")
     except Exception as e:
         write(f"Error converting {input_file}: {e}")
-
-def format_timestamp(timestamp):
-    """
-    Formats a timestamp in seconds to the HH:MM:SS.xxx format.
-
-    Args:
-        timestamp (float): The timestamp in seconds.
-
-    Returns:
-        The formatted timestamp.
-    """
-    hours = int(timestamp // 3600)
-    minutes = int(timestamp % 3600 // 60)
-    seconds = timestamp % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
 def process(file):
     global model_name
-    segments = transcribe.process_create(file, model_name, write=write)
     srt_file = os.path.splitext(file)[0] + "." + model_name + ".srt"
     write(srt_file)
-    with open(srt_file, "w", encoding="utf-8") as f:
-        for i, segment in enumerate(segments, start=1):
-            start_time = segment.start
-            end_time = segment.end
-            text = segment.text.strip()
-            print(start_time,end_time,text)
-            f.write(f"{i}\n")
-            f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
-            f.write(f"{text}\n\n")
-    write(f"SRT file saved: {srt_file}")
+    segments = 'segments.json'
+    transcribe.process_create(file, model_name, srt_file, segments, write=write)
+    
 if __name__ == "__main__":
     # Prompt the user to select one or more audio/video files
     root = Tk()

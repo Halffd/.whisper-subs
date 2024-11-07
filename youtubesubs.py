@@ -110,7 +110,6 @@ def download_audio(url, rec=False, audio_start_time='00:00:00'):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            write(info)
             if info['subtitles'] != {}:
                 if not('live_chat' in info['subtitles'] and len(info['subtitles']) < 2):
                     return None
@@ -195,7 +194,6 @@ def get_youtube_videos(url, rec = False):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            write(info)
             if 'entries' in info:
                 # This is a playlist
                 # print(info['entries'], len(info['entries']),end="\n")

@@ -1,6 +1,3 @@
-Here’s an updated version of the README for your **.whisper-subs** project, reflecting the use of `yt-dlp` and omitting the license and support sections:
-
-```markdown
 # .whisper-subs
 
 Welcome to the .whisper-subs project! This repository contains various scripts and tools for transcribing YouTube videos, MKV files, and more. With a focus on flexibility and usability, .whisper-subs aims to provide a comprehensive solution for audio and video transcription.
@@ -70,6 +67,5 @@ Feel free to contribute to these modules as they evolve!
 ---
 
 For any issues or feature requests, please open an issue in the GitHub repository.
-```
 
 You can modify the section headers or any other part of the README as needed!

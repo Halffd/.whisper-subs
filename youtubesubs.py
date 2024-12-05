@@ -27,7 +27,7 @@ import caption.log as log
 
 channel_name = 'unknown'
 video_title = 'none'
-subs_dir = "Documents\\Youtube-Subs"
+subs_dir = os.path.join("Documents", "Youtube-Subs")
 log_dir = "Documents"
 oldest = '--oldest' in sys.argv
 delay = 30

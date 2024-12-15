@@ -107,7 +107,7 @@ class Speech:
             self.ui.language = self.args['lang']
             self.ui.speech = self
             self.ui.log = logger
-            control.ui = self.ui
+            control.gui = self.ui
             self.ui.run()
         elif self.args['web']:
             web.Web(self.args).start_server()

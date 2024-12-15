@@ -52,7 +52,7 @@ def getName(arg, default, captioner = False):
         return
     available_models = model_names
     pattern = r"^(.*?)\\[^\\]*\.py$"
-    path = arg[0]
+    path = arg[0] if len(arg[0]) > 12 else os.getcwd()
     match = re.match(pattern, path)
 
     if match:

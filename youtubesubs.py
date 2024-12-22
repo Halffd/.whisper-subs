@@ -10,7 +10,7 @@ start_time = '00:00:00'
 import pyperclip
 url = pyperclip.paste()
 print(url)
-urls = url.replace('\r','').split('\n')
+urls = list(reversed(url.replace('\r','').split('\n')))
 print(urls)
 print("Video count: " + str(len(urls)))
 

@@ -1,0 +1,8 @@
+yt-dlp
+faster_whisper
+numpy
+pandas
+matplotlib
+pyperclip
+psutil
+ffmpeg

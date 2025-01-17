@@ -6,11 +6,17 @@ if 'cpu' in sys.argv:
     device = 'cpu'
 model_name = model.getName(sys.argv, default)
 start_time = '00:00:00'
-
+reverse = 0
+if len(sys.argv) > 2:
+    reverse = int(sys.argv[2])
 import pyperclip
 url = pyperclip.paste()
 print(url)
-urls = list(reversed(url.replace('\r','').split('\n')))
+if '--reversed' in sys.argv:
+    urls = list(url.replace('\r','').split('\n'))
+else:
+    urls = list(reversed(url.replace('\r','').split('\n')))
+
 print(urls)
 print("Video count: " + str(len(urls)))
 
@@ -29,7 +35,7 @@ channel_name = 'unknown'
 video_title = 'none'
 subs_dir = os.path.join("Documents", "Youtube-Subs")
 log_dir = "Documents"
-oldest = '--oldest' in sys.argv
+oldest = '--oldest' in sys.argv or reverse == 1
 delay = 30
 start_delay = delay
 
@@ -110,12 +116,14 @@ def download_audio(url, rec=False, audio_start_time='00:00:00'):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            if info['subtitles'] != {}:
-                if not('live_chat' in info['subtitles'] and len(info['subtitles']) < 2):
-                    return None
-                elif any(lang in info['subtitles'] for lang in ['en', 'pt', 'pt-BR']):
-                    return None
-
+            try:
+                if info['subtitles'] != {}:
+                    if not('live_chat' in info['subtitles'] and len(info['subtitles']) < 2):
+                        return None
+                    elif any(lang in info['subtitles'] for lang in ['en', 'pt', 'pt-BR']):
+                        return None
+            except:
+                print('No subs info')
             # Get the channel name
             channel_name = info.get('channel', '')
             timestamp = info.get('timestamp', '')
@@ -280,8 +288,9 @@ def generate(url, i = 0):
         history = open(history_file, "r", encoding='utf-8').readlines()
         for h in history:
             sep = h.replace('\n','').split(' ')
-            if sep[0] == id and sep[1] == model_name:
-                continue
+            if sep[0] == id:
+                if sep[1] >= model.getIndex(model_name):
+                    continue
     except Exception as e:
         write(e)    
     # Download the audio

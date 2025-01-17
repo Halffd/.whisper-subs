@@ -45,7 +45,9 @@ def is_numeric(input_str):
         return True
     except ValueError:
         return False
-
+def getIndex(model_name):
+    global model_names
+    return model_names.index(model_name)
 def getName(arg, default, captioner = False):
     global first
     if not first:

@@ -30,6 +30,24 @@ def write(text, mpv = 'err'):
         except Exception as e:
             print(e)
             f.write(e + '\n')
+def select_directory():
+    root = Tk()
+    root.withdraw()  # Hide the root window
+    directory = filedialog.askdirectory()  # Open a dialog to select a directory
+    return directory
+
+def list_media_files(directory):
+    media_files = []
+    
+    # List all files in the directory
+    for filename in os.listdir(directory):
+        if filename.endswith('.mkv') or filename.endswith('.mp3'):
+            media_files.append(filename)
+    
+    # Sort the combined list
+    media_files.sort()
+
+    return media_files
 
 def convert_mkv_to_mp3(input_file, output_file):
     """
@@ -63,8 +81,16 @@ if __name__ == "__main__":
     # Prompt the user to select one or more audio/video files
     root = Tk()
     root.withdraw()
-    
-    files = filedialog.askopenfilenames(title="Select one or more files", filetypes=[("Audio/Video files", "*.mkv;*.wav;*.mp3;*.flac;*.ogg")])
+    files = [] #[input('File: ')]
+    directory = select_directory()
+    if directory:
+        files = list_media_files(directory)
+        print("Media Files:")
+        for file in files:
+            print(f"  - {file}")
+    else:
+        print("No directory selected.")
+    #filedialog.askopenfilenames(title="Select one or more files", filetypes=[("Audio/Video files", "*.mkv;*.wav;*.mp3;*.flac;*.ogg")])
 
     # Process each selected file
     for i, file in enumerate(files):

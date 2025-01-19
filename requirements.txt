@@ -5,4 +5,5 @@ pandas
 matplotlib
 pyperclip
 psutil
-ffmpeg
+ffmpeg-python
+easygui

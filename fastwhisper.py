@@ -80,12 +80,20 @@ class TranscriptionApp(QWidget):
             "",
             "Media Files (*.mkv *.mp3 *.wav *.flac *.ogg)"
         )
+        
         if files:
-            self.selected_files = files
-            self.file_label.setText(f"Selected files: {len(files)} files")
+            # Sort files naturally (e.g., "Episode 1" before "Episode 10")
+            try:
+                from natsort import natsorted  # For natural sorting
+                self.selected_files = natsorted(files, key=lambda x: x.lower())
+            except ImportError:
+                # Fallback to alphabetical sorting if natsort isn't available
+                self.selected_files = sorted(files, key=lambda x: x.lower())
+            
+            self.file_label.setText(f"Selected files: {len(self.selected_files)} files")
+            
             if not self.log_file:
-                self.log_file = os.path.splitext(files[0])[0] + '.log'
-
+                self.log_file = os.path.splitext(self.selected_files[0])[0] + '.log'
     def selectDirectory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Directory")
         if directory:

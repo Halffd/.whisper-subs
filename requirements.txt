@@ -7,3 +7,4 @@ pyperclip
 psutil
 ffmpeg-python
 easygui
+natsort

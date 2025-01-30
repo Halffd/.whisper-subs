@@ -1,0 +1,10 @@
+yt-dlp
+numpy
+pandas
+matplotlib
+pyperclip
+psutil
+ffmpeg-python
+easygui
+PyQt5
+RealtimeSTT

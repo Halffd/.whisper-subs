@@ -689,6 +689,7 @@ class YoutubeSubs:
                 language=None,
                 device=self.device,
                 compute_type=self.compute,
+                force_device=self.force_device,
                 write=callback
             )
 

@@ -93,13 +93,47 @@ class TranscriptionThread(QThread):
 
     def processFile(self, file_path, model_name):
         try:
-            srt_file = os.path.splitext(file_path)[0] + f".{model_name}.srt"
-            self.progress.emit(f"Processing {file_path} with model {model_name}...")
+            dir_path = os.path.dirname(file_path)
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
             
-            # Create a temporary Python script instead of using -c
+            # Extract video ID from HTML file if it exists
+            html_file = os.path.join(dir_path, f"{base_name}.htm")
+            video_id = None
+            if os.path.exists(html_file):
+                try:
+                    with open(html_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        import re
+                        match = re.search(r'watch\?v=([^&"\'\s]+)', content)
+                        if match:
+                            video_id = match.group(1)
+                except Exception as e:
+                    self.progress.emit(f"Error reading HTML file: {str(e)}")
+
+            # Create filenames with video ID if available
+            file_suffix = f"_{video_id}" if video_id else ""
+            srt_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.srt")
+            log_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.log")
+            
+            # Get device and compute settings from the UI
+            device = 'cuda' if self.gpu_radio.isChecked() else 'cpu'
+            compute_type = self.compute_combo.currentText().split(' ')[0]
+            
+            # Create script content
             script_content = f'''
 import faster_whisper
 import os
+import sys
+import threading
+import queue
+import time
+import logging
+logging.basicConfig()
+logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
+
+# Set device and compute type from parameters
+device = "{device}"
+compute_type = "{compute_type}"
 
 def format_timestamp(seconds):
     hours = int(seconds // 3600)
@@ -109,67 +143,199 @@ def format_timestamp(seconds):
     seconds = int(seconds)
     return f"{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}},{{milliseconds:03d}}"
 
-model = faster_whisper.WhisperModel("{model_name}", device="cpu", compute_type="int8")
-file_path = r"{file_path}"
-srt_file = r"{srt_file}"
+# Setup logging with immediate flush
+log_file = r"{log_file}"
+def log_message(msg):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"[{{timestamp}}] {{msg}}\\n")
+        f.flush()  # Ensure immediate write
+    print(msg)
+
+# Create unfinished srt file with immediate writing
+unfinished_srt = r"{srt_file}.unfinished.srt"
+segment_queue = queue.Queue(maxsize=100)  # Limit queue size to manage memory
+write_event = threading.Event()
+stop_event = threading.Event()
+
+def write_segments():
+    current_index = 1
+    with open(unfinished_srt, "w", encoding="utf-8") as f:
+        while not stop_event.is_set() or not segment_queue.empty():
+            try:
+                # Wait for new segments with timeout
+                segment = segment_queue.get(timeout=0.5)
+                start_time = format_timestamp(segment.start)
+                end_time = format_timestamp(segment.end)
+                
+                # Write segment immediately
+                f.write(f"{{current_index}}\\n")
+                f.write(f"{{start_time}} --> {{end_time}}\\n")
+                f.write(f"{{segment.text.strip()}}\\n\\n")
+                f.flush()  # Force write to disk
+                
+                current_index += 1
+                segment_queue.task_done()
+                write_event.set()  # Signal that we wrote something
+                
+                if current_index % 10 == 0:
+                    log_message(f"Written {{current_index}} segments")
+                    
+            except queue.Empty:
+                continue
+            except Exception as e:
+                log_message(f"Error writing segment: {{e}}")
+
+# Start writer thread
+writer_thread = threading.Thread(target=write_segments, daemon=True)
+writer_thread.start()
 
 try:
-    segments, _ = model.transcribe(file_path, language=None)
-    with open(srt_file, "w", encoding="utf-8") as f:
-        for i, segment in enumerate(segments, 1):
-            # Format timestamps as HH:MM:SS,mmm
-            start_time = format_timestamp(segment.start)
-            end_time = format_timestamp(segment.end)
+    log_message("Starting transcription...")
+    model = faster_whisper.WhisperModel("{model_name}", device=device, compute_type=compute_type)
+    
+    # Process segments as they come
+    segments, info = model.transcribe(r"{file_path}")
+    
+    # Process each segment
+    for segment in segments:
+        # Wait if queue is full
+        while segment_queue.full() and not stop_event.is_set():
+            time.sleep(0.1)
+        
+        if stop_event.is_set():
+            break
             
-            f.write(f"{{i}}\\n")
-            f.write(f"{{start_time}} --> {{end_time}}\\n")
-            f.write(f"{{segment.text.strip()}}\\n\\n")
+        segment_queue.put(segment)
+        
+        # Wait for at least one write to happen
+        write_event.wait(timeout=1.0)
+        write_event.clear()
+    
+    # Signal completion and wait for writer
+    stop_event.set()
+    writer_thread.join(timeout=30)  # Wait up to 30 seconds
+    
+    if os.path.exists(unfinished_srt) and os.path.getsize(unfinished_srt) > 10:
+        if os.path.exists(r"{srt_file}"):
+            os.remove(r"{srt_file}")
+        os.rename(unfinished_srt, r"{srt_file}")
+        log_message("Transcription completed successfully")
+        
+        # Create helper files
+        dir_path = os.path.dirname(r"{srt_file}")
+        base_name = os.path.splitext(os.path.basename(r"{srt_file}"))[0]
+        
+        # Try to find corresponding HTML file to get URL
+        html_file = os.path.join(dir_path, f"{base_name}.htm")
+        url = None
+        if os.path.exists(html_file):
+            try:
+                with open(html_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    import re
+                    match = re.search(r'URL=\'([^\']+)\'', content)
+                    if match:
+                        url = match.group(1)
+            except:
+                pass
+                
+        if url:
+            create_helper_files(dir_path, base_name, url)
+            
+        return True
+    else:
+        log_message("Output file is empty or too small")
+        exit(1)
+        
 except Exception as e:
-    print(f"Error during transcription: {{e}}")
+    log_message(f"Error during transcription: {{str(e)}}")
+    import traceback
+    traceback.print_exc(file=sys.stderr)
     exit(1)
+finally:
+    stop_event.set()  # Ensure writer thread stops
+    writer_thread.join(timeout=5)  # Give it 5 seconds to finish
 '''
             
-            # Write the script to a temporary file
-            script_file = os.path.join(os.path.dirname(file_path), "temp_whisper_script.py")
+            # Create shell script for Linux
+            sh_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.sh")
+            with open(sh_file, 'w', encoding='utf-8') as f:
+                f.write('#!/bin/bash\n')
+                f.write(f'python3 -c """{script_content}"""\n')
+            os.chmod(sh_file, 0o755)  # Make executable
+            
+            # Create batch file for Windows
+            bat_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.bat")
+            with open(bat_file, 'w', encoding='utf-8') as f:
+                # Convert paths to Windows format
+                win_script = script_content.replace('/', '\\')
+                win_script = win_script.replace(r'\\', r'\\\\')  # Escape backslashes
+                if win_script.startswith(r'\home'):
+                    win_script = 'C:\\Users' + win_script[5:]
+                f.write('@echo off\n')
+                f.write(f'python -c """{win_script}"""\n')
+            
+            # Write script to temporary file and run
+            script_file = os.path.join(dir_path, f"temp_whisper_{os.getpid()}.py")
             with open(script_file, "w", encoding="utf-8") as f:
                 f.write(script_content)
             
-            # Run the script
-            args = [sys.executable, script_file]
-            self.progress.emit(f"Running transcription script...")
-            
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding='utf-8',
-                errors='replace',
-                text=True
-            )
-
-            # Monitor process and check for successful completion
-            while process.poll() is None:
-                stdout = process.stdout.readline()
-                if stdout:
-                    self.progress.emit(f"Out: {stdout.strip()}")
-                stderr = process.stderr.readline()
-                if stderr:
-                    self.progress.emit(f"Error: {stderr.strip()}")
-                time.sleep(0.1)
-            
-            # Clean up the temporary script
             try:
-                os.remove(script_file)
-            except:
-                pass
-            
-            exit_code = process.returncode
-            if exit_code == 0 or os.path.exists(srt_file):
-                self.progress.emit(f"Successfully created {srt_file}")
-                return True
-            
-            self.progress.emit(f"Process exited with code {exit_code}")
-            return False
+                self.progress.emit(f"Starting transcription of {file_path}...")
+                process = subprocess.Popen(
+                    [sys.executable, script_file],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    encoding='utf-8',
+                    errors='replace',
+                    text=True
+                )
+
+                while process.poll() is None:
+                    stdout = process.stdout.readline()
+                    if stdout:
+                        self.progress.emit(stdout.strip())
+                    stderr = process.stderr.readline()
+                    if stderr:
+                        self.progress.emit(f"Error: {stderr.strip()}")
+                    time.sleep(0.1)
+                
+                exit_code = process.returncode
+                if exit_code == 0 and os.path.exists(srt_file):
+                    self.progress.emit(f"Successfully created {srt_file}")
+                    
+                    # Create helper files
+                    dir_path = os.path.dirname(srt_file)
+                    base_name = os.path.splitext(os.path.basename(srt_file))[0]
+                    
+                    # Try to find corresponding HTML file to get URL
+                    html_file = os.path.join(dir_path, f"{base_name}.htm")
+                    url = None
+                    if os.path.exists(html_file):
+                        try:
+                            with open(html_file, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                                import re
+                                match = re.search(r'URL=\'([^\']+)\'', content)
+                                if match:
+                                    url = match.group(1)
+                        except:
+                            pass
+                        
+                    if url:
+                        create_helper_files(dir_path, base_name, url)
+                    
+                    return True
+                
+                self.progress.emit(f"Process exited with code {exit_code}")
+                return False
+                
+            finally:
+                try:
+                    os.remove(script_file)
+                except:
+                    pass
             
         except Exception as e:
             self.progress.emit(f"Error processing {file_path}: {str(e)}")
@@ -184,7 +350,7 @@ class TranscriptionApp(QWidget):
         self.youtube_subs = None
         self.last_clipboard = ""
         self.clipboard_monitoring = True
-        self.force_device = False  # Don't auto-switch device
+        self.force_device = False
         self.initUI()
         
         # Setup clipboard monitoring
@@ -287,7 +453,31 @@ class TranscriptionApp(QWidget):
         clipboard_layout.addLayout(options_right)
         layout.addLayout(clipboard_layout)
 
-        # Device and compute settings group
+        # Model selection
+        model_layout = QHBoxLayout()
+        model_label = QLabel("Model:")
+        self.model_combo = QComboBox()
+        
+        # Separate models with clear descriptions
+        self.model_combo.addItems([
+            "tiny",
+            "base",
+            "small",
+            "medium",
+            "large-v2",
+            "large-v3",
+            "small.en",  # English-only models
+            "medium.en",
+            "large-v2.en",
+            "distil-medium.en",  # Distilled models
+            "distil-large-v2"
+        ])
+        
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_combo)
+        layout.addLayout(model_layout)
+
+        # Device selection
         device_group = QHBoxLayout()
         
         # Device selection
@@ -314,34 +504,15 @@ class TranscriptionApp(QWidget):
         compute_layout.addWidget(QLabel("Compute Type:"))
         self.compute_combo = QComboBox()
         self.compute_combo.addItems([
-            "int8_float32 (Balanced)",
             "int8 (Fast/Low Memory)",
-            "float32 (High Accuracy)",
-            "float16 (GPU Only)"
+            "int8_float32 (Balanced)",
+            "float16 (GPU Only)",
+            "float32 (High Accuracy)"
         ])
         compute_layout.addWidget(self.compute_combo)
         device_group.addLayout(compute_layout)
         
         layout.addLayout(device_group)
-
-        # Model selection dropdown
-        self.model_combo = QComboBox(self)
-        
-        # Add smaller models first as default options
-        default_models = [
-            "tiny", "base", "small", 
-            "tiny.en", "base.en", "small.en", "medium.en"
-            "distil-whisper/distil-small.en",
-            "distil-whisper/distil-base"
-        ]
-        
-        # Add all models after the default options
-        self.model_combo.addItems(default_models)
-        self.model_combo.addItems([model for model in MODEL_NAMES if model not in default_models])
-        
-        self.model_combo.setCurrentText("small")  # Set default model
-        layout.addWidget(QLabel("Select Model:"))
-        layout.addWidget(self.model_combo)
 
         # Add YouTube URL input with label showing URL count
         layout.addWidget(QLabel("YouTube URLs (one per line):"))

@@ -389,22 +389,324 @@ def generate(url, i = 0):
             write(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
             f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
     write(f'{i}: {name} {url}', mpv)
-if __name__ == "__main__":
-    # Get the YouTube URL from the clipboard
-    for i, url in enumerate(urls):
+
+class YoutubeSubs:
+    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True):
+        self.model_name = model_name
+        self.device = device
+        self.compute = compute
+        self.force_device = force_device
+        self.channel_name = 'unknown'
+        self.video_title = 'none'
+        self.delay = 30
+        self.start_delay = 30
+        self.enable_logging = enable_logging
+        self.start_time = None
+        self.end_time = None
+        
+        # Setup directories
+        self.subs_dir = subs_dir or os.path.join("Documents", "Youtube-Subs")
+        self.ytsubs = os.path.join(os.path.expanduser("~"), self.subs_dir)
+        os.makedirs(self.ytsubs, exist_ok=True)
+        
+        # Setup logging
+        self.start = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        self.progress_name = f'progress-{self.start}'
+        self.progress_file = os.path.join(self.ytsubs, f'{self.progress_name}.log')
+        self.history_file = os.path.join(self.ytsubs, 'history.txt')
+
+    def write(self, *text, mpv='err'):
+        """Log messages to file and through callback"""
+        if not self.enable_logging:
+            return
+            
+        text = [str(item) if not isinstance(item, re.Match) else item.group(0) for item in text]
+        text = ' '.join(text)
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        log_text = f"{timestamp} :  {str(text)}"
+
+        with open(file=self.progress_file, mode='a', encoding="utf-8") as f:
+            try:
+                f.write(f"{log_text}\n")
+                if mpv != 'err':
+                    f.write(f"{timestamp} :  {str(mpv)}\n")
+            except UnicodeEncodeError:
+                f.write(f"Warning: Could not write all characters. Skipping problematic characters.\n")
+                f.write(text.encode('ascii', 'ignore').decode('ascii') + '\n')
+            except Exception as e:
+                f.write(f"Error writing to log: {str(e)}\n")
+
+    def rename_log(self, name, repl=False):
+        """Rename the progress log file"""
         try:
-            rename(f'{str(i)}-___-{start}')
-            if not 'youtu' in url:
-                continue
-            if '@' in url:
-                urls2 = get_youtube_videos(url)
-                write(urls2, len(urls2))
-                for j, u in enumerate(urls):
-                    rename(f'{str(i)}-{str(j)}-{url.split('/')[-1][1:]}-___-{start}')
-                    write(f"Downloading {i+1}/{j+1}/{len(urls2)}/{len(urls)}: {u}")
-                    generate(u)
-            else:
-                write(f"Downloading {i+1}/{len(urls)}: {url}")
-                generate(url)            
+            self.progress_name = name if repl else f'progress-{name}'
+            new = os.path.join(self.ytsubs, f'{self.progress_name}.log')
+            if os.path.exists(self.progress_file):
+                os.rename(self.progress_file, new)
+            self.progress_file = new
         except Exception as e:
-            write(f"Error : {e}")                    
+            self.write(str(e))
+
+    def clean_filename(self, filename):
+        """Clean filename of invalid characters"""
+        filename = filename.strip().strip('.')
+        filename = re.sub(r'\.+', '.', filename)
+        cleaned = re.sub(r"[<>!@#$%^&*(),/'?\|\"\-;:\[\]\{\}|\\]", "", filename)
+        if cleaned[-1] == ".":
+            cleaned = cleaned[:-1]
+        return cleaned
+
+    def download_audio(self, url, rec=False):
+        """Download audio from YouTube URL"""
+        if not rec or self.delay > 3600:
+            self.delay = self.start_delay
+            
+        try:
+            ydl_opts = {
+                'outtmpl': '%(title)s.%(ext)s',
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'cookies': 'media/cookies.txt',
+                'ignoreerrors': True
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Check for existing subtitles
+                try:
+                    if info['subtitles'] != {}:
+                        if not('live_chat' in info['subtitles'] and len(info['subtitles']) < 2):
+                            return None
+                        elif any(lang in info['subtitles'] for lang in ['en', 'pt', 'pt-BR']):
+                            return None
+                except:
+                    self.write('No subs info')
+
+                # Get video info
+                self.channel_name = info.get('channel', '')
+                timestamp = info.get('timestamp', '')
+                date_time = datetime.datetime.fromtimestamp(timestamp)
+                timeday = date_time.strftime('%Y-%m-%d')
+                self.video_title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
+                audio_file = os.path.join(os.getcwd(), f"{self.video_title}.{self.model_name}.mp3")
+
+                self.write(' '.join([str(self.delay), self.channel_name, str(timestamp), 
+                                   str(date_time), self.video_title, audio_file]))
+
+            # Add time range to ffmpeg command if specified
+            command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3"]
+            
+            if self.start_time or self.end_time:
+                time_args = []
+                if self.start_time:
+                    time_args.extend(["-ss", self.start_time])
+                if self.end_time:
+                    time_args.extend(["-to", self.end_time])
+                command.extend(["--postprocessor-args", f"ffmpeg: {' '.join(time_args)}"])
+            
+            command.extend(["-o", audio_file, url])
+            
+            # Download audio
+            subprocess.run(command, check=True)
+            return audio_file
+
+        except Exception as e:
+            self.delay *= 2
+            self.write(self.delay, str(e))
+            time.sleep(self.delay)
+            return self.download_audio(url, True)
+
+    def get_youtube_videos(self, url, rec=False):
+        """Get list of video URLs from channel/playlist"""
+        if not rec or self.delay > 3600:
+            self.delay = self.start_delay
+            
+        try:
+            ydl_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': '%(title)s.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,            
+                'cookies': 'media/cookies.txt'
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if 'entries' in info:
+                    video_urls = []
+                    for entry in info['entries']:
+                        try:
+                            if entry['subtitles'] == {}:
+                                video_urls.append(entry['webpage_url'])
+                        except Exception as err:
+                            self.write(str(err))
+                    return video_urls
+                else:
+                    return [info['webpage_url']]
+                    
+        except Exception as e:
+            self.write(f"{self.delay} {str(e)}")
+            time.sleep(self.delay)
+            self.delay *= 2
+            return self.get_youtube_videos(url, True)
+
+    def create_helper_files(self, folder_name, name, url):
+        """Create helper files (HTML redirect, batch file)"""
+        # Create HTML redirect
+        html_file = os.path.join(folder_name, f"{name}.htm")
+        with open(html_file, "w", encoding='utf-8') as f:
+            f.write(f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta http-equiv="refresh" content="0; URL='{url}'" />
+            </head>
+            <body>
+            </body>
+            </html>
+            """)
+
+        # Create MPV batch file
+        sub_file = os.path.join(folder_name, f"{name}.srt").replace("\\", "/")
+        mpv_command = f'mpv "{url}" --pause --sub-file="{sub_file}"'
+        bat_file = os.path.join(folder_name, f"{name}.bat")
+        
+        with open(bat_file, 'w', encoding="utf-8") as f:
+            try:
+                f.write(mpv_command)
+            except UnicodeEncodeError:
+                self.write("Warning: Could not write all characters to batch file")
+                f.write(mpv_command.encode('ascii', 'ignore').decode('ascii'))
+
+        # Copy MPV command to clipboard
+        pyperclip.copy(mpv_command)
+
+    def update_history(self, video_id):
+        """Update history file with processed video"""
+        try:
+            with open(self.history_file, 'a', encoding="utf-8") as f:
+                f.write(f"{video_id} {self.model_name}\n")
+        except Exception as e:
+            self.write(f"Error updating history: {str(e)}")
+
+    @staticmethod
+    def remove_time_param(url):
+        """Remove time parameters from YouTube URL"""
+        if "youtu.be" in url:
+            video_id = url.split('/')[-1]
+            return f"https://www.youtube.com/watch?v={video_id}"
+        else:
+            v_index = url.find('v=')
+            if v_index == -1:
+                return url
+            
+            start_index = v_index + 2
+            end_index = url.find('&', start_index)
+            video_id = url[start_index:end_index] if end_index != -1 else url[start_index:]
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+    @staticmethod
+    def get_video_id(url):
+        """Extract video ID from YouTube URL"""
+        pattern = r'(?:https?://)?(?:www\.)?(?:youtu\.be/|youtube\.com/(?:watch\?v=|embed/|v/|user/\S+|[^/]+\?v=))([^&"\'<>\s]+)'
+        match = re.search(pattern, url)
+        return match.group(1) if match else None
+
+    def sort_by_date(self, urls):
+        """Sort URLs by video upload date"""
+        video_dates = []
+        
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                for url in urls:
+                    try:
+                        info = ydl.extract_info(url, download=False)
+                        timestamp = info.get('timestamp', 0)
+                        video_dates.append((timestamp, url))
+                    except:
+                        video_dates.append((0, url))
+                        
+            # Sort by timestamp
+            video_dates.sort()
+            return [url for _, url in video_dates]
+            
+        except Exception as e:
+            self.write(f"Error sorting videos: {str(e)}")
+            return urls
+
+    def process_urls(self, urls_text, callback=print):
+        """Process multiple URLs from text input"""
+        urls = urls_text.replace('\r','').split('\n')
+        urls = [url.strip() for url in urls if 'youtu' in url.strip()]
+        
+        for i, url in enumerate(urls):
+            try:
+                callback(f"Processing {i+1}/{len(urls)}: {url}")
+                if '@' in url:
+                    # Handle channel/playlist
+                    video_urls = self.get_youtube_videos(url)
+                    for j, video_url in enumerate(video_urls):
+                        callback(f"Processing video {j+1}/{len(video_urls)} from channel")
+                        self.process_single_url(video_url, callback)
+                else:
+                    # Handle single video
+                    self.process_single_url(url, callback)
+            except Exception as e:
+                callback(f"Error processing {url}: {str(e)}")
+
+    def process_single_url(self, url, callback=print):
+        """Process a single YouTube URL"""
+        try:
+            url = self.remove_time_param(url)
+            video_id = self.get_video_id(url)
+            
+            # Download and process audio
+            audio_file = self.download_audio(url)
+            if audio_file is None:
+                raise FileNotFoundError("No audio file, subtitles may be available")
+
+            # Setup output paths - ensure using Documents/Youtube-Subs
+            folder_name = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs", self.channel_name)
+            os.makedirs(folder_name, exist_ok=True)
+            
+            name = os.path.splitext(os.path.basename(audio_file))[0]
+            srt_file = os.path.join(folder_name, name + ".srt")
+            
+            # Transcribe
+            success = transcribe.process_create(
+                file=audio_file, 
+                model_name=self.model_name,
+                srt_file=srt_file,
+                language=None,
+                device=self.device,
+                compute_type=self.compute,
+                write=callback
+            )
+
+            if success:
+                # Create helper files
+                self.create_helper_files(folder_name, name, url)
+                # Update history
+                self.update_history(video_id)
+                
+            # Cleanup
+            if os.path.exists(audio_file):
+                os.remove(audio_file)
+            
+        except Exception as e:
+            callback(f"Error: {str(e)}")
+
+if __name__ == "__main__":
+    # Example usage
+    yt = YoutubeSubs(model_name="small", device="cpu")
+    urls = pyperclip.paste().replace('\r','').split('\n')
+    yt.process_urls('\n'.join(urls))

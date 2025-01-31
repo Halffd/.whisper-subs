@@ -1,33 +1,27 @@
-# Use the official Debian base image
-FROM debian:bullseye
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 
-# Set environment variables
-ENV CONDA_DIR=/opt/conda
-ENV PATH="$CONDA_DIR/bin:$PATH"
-
-# Install dependencies
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    wget \
-    bzip2 \
-    curl \
+    python3-pip \
+    ffmpeg \
     git \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Miniconda
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/conda.sh && \
-    bash /tmp/conda.sh -b -p $CONDA_DIR && \
-    rm /tmp/conda.sh
+# Set up Python environment
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install CUDA (change the version as needed)
-RUN wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda-repo-debian10-11-8-local_11.8.0-1_amd64.deb && \
-    dpkg -i cuda-repo-debian10-11-8-local_11.8.0-1_amd64.deb && \
-    apt-key add /var/cuda-repo-debian10-11-8-local/7fa2af80.pub && \
-    apt-get update && \
-    apt-get install -y cuda
+# Install specific versions of PyTorch and Whisper
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+RUN pip install faster-whisper
 
-# Install PyTorch with CUDA support
-RUN conda install pytorch torchvision torchaudio cudatoolkit=11.8 -c pytorch
+# Copy application files
+COPY . .
 
-# Set the default command
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+# Default command
 CMD ["bash"]

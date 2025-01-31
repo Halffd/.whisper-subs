@@ -11,6 +11,7 @@ venv
 *.ass
 *.log
 *.pyc
+*.part
 media
 __pycache__
 caption/__pycache__

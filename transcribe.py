@@ -65,46 +65,80 @@ def check_memory_usage():
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
         check_memory_usage()  # Recursively check again
-def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cuda', compute='int8_float32'):
+def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cpu', compute='int8'):
     """  
-    Transcribe audio and yield segments in real-time.
+    Modified to default to CPU for large models
     
-    Args:
-        audio_file (str): Path to the audio file.
-        model_name (str): The Whisper model name to use.
-        language (str, optional): Language code. Defaults to None.
-        device (str, optional): Device to run the model on ('cuda' or 'cpu'). Defaults to 'cuda'.
-        compute (str, optional): Compute type. Defaults to 'int8_float32'.
+    Performance tips for CPU processing:
+    - Use int8 quantization for CPU processing
+    - Increase CPU threads (set cpu_threads to match your CPU core count)
+    - Use smaller chunk sizes (20-30 seconds)
+    - Enable VAD (Voice Activity Detection) to skip silent parts
+    - Consider using distilled models (they're smaller but still effective)
     
-    Yields:         
-        dict: The transcription segment as a dictionary with start, end, and text keys.
+    Recommended models for your system:
+    - Use distil-whisper/distil-large-v2 for CPU processing
+    - Use small or distil-whisper/distil-small.en for GPU processing
+    - Enable all CPU optimizations
+    - Process files in smaller chunks (20-30 seconds)
     """
     global done
     done = False
     original = srt_file
-    srt_file = srt_file.replace('.srt','-unfinished.srt')
+    temp_srt = srt_file.replace('.srt','-unfinished.srt')
 
-    with open(srt_file, "w", encoding="utf-8") as srt:
-        whisper_model = faster_whisper.WhisperModel(model_name, device=device, compute_type=compute)
+    # Automatically switch to CPU for large models
+    if any(large_model in model_name for large_model in ['large', 'medium']):
+        device = 'cpu'
+        compute = 'int8'
+        print(f"Using CPU for {model_name} model due to GPU memory constraints")
 
-        try:
-            result_segments, _ = whisper_model.transcribe(audio_file, language=language)
-            
+    try:
+        torch.cuda.empty_cache()
+        
+        whisper_model = faster_whisper.WhisperModel(
+            model_name, 
+            device=device, 
+            compute_type=compute,
+            device_index=0,
+            cpu_threads=4  # Use more CPU threads for better performance
+        )
+        
+        # Process in smaller chunks
+        result_segments, _ = whisper_model.transcribe(
+            audio_file, 
+            language=language,
+            vad_filter=True,
+            chunk_size=20  # Smaller chunks for CPU processing
+        )
+        
+        # Write to temporary file first
+        with open(temp_srt, "w", encoding="utf-8") as srt:
             for i, segment in enumerate(result_segments, start=1):
                 start_time = format_timestamp(segment.start)
                 end_time = format_timestamp(segment.end)
-
-                # Write each segment to the SRT file
                 srt.write(f"{i}\n")
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
+                srt.flush()
 
-                srt.flush()  # Ensure everything is written out
-        except Exception as e:
+        # Only rename if the temporary file was created successfully
+        if os.path.exists(temp_srt):
+            if os.path.exists(original):
+                os.remove(original)
+            os.rename(temp_srt, original)
+            done = True
+            return True
+        
+    except RuntimeError as e:
+        if 'CUDA out of memory' in str(e):
+            print("CUDA out of memory, retrying with CPU...")
+            return transcribe_audio(audio_file, model_name, srt_file, language, 'cpu', compute)
+        else:
             print(f"Error during transcription: {e}", file=sys.stderr)
-            return None
-    os.rename(srt_file, original)
-    done = True
+            if os.path.exists(temp_srt):
+                os.remove(temp_srt)
+            return False
 
 def format_timestamp(timestamp):
     """
@@ -143,87 +177,78 @@ def write_srt(segments_file, srt):
             srt.write(f"{i}\n")
             srt.write(f"{start_time} --> {end_time}\n")
             srt.write(f"{text}\n\n")                                        
-def process_create(file, model_name, srt_file = 'none', segments_file = 'segments.json', language = 'none', device = 'cuda', compute = 'int8_float32', write = print):
+def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cuda', compute='int8_float32', write=print):
     """Creates a new process to retry the transcription."""
     global done
-    # Check if file is None and raise an informative error
-    write(file)
+    
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
+    
     model_names = model.model_names
     if model_name in model_names:
         i = model_names.index(model_name)
         for j in range(i, -1, -1):
             for c in range(0, 3):
-                model_name = model_names[j]
-                if c == 1 or 'large-' in model_name:
-                    device = 'cpu'
-                if c == 2:
-                    compute = 'int8'
-                    if model_name == 'large-v3':
-                        model_name = 'large-v2'
+                current_model = model_names[j]
+                current_device = 'cpu' if c == 1 or 'large-' in current_model else device
+                current_compute = 'int8' if c == 2 else compute
+                
+                if c == 2 and current_model == 'large-v3':
+                    current_model = 'large-v2'
+                
                 try:
-                    write(' '.join([str(i), str(j), str(c), compute, device, language]))
-                    write(model_name)
-                    write(f"Starting subprocess with model: {model_name}")
-                    args = [sys.executable, __file__, file, model_name, language, srt_file, device, compute]
+                    write(' '.join([str(i), str(j), str(c), current_compute, current_device, language]))
+                    write(current_model)
+                    write(f"Starting subprocess with model: {current_model}")
+                    
+                    # Create the subprocess with proper arguments
+                    command = (
+                        f"import faster_whisper; "
+                        f"model = faster_whisper.WhisperModel('{current_model}', device='{current_device}', compute_type='{current_compute}'); "
+                        f"segments, _ = model.transcribe('{file}', language={f"'{language}'" if language != 'none' else 'None'}); "
+                        f"with open('{srt_file}', 'w', encoding='utf-8') as f: "
+                        f"    for i, segment in enumerate(segments, 1): "
+                        f"        f.write(f'{{i}}\\n'); "
+                        f"        f.write(f'{{segment.start:.2f}} --> {{segment.end:.2f}}\\n'); "
+                        f"        f.write(f'{{segment.text}}\\n\\n')"
+                    )
+                    
+                    args = [sys.executable, '-c', command]
                     write(args)
-                    # Run the subprocess and capture its output
-                    # Run the subprocess and capture its output with UTF-8 encoding
+                    
                     process = subprocess.Popen(
                         args,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        encoding='utf-8',   # Ensure utf-8 encoding for the output streams
-                        errors='replace',   # Replace invalid characters instead of raising an error
-                        text=True           # Ensure text mode (no binary reading)
+                        encoding='utf-8',
+                        errors='replace',
+                        text=True
                     )
 
-                    # Use threads to read stdout and stderr concurrently
-                    import queue
-                    stdout_queue = queue.Queue()
-                    stderr_queue = queue.Queue()
-
-                    stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_queue))
-                    stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_queue))
-
-                    stdout_thread.start()
-                    stderr_thread.start()
-
-                     # Reading the subprocess output and updating JSON and SRT files
-                    try:
-                        srt_temp_file = srt_file.replace(".srt", "-unfinished.srt")
-
-                        while process.poll() is None:
-                            # Read stderr output for errors
-                            while not stderr_queue.empty():
-                                error_msg = stderr_queue.get()
-                                print(f"Error: {error_msg}", file=sys.stderr)
-
-                            # Read stdout output and write to SRT incrementally
-                            while not stdout_queue.empty():
-                                output = stdout_queue.get()
-                                if output:
-                                    write(f"Out : {output}")
-                            time.sleep(1)
-                    finally:
-                        stdout_thread.join()
-                        stderr_thread.join()
-
-                        stdout, stderr = process.communicate()
-                        exit_code = process.returncode
-
-                        if exit_code != 0 and not done:
-                            write(f"Process exited {str(exit_code)} with error: {stderr}")
-                        else:
-                            #with open(srt_file, 'w') as srt:
-                            #    write_srt(segments_file, srt)
-                            #os.remove(segments_file)
-                            return
+                    # Monitor process and check for successful completion
+                    while process.poll() is None:
+                        stdout = process.stdout.readline()
+                        if stdout:
+                            write(f"Out : {stdout.strip()}")
+                        stderr = process.stderr.readline()
+                        if stderr:
+                            write(f"Error: {stderr.strip()}")
+                        time.sleep(0.1)
+                    
+                    exit_code = process.returncode
+                    if exit_code == 0 or os.path.exists(srt_file):
+                        write(f"Successfully created {srt_file}")
+                        return True
+                    
+                    write(f"Process exited {exit_code}")
+                    
                 except Exception as e:
                     write(f"An error occurred on creation: {e}")
+                    
+                time.sleep(1)  # Brief pause before retrying with different settings
     else:
         write('No model')
+    return False
 def write_srt_from_segments(segments, srt):
     """Writes the transcription segments to an SRT file."""
     for i, segment in enumerate(segments, start=1):

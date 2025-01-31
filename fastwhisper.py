@@ -9,20 +9,162 @@ from PyQt5.QtWidgets import (
 )
 import pymkv
 import transcribe
+from PyQt5.QtCore import QThread, pyqtSignal
+import time
 
 MODEL_NAMES = [
-    "tiny", "base", "small", "medium", "large", "large-v2", "large-v3",
-    "tiny.en", "base.en", "small.en", "medium.en",
-    "jlondonobo/whisper-medium-pt",
-    "clu-ling/whisper-large-v2-japanese-5k-steps",
-    "distil-whisper/distil-medium.en", "distil-whisper/distil-small.en",
-    "distil-whisper/distil-base", "distil-whisper/distil-small",
-    "distil-whisper/distil-medium", "distil-whisper/distil-large",
-    "distil-whisper/distil-large-v2", "distil-whisper/distil-large-v3",
-    "Systran/faster-distil-medium", "Systran/faster-distil-large",
-    "Systran/faster-distil-large-v2", "Systran/faster-distil-large-v3",
-    "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"
+    "distil-whisper/distil-large-v2",  # Distilled version of large-v2
+    "distil-whisper/distil-medium.en",  # English-only medium model
+    "Systran/faster-distil-large-v2",  # Optimized for CPU
+    "small", "medium",  # Original Whisper models
+    "large-v2", "large-v3"  # For CPU-only use
 ]
+
+class TranscriptionThread(QThread):
+    finished = pyqtSignal()
+    progress = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, files_to_process, model_name, log_callback):
+        super().__init__()
+        self.files_to_process = files_to_process
+        self.model_name = model_name
+        self.log_callback = log_callback
+
+    def run(self):
+        try:
+            for i, file_path in enumerate(self.files_to_process, 1):
+                self.progress.emit(f"Processing file {i}/{len(self.files_to_process)}: {file_path}")
+                
+                if file_path.lower().endswith('.mkv'):
+                    file_path = self.convertMKVtoMP3(file_path)
+                    if not file_path:
+                        self.progress.emit(f"Failed to convert {file_path}")
+                        continue
+                    
+                if file_path:
+                    self.processFile(file_path, self.model_name)
+            
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def convertMKVtoMP3(self, mkv_path):
+        output_mp3 = os.path.splitext(mkv_path)[0] + ".mp3"
+        try:
+            mkv = pymkv.MKVFile(mkv_path)
+            
+            # Try to find Japanese audio track first, then undefined, then any audio track
+            audio_track_id = next(
+                (track.track_id for track in mkv.tracks 
+                 if track.track_type == 'audio' and track.language in ['jpn', 'und']),
+                next(
+                    (track.track_id for track in mkv.tracks if track.track_type == 'audio'),
+                    None
+                )
+            )
+
+            if audio_track_id is None:
+                raise ValueError("No audio tracks found")
+
+            command = [
+                "ffmpeg", "-y", "-i", mkv_path,
+                "-map", f"0:{audio_track_id}",
+                "-c:a", "libmp3lame",
+                output_mp3
+            ]
+            
+            subprocess.run(command, check=True)
+            self.progress.emit(f"Converted {mkv_path} to {output_mp3}")
+            return output_mp3
+            
+        except Exception as e:
+            self.progress.emit(f"Error converting {mkv_path}: {str(e)}")
+            return None
+
+    def processFile(self, file_path, model_name):
+        try:
+            srt_file = os.path.splitext(file_path)[0] + f".{model_name}.srt"
+            self.progress.emit(f"Processing {file_path} with model {model_name}...")
+            
+            # Create a temporary Python script instead of using -c
+            script_content = f'''
+import faster_whisper
+import os
+
+def format_timestamp(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    seconds = seconds % 60
+    milliseconds = int((seconds % 1) * 1000)
+    seconds = int(seconds)
+    return f"{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}},{{milliseconds:03d}}"
+
+model = faster_whisper.WhisperModel("{model_name}", device="cpu", compute_type="int8")
+file_path = r"{file_path}"
+srt_file = r"{srt_file}"
+
+try:
+    segments, _ = model.transcribe(file_path, language=None)
+    with open(srt_file, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(segments, 1):
+            # Format timestamps as HH:MM:SS,mmm
+            start_time = format_timestamp(segment.start)
+            end_time = format_timestamp(segment.end)
+            
+            f.write(f"{{i}}\\n")
+            f.write(f"{{start_time}} --> {{end_time}}\\n")
+            f.write(f"{{segment.text.strip()}}\\n\\n")
+except Exception as e:
+    print(f"Error during transcription: {{e}}")
+    exit(1)
+'''
+            
+            # Write the script to a temporary file
+            script_file = os.path.join(os.path.dirname(file_path), "temp_whisper_script.py")
+            with open(script_file, "w", encoding="utf-8") as f:
+                f.write(script_content)
+            
+            # Run the script
+            args = [sys.executable, script_file]
+            self.progress.emit(f"Running transcription script...")
+            
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding='utf-8',
+                errors='replace',
+                text=True
+            )
+
+            # Monitor process and check for successful completion
+            while process.poll() is None:
+                stdout = process.stdout.readline()
+                if stdout:
+                    self.progress.emit(f"Out: {stdout.strip()}")
+                stderr = process.stderr.readline()
+                if stderr:
+                    self.progress.emit(f"Error: {stderr.strip()}")
+                time.sleep(0.1)
+            
+            # Clean up the temporary script
+            try:
+                os.remove(script_file)
+            except:
+                pass
+            
+            exit_code = process.returncode
+            if exit_code == 0 or os.path.exists(srt_file):
+                self.progress.emit(f"Successfully created {srt_file}")
+                return True
+            
+            self.progress.emit(f"Process exited with code {exit_code}")
+            return False
+            
+        except Exception as e:
+            self.progress.emit(f"Error processing {file_path}: {str(e)}")
+            return False
 
 class TranscriptionApp(QWidget):
     def __init__(self):
@@ -33,11 +175,58 @@ class TranscriptionApp(QWidget):
         self.initUI()
 
     def initUI(self):
+        # Apply dark theme
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2E3440;
+                color: #D8DEE9;
+            }
+            QPushButton {
+                background-color: #4C566A;
+                color: #ECEFF4;
+                border: 1px solid #5E81AC;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #5E81AC;
+            }
+            QComboBox {
+                background-color: #4C566A;
+                color: #ECEFF4;
+                border: 1px solid #5E81AC;
+                padding: 5px;
+            }
+            QTextEdit {
+                background-color: #3B4252;
+                color: #ECEFF4;
+                border: 1px solid #5E81AC;
+            }
+            QLabel {
+                color: #ECEFF4;
+            }
+            QMessageBox {
+                background-color: #2E3440;
+                color: #D8DEE9;
+            }
+        """)
+
         layout = QVBoxLayout()
 
         # Model selection dropdown
         self.model_combo = QComboBox(self)
-        self.model_combo.addItems(MODEL_NAMES)
+        
+        # Add smaller models first as default options
+        default_models = [
+            "tiny", "base", "small", 
+            "tiny.en", "base.en", "small.en",
+            "distil-whisper/distil-small.en",
+            "distil-whisper/distil-base"
+        ]
+        
+        # Add all models after the default options
+        self.model_combo.addItems(default_models)
+        self.model_combo.addItems([model for model in MODEL_NAMES if model not in default_models])
+        
         self.model_combo.setCurrentText("small")  # Set default model
         layout.addWidget(QLabel("Select Model:"))
         layout.addWidget(self.model_combo)
@@ -116,49 +305,6 @@ class TranscriptionApp(QWidget):
             except Exception as e:
                 self.log_output.append(f"Error writing to log file: {str(e)}")
 
-    def convertMKVtoMP3(self, mkv_path):
-        output_mp3 = os.path.splitext(mkv_path)[0] + ".mp3"
-        try:
-            mkv = pymkv.MKVFile(mkv_path)
-            
-            # Try to find Japanese audio track first, then undefined, then any audio track
-            audio_track_id = next(
-                (track.track_id for track in mkv.tracks 
-                 if track.track_type == 'audio' and track.language in ['jpn', 'und']),
-                next(
-                    (track.track_id for track in mkv.tracks if track.track_type == 'audio'),
-                    None
-                )
-            )
-
-            if audio_track_id is None:
-                raise ValueError("No audio tracks found")
-
-            command = [
-                "ffmpeg", "-y", "-i", mkv_path,
-                "-map", f"0:{audio_track_id}",
-                "-c:a", "libmp3lame",
-                output_mp3
-            ]
-            
-            subprocess.run(command, check=True)
-            self.log(f"Converted {mkv_path} to {output_mp3}")
-            return output_mp3
-            
-        except Exception as e:
-            self.log(f"Error converting {mkv_path}: {str(e)}")
-            return None
-
-    def processFile(self, file_path, model_name):
-        try:
-            srt_file = os.path.splitext(file_path)[0] + f".{model_name}.srt"
-            segments = 'segments.json'
-            self.log(f"Processing {file_path} with model {model_name}...")
-            transcribe.process_create(file_path, model_name, srt_file, segments, write=self.log)
-            self.log(f"Transcription completed for {file_path}")
-        except Exception as e:
-            self.log(f"Error processing {file_path}: {str(e)}")
-
     def runTranscription(self):
         model_name = self.model_combo.currentText()
         files_to_process = self.selected_files.copy()
@@ -174,16 +320,28 @@ class TranscriptionApp(QWidget):
             QMessageBox.warning(self, "Error", "No files or directory selected for transcription.")
             return
 
-        for i, file_path in enumerate(files_to_process, 1):
-            self.log(f"Processing file {i}/{len(files_to_process)}: {file_path}")
-            
-            if file_path.lower().endswith('.mkv'):
-                file_path = self.convertMKVtoMP3(file_path)
-                
-            if file_path:
-                self.processFile(file_path, model_name)
+        # Disable run button during processing
+        self.run_button.setEnabled(False)
+        self.log_output.clear()
 
+        # Create and start the thread
+        self.transcription_thread = TranscriptionThread(
+            files_to_process, 
+            model_name,
+            self.log
+        )
+        self.transcription_thread.progress.connect(self.log)
+        self.transcription_thread.finished.connect(self.on_transcription_finished)
+        self.transcription_thread.error.connect(self.on_transcription_error)
+        self.transcription_thread.start()
+
+    def on_transcription_finished(self):
         self.log("Transcription process completed!")
+        self.run_button.setEnabled(True)
+
+    def on_transcription_error(self, error_message):
+        self.log(f"Error during transcription: {error_message}")
+        self.run_button.setEnabled(True)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

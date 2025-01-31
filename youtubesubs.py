@@ -280,10 +280,27 @@ def create_redirect_html_file(filename, url):
     </html>
     """)
 def generate(url, i = 0):
-    global history_file, progress_file
+    global history_file, progress_file, model_name
+    
+    # Set CPU-specific settings
+    os.environ['OMP_NUM_THREADS'] = '8'  # Use more CPU threads
+    os.environ['KMP_BLOCKTIME'] = '1'
+    os.environ['KMP_AFFINITY'] = 'granularity=fine,compact,1,0'
+    
+    # Start with CPU for large models
+    if any(large_model in model_name for large_model in ['large', 'medium']):
+        device = 'cpu'
+        compute = 'int8'
+        write(f"Using CPU for {model_name} model")
+    
     url = remove_time_param(url)
     id = get_video_id(url)
     write(url, id)
+    
+    # Start with smaller model
+    original_model = model_name
+    model_name = "small"  # Start with small model
+    
     try:
         history = open(history_file, "r", encoding='utf-8').readlines()
         for h in history:
@@ -315,8 +332,28 @@ def generate(url, i = 0):
             segments = f'segments-{s}.json'
             s += 1
         segments = os.path.join(ytsubs, segments)
-        transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
-        #transcribe_audio(audio_file, model_name)
+        
+        # Try with small model first
+        try:
+            transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
+        except Exception as e:
+            if "CUDA out of memory" in str(e):
+                # Fall back to CPU
+                write("Falling back to CPU due to memory issues")
+                transcribe.process_create(audio_file, model_name, srt_file, segments, device='cpu', write=write)
+            else:
+                raise e
+                
+        # If successful with small model, try with original model
+        if original_model != model_name:
+            try:
+                model_name = original_model
+                transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
+            except:
+                # If fails, keep using small model
+                model_name = "small"
+                write("Could not use larger model, keeping small model results")
+        
         # Delete the audio file
         os.remove(audio_file)
     except Exception as e:

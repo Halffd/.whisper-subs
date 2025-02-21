@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  ytsub:
+    build: .
+    volumes:
+      - .:/app
+      - type: bind
+        source: ${HOME}/Documents
+        target: /home/appuser/Documents
+        bind:
+          create_host_path: true
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - /dev/shm:/dev/shm
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XAUTHORITY=/root/.Xauthority
+      - CLIPBOARD_FILE=/tmp/clipboard_content.txt
+      - HOST_UID=${UID:-1000}  # Pass host user ID
+      - HOST_GID=${GID:-1000}  # Pass host group ID
+    devices:
+      - /dev/dri:/dev/dri  # For GPU access
+    network_mode: host  # Required for X11
+    ipc: host  # Required for clipboard sharing
+
+  captioner:
+    build: .
+    volumes:
+      - .:/app
+      - type: bind
+        source: ${HOME}/Documents
+        target: /home/appuser/Documents
+        bind:
+          create_host_path: true
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - /dev/shm:/dev/shm
+      - /usr/local/cuda:/usr/local/cuda  # Add CUDA toolkit access
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XAUTHORITY=/root/.Xauthority
+      - CLIPBOARD_FILE=/tmp/clipboard_content.txt
+      - HOST_UID=${UID:-1000}
+      - HOST_GID=${GID:-1000}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/snd:/dev/snd  # For audio input
+    group_add:
+      - audio  # Add container to audio group
+    network_mode: host
+    ipc: host
+    privileged: true  # Needed for audio access 

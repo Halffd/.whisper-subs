@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Get clipboard content from host system
+if command -v xclip >/dev/null 2>&1; then
+    CLIPBOARD=$(xclip -o -selection clipboard 2>/dev/null)
+elif command -v xsel >/dev/null 2>&1; then
+    CLIPBOARD=$(xsel -b 2>/dev/null)
+else
+    CLIPBOARD=""
+fi
+
+# Store clipboard content in a temporary file
+TEMP_FILE="/tmp/clipboard_content.txt"
+echo "$CLIPBOARD" > "$TEMP_FILE"
+
+# Export user and group IDs
+export UID=$(id -u)
+export GID=$(id -g)
+
+# Run docker compose with arguments
+docker compose run --rm ytsub "$@"
+
+# Clean up
+rm -f "$TEMP_FILE" 

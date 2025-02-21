@@ -14,6 +14,9 @@ import time
 from youtubesubs import YoutubeSubs
 import pyperclip
 
+# Set QT to use offscreen rendering
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
 MODEL_NAMES = [
     "distil-whisper/distil-large-v2",  # Distilled version of large-v2
     "distil-whisper/distil-medium.en",  # English-only medium model
@@ -460,15 +463,15 @@ class TranscriptionApp(QWidget):
         
         # Separate models with clear descriptions
         self.model_combo.addItems([
+            "medium.en",
+            "base.en",  # English-only models
+            "small.en",  # English-only models
             "tiny",
             "base",
             "small",
             "medium",
             "large-v2",
             "large-v3",
-            "small.en",  # English-only models
-            "medium.en",
-            "large-v2.en",
             "distil-medium.en",  # Distilled models
             "distil-large-v2"
         ])
@@ -504,8 +507,8 @@ class TranscriptionApp(QWidget):
         compute_layout.addWidget(QLabel("Compute Type:"))
         self.compute_combo = QComboBox()
         self.compute_combo.addItems([
-            "int8 (Fast/Low Memory)",
             "int8_float32 (Balanced)",
+            "int8 (Fast/Low Memory)",
             "float16 (GPU Only)",
             "float32 (High Accuracy)"
         ])
@@ -721,7 +724,7 @@ class TranscriptionApp(QWidget):
             for url in urls:
                 url = url.strip()
                 if 'youtu' in url.lower():
-                    youtube_urls.append(url)
+                    youtube_urls.insert(0, url)
             
             if youtube_urls:
                 self.add_new_urls(youtube_urls)

@@ -1,5 +1,7 @@
 import sys
 import model
+import argparse
+from typing import Optional
 default = 'base'
 device = 'cuda'
 if 'cpu' in sys.argv:
@@ -9,17 +11,6 @@ start_time = '00:00:00'
 reverse = 0
 if len(sys.argv) > 2:
     reverse = int(sys.argv[2])
-import pyperclip
-url = pyperclip.paste()
-print(url)
-if '--reversed' in sys.argv:
-    urls = list(url.replace('\r','').split('\n'))
-else:
-    urls = list(reversed(url.replace('\r','').split('\n')))
-
-print(urls)
-print("Video count: " + str(len(urls)))
-
 
 import os
 import subprocess
@@ -30,6 +21,10 @@ import urllib.parse
 import transcribe
 import time
 import caption.log as log
+import pyperclip
+
+# Set QT to use offscreen rendering
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 channel_name = 'unknown'
 video_title = 'none'
@@ -110,7 +105,7 @@ def download_audio(url, rec=False, audio_start_time='00:00:00'):
             'format': 'bestaudio/best',
             'quiet': True,
             'no_warnings': True,
-            'cookies': 'media/cookies.txt',  # Replace with the actual path to your cookies file
+            'cookies': '/home/all/cookies.txt',  # Replace with the actual path to your cookies file
             'ignoreerrors': True
         }
 
@@ -706,8 +701,68 @@ class YoutubeSubs:
         except Exception as e:
             callback(f"Error: {str(e)}")
 
+def get_clipboard_content():
+    """Get clipboard content from either pyperclip or the clipboard file"""
+    try:
+        # Try native clipboard first
+        return pyperclip.paste()
+    except:
+        # Fall back to clipboard file
+        clipboard_file = os.getenv('CLIPBOARD_FILE')
+        if clipboard_file and os.path.exists(clipboard_file):
+            try:
+                with open(clipboard_file, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except Exception as e:
+                write(f"Error reading clipboard file: {e}")
+    return ""
+
+def get_video_url() -> str:
+    """Get video URL from clipboard or command line arguments"""
+    parser = argparse.ArgumentParser(description='Generate subtitles for YouTube videos')
+    parser.add_argument('model_num', nargs='?', help='Model number')
+    parser.add_argument('url', nargs='?', help='YouTube video URL')
+    parser.add_argument('--reversed', action='store_true', help='Process URLs in reverse order')
+    args = parser.parse_args()
+    
+    urls = []
+    print(args)
+    
+    # Check if first arg is a model number
+    url_arg = None
+    if args.model_num and 'youtube' in args.model_num:
+        url_arg = args.model_num
+    elif args.url:
+        url_arg = args.url
+    
+    # Try clipboard if no URL in arguments
+    if not url_arg:
+        clipboard_content = get_clipboard_content()
+        if clipboard_content and len(clipboard_content.strip()) > 0:
+            urls = clipboard_content.replace('\r','').split('\n')
+            urls = [url.strip() for url in urls if url.strip()]
+    else:
+        urls = [url_arg]
+    
+    # If still no URLs, prompt user
+    if not urls:
+        url = input("Enter YouTube video URL: ")
+        urls = [url]
+    
+    # Reverse if requested
+    if args.reversed:
+        urls.reverse()
+    
+    print("Video count:", len(urls))
+    return urls
+
+def main():
+    try:
+        urls = get_video_url()
+        yt = YoutubeSubs(model_name, device=device)
+        yt.process_urls('\n'.join(urls))
+    except Exception as e:
+        write(f"Error in main: {e}")
+
 if __name__ == "__main__":
-    # Example usage
-    yt = YoutubeSubs(model_name="small", device="cpu")
-    urls = pyperclip.paste().replace('\r','').split('\n')
-    yt.process_urls('\n'.join(urls))
+    main()

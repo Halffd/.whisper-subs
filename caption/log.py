@@ -14,7 +14,7 @@ class Log:
         self.args = args
         self.path = path if path != '' else os.path.join(args['path'], 'caption')
         self.log_dir = log_dir
-        self.filename = filename if filename != '' else f'speech{'-' + args["lang"] + '-' if args['lang'] else "-"}{args["model_name"]}'
+        self.filename = filename if filename != '' else f'speech{"-" + args["lang"] + "-" if args["lang"] else "-"}{args["model_name"]}'
         self.test_name = test
         self.file = None
         self.test = None
@@ -59,7 +59,7 @@ class Log:
                         os.rename(match_path, self.file_path)
                         time = datetime.now().strftime("%H:%M:%S")
                         self.file = open(self.file_path, 'a', encoding=self.encoding)
-                        self.file.write(f'\n{args['model_name']} + {args['lang']}\n{date} {time} :  {args}\n')
+                        self.file.write(f'\n{args["model_name"]} + {args["lang"]}\n{date} {time} :  {args}\n')
         if not self.file:
             self.create_log_file()
     def set_path(self, path):

@@ -8,3 +8,6 @@ psutil
 ffmpeg-python
 easygui
 natsort
+torch
+transformers
+tqdm

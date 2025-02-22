@@ -11,3 +11,6 @@ natsort
 torch
 transformers
 tqdm
+PyQt5
+scikit-learn
+pymkv

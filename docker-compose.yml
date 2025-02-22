@@ -11,18 +11,22 @@ services:
         bind:
           create_host_path: true
       - /tmp/.X11-unix:/tmp/.X11-unix
-      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/home/appuser/.Xauthority:ro
       - /dev/shm:/dev/shm
+      - type: bind
+        source: /tmp/runtime-root
+        target: /tmp/runtime-root
     environment:
       - DISPLAY=${DISPLAY}
-      - XAUTHORITY=/root/.Xauthority
+      - XAUTHORITY=/home/appuser/.Xauthority
       - CLIPBOARD_FILE=/tmp/clipboard_content.txt
-      - HOST_UID=${UID:-1000}  # Pass host user ID
-      - HOST_GID=${GID:-1000}  # Pass host group ID
+      - USER=appuser
+      - HOME=/home/appuser
     devices:
-      - /dev/dri:/dev/dri  # For GPU access
-    network_mode: host  # Required for X11
-    ipc: host  # Required for clipboard sharing
+      - /dev/dri:/dev/dri
+    network_mode: host
+    ipc: host
+    user: "${USERID:-1000}:${GROUPID:-1000}"
 
   captioner:
     build: .
@@ -34,15 +38,18 @@ services:
         bind:
           create_host_path: true
       - /tmp/.X11-unix:/tmp/.X11-unix
-      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:ro
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/home/appuser/.Xauthority:ro
       - /dev/shm:/dev/shm
-      - /usr/local/cuda:/usr/local/cuda  # Add CUDA toolkit access
+      - /usr/local/cuda:/usr/local/cuda
+      - type: bind
+        source: /tmp/runtime-root
+        target: /tmp/runtime-root
     environment:
       - DISPLAY=${DISPLAY}
-      - XAUTHORITY=/root/.Xauthority
+      - XAUTHORITY=/home/appuser/.Xauthority
       - CLIPBOARD_FILE=/tmp/clipboard_content.txt
-      - HOST_UID=${UID:-1000}
-      - HOST_GID=${GID:-1000}
+      - USER=appuser
+      - HOME=/home/appuser
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
     deploy:
@@ -54,9 +61,66 @@ services:
               capabilities: [gpu]
     devices:
       - /dev/dri:/dev/dri
-      - /dev/snd:/dev/snd  # For audio input
+      - /dev/snd:/dev/snd
     group_add:
-      - audio  # Add container to audio group
+      - audio
     network_mode: host
     ipc: host
-    privileged: true  # Needed for audio access 
+    privileged: true
+    user: "${USERID:-1000}:${GROUPID:-1000}"
+
+  fastwhisper:
+    build: .
+    working_dir: /app
+    volumes:
+      - .:/app
+      - type: bind
+        source: ${HOME}/Documents
+        target: /home/appuser/Documents
+        bind:
+          create_host_path: true
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/home/appuser/.Xauthority:ro
+      - /dev/shm:/dev/shm
+      - /usr/local/cuda:/usr/local/cuda
+      - type: bind
+        source: /tmp/runtime-root
+        target: /tmp/runtime-root
+        bind:
+          create_host_path: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XAUTHORITY=/home/appuser/.Xauthority
+      - CLIPBOARD_FILE=/tmp/clipboard_content.txt
+      - USER=appuser
+      - HOME=/home/appuser
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+      - QT_X11_NO_MITSHM=1
+      - QT_QPA_PLATFORM=xcb
+      - QT_DEBUG_PLUGINS=1
+      - XDG_RUNTIME_DIR=/tmp/runtime-root
+      - PYTHONPATH=/app
+      - NO_AT_BRIDGE=1
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - QT_GRAPHICSSYSTEM=native
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+      - video
+    network_mode: host
+    ipc: host
+    privileged: true
+    user: "${USERID:-1000}:${GROUPID:-1000}"
+    ports:
+      - "2222:22"  # SSH port for X11 forwarding 

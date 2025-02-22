@@ -14,12 +14,12 @@ import time
 from youtubesubs import YoutubeSubs
 import pyperclip
 
-# Set QT to use offscreen rendering
-os.environ["QT_QPA_PLATFORM"] = "offscreen"
+# Debug output for Qt
+#os.environ['QT_DEBUG_PLUGINS'] = '1'
 
 MODEL_NAMES = [
     "distil-whisper/distil-large-v2",  # Distilled version of large-v2
-    "distil-whisper/distil-medium.en",  # English-only medium model
+    "distil-whisper/distil-medium.en",  # English-only models
     "Systran/faster-distil-large-v2",  # Optimized for CPU
     "small", "medium",  # Original Whisper models
     "large-v2", "large-v3"  # For CPU-only use

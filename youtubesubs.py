@@ -9,8 +9,6 @@ if 'cpu' in sys.argv:
 model_name = model.getName(sys.argv, default)
 start_time = '00:00:00'
 reverse = 0
-if len(sys.argv) > 2:
-    reverse = int(sys.argv[2])
 
 import os
 import subprocess
@@ -721,28 +719,17 @@ def get_video_url() -> str:
     """Get video URL from clipboard or command line arguments"""
     parser = argparse.ArgumentParser(description='Generate subtitles for YouTube videos')
     parser.add_argument('model_num', nargs='?', help='Model number')
-    parser.add_argument('url', nargs='?', help='YouTube video URL')
-    parser.add_argument('--reversed', action='store_true', help='Process URLs in reverse order')
+    parser.add_argument('reverse', nargs='?', type=int, default=0, help='Reverse order (0 or 1)')
     args = parser.parse_args()
     
     urls = []
     print(args)
     
-    # Check if first arg is a model number
-    url_arg = None
-    if args.model_num and 'youtube' in args.model_num:
-        url_arg = args.model_num
-    elif args.url:
-        url_arg = args.url
-    
     # Try clipboard if no URL in arguments
-    if not url_arg:
-        clipboard_content = get_clipboard_content()
-        if clipboard_content and len(clipboard_content.strip()) > 0:
-            urls = clipboard_content.replace('\r','').split('\n')
-            urls = [url.strip() for url in urls if url.strip()]
-    else:
-        urls = [url_arg]
+    clipboard_content = get_clipboard_content()
+    if clipboard_content and len(clipboard_content.strip()) > 0:
+        urls = clipboard_content.replace('\r','').split('\n')
+        urls = [url.strip() for url in urls if url.strip()]
     
     # If still no URLs, prompt user
     if not urls:
@@ -750,7 +737,7 @@ def get_video_url() -> str:
         urls = [url]
     
     # Reverse if requested
-    if args.reversed:
+    if args.reverse == 1:
         urls.reverse()
     
     print("Video count:", len(urls))

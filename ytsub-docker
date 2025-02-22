@@ -14,11 +14,15 @@ TEMP_FILE="/tmp/clipboard_content.txt"
 echo "$CLIPBOARD" > "$TEMP_FILE"
 
 # Export user and group IDs
-export UID=$(id -u)
-export GID=$(id -g)
+export USERID=$(id -u)
+export GROUPID=$(id -g)
 
-# Run docker compose with arguments
-docker compose run --rm ytsub "$@"
+# Create runtime directory if it doesn't exist
+mkdir -p /tmp/runtime-root
+chmod 777 /tmp/runtime-root
+
+# Run docker compose with arguments for youtubesubs
+docker compose run --rm ytsub python3 youtubesubs.py "$@"
 
 # Clean up
 rm -f "$TEMP_FILE" 

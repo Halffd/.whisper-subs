@@ -4,6 +4,7 @@ venv
 .idea
 .vscode
 *.mp3
+*.part
 *.mp4
 *.webm
 *.mkv

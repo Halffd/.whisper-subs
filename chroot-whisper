@@ -1,0 +1,179 @@
+#!/bin/bash
+
+# Configuration
+CHROOT_PATH="/mnt/debian"  # Default to debian chroot path
+DISPLAY_NUM=":0.0"         # Change if using a different display
+USERNAME="half"           # Get the actual username
+HOST_USER_HOME=$HOME      # Store host user's home directory
+MINICONDA_PATH="/home/half-arch/miniconda3/envs/whisp/bin/python"  # Miniconda Python path
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "Please run as root"
+    exit 1
+fi
+
+# Check if Miniconda Python exists
+if [ ! -x "$MINICONDA_PATH" ]; then
+    echo "Miniconda Python not found at $MINICONDA_PATH"
+    exit 1
+fi
+
+# Check if chroot environment exists
+if [ ! -d "$CHROOT_PATH" ]; then
+    echo "Chroot directory $CHROOT_PATH does not exist"
+    exit 1
+fi
+
+# Check for shell in multiple locations
+CHROOT_SHELL=""
+for shell in "/usr/bin/bash" "/bin/bash" "/usr/bin/sh" "/bin/sh"; do
+    if [ -x "${CHROOT_PATH}${shell}" ]; then
+        CHROOT_SHELL="$shell"
+        break
+    fi
+done
+
+if [ -z "$CHROOT_SHELL" ]; then
+    echo "No usable shell found in chroot. Please install basic system utilities first."
+    echo "Try: debootstrap stable $CHROOT_PATH http://deb.debian.org/debian/"
+    exit 1
+fi
+
+# Create necessary directories with proper permissions
+for dir in "${CHROOT_PATH}/dev" "${CHROOT_PATH}/proc" "${CHROOT_PATH}/sys" "${CHROOT_PATH}/tmp" \
+           "${CHROOT_PATH}/run/shm" "${CHROOT_PATH}/run/user/1003" "${CHROOT_PATH}/tmp/pulse" \
+           "${CHROOT_PATH}/home/half-arch/miniconda3/bin" "${CHROOT_PATH}/tmp/runtime"; do
+    mkdir -p "$dir"
+    if [ "$dir" = "${CHROOT_PATH}/run/user/1003" ]; then
+        chown 1003:1003 "$dir"  # Match UID/GID from error
+        chmod 1777 "$dir"
+    else
+        chmod 1777 "$dir"
+    fi
+done
+
+# Create dedicated runtime directory
+mkdir -p "${CHROOT_PATH}/tmp/runtime"
+chown ${USERNAME}:${USERNAME} "${CHROOT_PATH}/tmp/runtime"
+chmod 700 "${CHROOT_PATH}/tmp/runtime"
+
+# Special handling for dev/shm
+mkdir -p "${CHROOT_PATH}/dev/shm"
+chmod 1777 "${CHROOT_PATH}/dev/shm"
+
+# Mount essential filesystems if not already mounted
+mountpoint -q "${CHROOT_PATH}/proc" || mount -t proc /proc "${CHROOT_PATH}/proc"
+mountpoint -q "${CHROOT_PATH}/sys" || mount -t sysfs /sys "${CHROOT_PATH}/sys"
+mountpoint -q "${CHROOT_PATH}/dev" || mount -o bind /dev "${CHROOT_PATH}/dev"
+mountpoint -q "${CHROOT_PATH}/dev/pts" || mount -o bind /dev/pts "${CHROOT_PATH}/dev/pts"
+
+# Mount Miniconda directory
+mountpoint -q "${CHROOT_PATH}/home/half-arch/miniconda3" || mount -o bind "/home/half-arch/miniconda3" "${CHROOT_PATH}/home/half-arch/miniconda3"
+
+# Allow X server connections from local users
+xhost +local: >/dev/null 2>&1
+xhost +SI:localuser:${USERNAME} >/dev/null 2>&1
+
+# Setup X11 forwarding
+HOST_XAUTHORITY="$HOST_USER_HOME/.Xauthority"
+CHROOT_XAUTHORITY="${CHROOT_PATH}/tmp/.Xauthority"
+
+# Create Xauthority file in chroot
+touch "$CHROOT_XAUTHORITY"
+chmod 600 "$CHROOT_XAUTHORITY"
+chown ${USERNAME}:${USERNAME} "$CHROOT_XAUTHORITY"
+
+# Get X11 authentication data
+if [ -f "$HOST_XAUTHORITY" ]; then
+    # Copy authentication data for current display
+    xauth nlist $DISPLAY | sed -e 's/^..../ffff/' | xauth -f "$CHROOT_XAUTHORITY" nmerge -
+fi
+
+# Setup audio - bind mount pulse socket and config
+PULSE_PATH="${CHROOT_PATH}/tmp/pulse"
+mkdir -p "$PULSE_PATH"
+chown ${USERNAME}:${USERNAME} "$PULSE_PATH"
+
+if [ -d "/run/user/$(id -u)/pulse" ]; then
+    mountpoint -q "$PULSE_PATH" || mount -o bind "/run/user/$(id -u)/pulse" "$PULSE_PATH"
+fi
+
+# Copy pulse cookie if it exists
+PULSE_COOKIE="$HOST_USER_HOME/.config/pulse/cookie"
+CHROOT_PULSE_COOKIE="${CHROOT_PATH}/tmp/pulse.cookie"
+if [ -f "$PULSE_COOKIE" ]; then
+    cp "$PULSE_COOKIE" "$CHROOT_PULSE_COOKIE"
+    chmod 600 "$CHROOT_PULSE_COOKIE"
+    chown ${USERNAME}:${USERNAME} "$CHROOT_PULSE_COOKIE"
+fi
+
+# Get clipboard content from host system
+if command -v xclip >/dev/null 2>&1; then
+    CLIPBOARD=$(xclip -o -selection clipboard 2>/dev/null)
+elif command -v xsel >/dev/null 2>&1; then
+    CLIPBOARD=$(xsel -b 2>/dev/null)
+else
+    CLIPBOARD=""
+fi
+
+# Store clipboard content in a temporary file
+TEMP_FILE="${CHROOT_PATH}/tmp/clipboard_content.txt"
+echo "$CLIPBOARD" | sudo -u ${USERNAME} tee "$TEMP_FILE" >/dev/null
+
+# Ensure user's home directory exists in chroot with correct permissions
+CHROOT_HOME="${CHROOT_PATH}/home/${USERNAME}"
+mkdir -p "$CHROOT_HOME"
+chown ${USERNAME}:${USERNAME} "$CHROOT_HOME"
+chmod 755 "$CHROOT_HOME"
+
+# Ensure the target directory exists in chroot
+WHISPER_DIR="/home/all/repos/.whisper-subs"
+mkdir -p "${CHROOT_PATH}${WHISPER_DIR}"
+chown -R ${USERNAME}:${USERNAME} "${CHROOT_PATH}${WHISPER_DIR}"
+chmod -R 755 "${CHROOT_PATH}${WHISPER_DIR}"
+
+# Enter chroot with environment setup
+echo "Using shell: $CHROOT_SHELL"
+chroot "$CHROOT_PATH" "$CHROOT_SHELL" -c "
+    export DISPLAY=$DISPLAY
+    export XAUTHORITY=/tmp/.Xauthority
+    export PULSE_SERVER=unix:/tmp/pulse/native
+    export PULSE_COOKIE=/tmp/pulse.cookie
+    export HOME=/home/${USERNAME}
+    export USER=${USERNAME}
+    export USERNAME=${USERNAME}
+    export LOGNAME=${USERNAME}
+    export CLIPBOARD_FILE=/tmp/clipboard_content.txt
+    export XDG_RUNTIME_DIR=/tmp/runtime
+    export PATH=/home/half-arch/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export QT_X11_NO_MITSHM=1
+    export NO_AT_BRIDGE=1
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    export QT_QPA_PLATFORM=xcb
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib:/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    export XDG_DATA_DIRS=/usr/share
+    export XDG_CONFIG_DIRS=/etc/xdg
+    cd $WHISPER_DIR
+    $MINICONDA_PATH $*
+"
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up mounts..."
+    for mount in "${CHROOT_PATH}/proc" "${CHROOT_PATH}/sys" "${CHROOT_PATH}/dev/pts" "${CHROOT_PATH}/dev/shm" "${CHROOT_PATH}/dev" "${CHROOT_PATH}/tmp" "${CHROOT_PATH}/run/shm" "$PULSE_PATH" "${CHROOT_PATH}/home/half-arch/miniconda3"; do
+        if mountpoint -q "$mount" 2>/dev/null; then
+            umount "$mount" 2>/dev/null || umount -l "$mount" 2>/dev/null
+        fi
+    done
+    rm -f "$TEMP_FILE" 2>/dev/null
+    rm -f "$CHROOT_XAUTHORITY" 2>/dev/null
+    xhost -local: >/dev/null 2>&1
+}
+
+# Set trap for cleanup
+trap cleanup EXIT
+
+# Wait for any background processes
+wait 

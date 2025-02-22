@@ -1,0 +1,54 @@
+#!/bin/bash
+
+# Get clipboard content from host system
+if command -v xclip >/dev/null 2>&1; then
+    CLIPBOARD=$(xclip -o -selection clipboard 2>/dev/null)
+elif command -v xsel >/dev/null 2>&1; then
+    CLIPBOARD=$(xsel -b 2>/dev/null)
+else
+    CLIPBOARD=""
+fi
+
+# Store clipboard content in a temporary file
+TEMP_FILE="/tmp/clipboard_content.txt"
+echo "$CLIPBOARD" > "$TEMP_FILE"
+
+# Export user and group IDs
+export USERID=$(id -u)
+export GROUPID=$(id -g)
+
+# Create runtime directory if it doesn't exist
+mkdir -p /tmp/runtime-root
+chmod 700 /tmp/runtime-root
+
+# Allow X server connections from local users
+xhost +local:
+
+# Stop any existing containers
+docker compose down
+
+# Try direct X11 first
+echo "Attempting direct X11 connection..."
+docker compose run --rm --entrypoint "python3" fastwhisper /app/fastwhisper.py
+
+# If direct X11 fails, try SSH forwarding
+if [ $? -ne 0 ]; then
+    echo "Direct X11 failed, trying SSH forwarding..."
+    
+    # Start container in background
+    docker compose run -d --name fastwhisper_ssh fastwhisper /usr/sbin/sshd -D
+    
+    # Wait for SSH to be ready
+    sleep 2
+    
+    # Connect via SSH with X11 forwarding
+    ssh -X -p 2222 -o StrictHostKeyChecking=no appuser@localhost "python3 /app/fastwhisper.py"
+    
+    # Cleanup SSH container
+    docker stop fastwhisper_ssh
+    docker rm fastwhisper_ssh
+fi
+
+# Cleanup
+xhost -local:
+rm -f "$TEMP_FILE" 

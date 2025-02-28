@@ -662,6 +662,21 @@ class YoutubeSubs:
             url = self.remove_time_param(url)
             video_id = self.get_video_id(url)
             
+            # Check history first
+            try:
+                if os.path.exists(self.history_file):
+                    with open(self.history_file, "r", encoding='utf-8') as f:
+                        history = f.readlines()
+                        for line in history:
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                hist_id, hist_model = parts[0], parts[1]
+                                if hist_id == video_id and hist_model == self.model_name:
+                                    callback(f"Skipping {url} - already processed with model {self.model_name}")
+                                    return
+            except Exception as e:
+                callback(f"Error checking history: {str(e)}")
+            
             # Download and process audio
             audio_file = self.download_audio(url)
             if audio_file is None:

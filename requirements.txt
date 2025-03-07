@@ -1,5 +1,10 @@
+faster-whisper
 yt-dlp
-faster_whisper
+pymkv
+flask
+flask-socketio
+requests
+eventlet
 numpy
 pandas
 matplotlib
@@ -13,4 +18,3 @@ transformers
 tqdm
 PyQt5
 scikit-learn
-pymkv

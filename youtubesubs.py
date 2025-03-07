@@ -9,7 +9,6 @@ if 'cpu' in sys.argv:
 model_name = model.getName(sys.argv, default)
 start_time = '00:00:00'
 reverse = 0
-
 import os
 import subprocess
 import yt_dlp
@@ -752,7 +751,8 @@ def get_video_url() -> str:
         urls = [url]
     
     # Reverse if requested
-    if args.reverse == 1:
+    #print(sys.argv)
+    if args.reverse != 1:
         urls.reverse()
     
     print("Video count:", len(urls))

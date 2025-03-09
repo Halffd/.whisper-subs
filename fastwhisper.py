@@ -125,12 +125,20 @@ class TranscriptionThread(QThread):
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
             
+            # Get language code from selection
+            lang = None  # Default to None for automatic
+            if hasattr(self, 'lang_combo'):
+                selected_lang = self.lang_combo.currentText()
+                if selected_lang != "Automatic":
+                    # Extract language code from format "Language (code)"
+                    lang = selected_lang.split('(')[-1].strip(')')
+            
             # Process the file using transcribe module
             success = transcribe.process_create(
                 file=file_path,
                 model_name=self.model_name,
                 srt_file=srt_file,
-                language=None,
+                language=lang,
                 device=self.device,
                 compute_type=self.compute_type,
                 force_device=self.force_device,
@@ -292,6 +300,38 @@ class TranscriptionApp(QWidget):
         sort_layout.addLayout(sort_group)
         options_right.addLayout(sort_layout)
         
+        # Model and language selection
+        model_lang_layout = QHBoxLayout()
+        
+        # Model selection
+        model_layout = QVBoxLayout()
+        model_label = QLabel("Model:")
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(MODEL_NAMES)
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_combo)
+        model_lang_layout.addLayout(model_layout)
+        
+        # Language selection
+        lang_layout = QVBoxLayout()
+        lang_label = QLabel("Language:")
+        self.lang_combo = QComboBox()
+        # Add common languages and automatic option
+        languages = [
+            "Automatic",
+            "English (en)", "Japanese (ja)", "Chinese (zh)", "Korean (ko)",
+            "Spanish (es)", "French (fr)", "German (de)", "Italian (it)",
+            "Russian (ru)", "Portuguese (pt)", "Dutch (nl)", "Polish (pl)",
+            "Turkish (tr)", "Arabic (ar)", "Hindi (hi)", "Vietnamese (vi)"
+        ]
+        self.lang_combo.addItems(languages)
+        self.lang_combo.setCurrentText("Automatic")  # Set default
+        lang_layout.addWidget(lang_label)
+        lang_layout.addWidget(self.lang_combo)
+        model_lang_layout.addLayout(lang_layout)
+        
+        options_right.addLayout(model_lang_layout)
+        
         # Time range
         time_layout = QHBoxLayout()
         time_layout.addWidget(QLabel("Start Time:"))
@@ -312,30 +352,6 @@ class TranscriptionApp(QWidget):
         
         clipboard_layout.addLayout(options_right)
         layout.addLayout(clipboard_layout)
-
-        # Model selection
-        model_layout = QHBoxLayout()
-        model_label = QLabel("Model:")
-        self.model_combo = QComboBox()
-        
-        # Separate models with clear descriptions
-        self.model_combo.addItems([
-            "medium.en",
-            "base.en",  # English-only models
-            "small.en",  # English-only models
-            "tiny",
-            "base",
-            "small",
-            "medium",
-            "large-v2",
-            "large-v3",
-            "distil-medium.en",  # Distilled models
-            "distil-large-v2"
-        ])
-        
-        model_layout.addWidget(model_label)
-        model_layout.addWidget(self.model_combo)
-        layout.addLayout(model_layout)
 
         # Device selection
         device_group = QHBoxLayout()

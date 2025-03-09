@@ -69,7 +69,9 @@ class TranscriptionThread(QThread):
         self.model_name = model_name
         self.log_callback = log_callback
         self.youtube_urls = youtube_urls
-        self.service_url = "http://localhost:5000"
+        self.device = 'cuda' if hasattr(self, 'gpu_radio') and self.gpu_radio.isChecked() else 'cpu'
+        self.compute_type = self.compute_combo.currentText().split(' ')[0] if hasattr(self, 'compute_combo') else 'int8'
+        self.force_device = hasattr(self, 'force_device_check') and self.force_device_check.isChecked()
         
         # Setup WebSocket
         import socketio
@@ -115,53 +117,49 @@ class TranscriptionThread(QThread):
             except:
                 pass
 
-    def process_url(self, url):
-        """Send URL to Docker service for processing"""
-        try:
-            import requests
-            
-            # Prepare request data
-            data = {
-                "url": url,
-                "model_name": self.model_name,
-                "device": 'cuda' if self.gpu_radio.isChecked() else 'cpu',
-                "compute_type": self.compute_combo.currentText().split(' ')[0],
-                "force_device": self.force_device_check.isChecked(),
-                "start_time": self.start_time.text().strip() or None,
-                "end_time": self.end_time.text().strip() or None
-            }
-            
-            # Send request to service
-            response = requests.post(f"{self.service_url}/transcribe", json=data)
-            response.raise_for_status()
-            
-            self.progress.emit(f"Successfully processed {url}")
-            
-        except Exception as e:
-            self.error.emit(f"Error processing {url}: {str(e)}")
-
     def process_local_file(self, file_path):
-        """Process a local file using the Docker service"""
+        """Process a local file using the transcribe module"""
         try:
-            import requests
+            # Create output srt file path
+            dir_path = os.path.dirname(file_path)
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
             
-            # Prepare request data
-            data = {
-                "file_path": file_path,
-                "model_name": self.model_name,
-                "device": 'cuda' if self.gpu_radio.isChecked() else 'cpu',
-                "compute_type": self.compute_combo.currentText().split(' ')[0],
-                "force_device": self.force_device_check.isChecked()
-            }
+            # Process the file using transcribe module
+            success = transcribe.process_create(
+                file=file_path,
+                model_name=self.model_name,
+                srt_file=srt_file,
+                language=None,
+                device=self.device,
+                compute_type=self.compute_type,
+                force_device=self.force_device,
+                write=lambda msg: self.progress.emit(str(msg))
+            )
             
-            # Send request to service
-            response = requests.post(f"{self.service_url}/process_local", json=data)
-            response.raise_for_status()
-            
-            self.progress.emit(f"Successfully processed {file_path}")
+            if success:
+                self.progress.emit(f"Successfully transcribed {file_path}")
+            else:
+                self.error.emit(f"Failed to transcribe {file_path}")
             
         except Exception as e:
             self.error.emit(f"Error processing {file_path}: {str(e)}")
+
+    def process_url(self, url):
+        """Process a YouTube URL using YoutubeSubs"""
+        try:
+            yt = YoutubeSubs(
+                model_name=self.model_name,
+                device=self.device,
+                compute=self.compute_type,
+                force_device=self.force_device
+            )
+            
+            # Process the URL
+            yt.process_single_url(url, callback=lambda msg: self.progress.emit(str(msg)))
+            
+        except Exception as e:
+            self.error.emit(f"Error processing {url}: {str(e)}")
 
     def convertMKVtoMP3(self, mkv_path):
         output_mp3 = os.path.splitext(mkv_path)[0] + ".mp3"
@@ -206,6 +204,13 @@ class TranscriptionApp(QWidget):
         self.last_clipboard = ""
         self.clipboard_monitoring = True
         self.force_device = False
+        
+        # Set window to maximize on primary monitor
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.availableGeometry()
+        self.setGeometry(screen_geometry)
+        self.setWindowState(QtCore.Qt.WindowMaximized)
+        
         self.initUI()
         
         # Setup clipboard monitoring
@@ -408,7 +413,6 @@ class TranscriptionApp(QWidget):
 
         self.setLayout(layout)
         self.setWindowTitle('Transcription App')
-        self.setGeometry(100, 100, 800, 600)
 
     def selectFiles(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -466,39 +470,73 @@ class TranscriptionApp(QWidget):
         # Get time range if specified
         start_time = self.start_time.text().strip() or None
         end_time = self.end_time.text().strip() or None
-        
-        # Process YouTube URLs if any
-        youtube_urls = self.youtube_input.toPlainText().strip()
-        if youtube_urls:
-            self.run_button.setEnabled(False)
-            
-            # Create a QThread for YouTube processing
-            self.transcription_thread = TranscriptionThread(
-                files_to_process=[],
-                model_name=model_name,
-                log_callback=self.log,
-                youtube_urls=youtube_urls
-            )
-            
-            # Connect signals
-            self.transcription_thread.progress.connect(self.log)
-            self.transcription_thread.finished.connect(self.on_transcription_finished)
-            self.transcription_thread.error.connect(self.on_transcription_error)
-            
-            # Start in low priority to prevent system freezing
-            self.transcription_thread.start(QThread.LowPriority)
-            return
 
-        # Process local files if any
-        files_to_process = self.selected_files.copy()
+        # Process local files first
+        files_to_process = []
+        seen_base_names = set()  # Track files by their base name without extension
+
+        # Helper function to add file with priority
+        def add_file_with_priority(file_path):
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            if base_name in seen_base_names:
+                return False
+            
+            # Check if we should add this file
+            is_audio = file_path.lower().endswith(('.mp3', '.wav', '.flac', '.ogg'))
+            is_mkv = file_path.lower().endswith('.mkv')
+            
+            # Get all possible related files
+            dir_path = os.path.dirname(file_path)
+            related_files = []
+            for ext in ['.mp3', '.wav', '.flac', '.ogg', '.mkv']:
+                related_path = os.path.join(dir_path, base_name + ext)
+                if os.path.exists(related_path):
+                    related_files.append(related_path)
+            
+            # If we have both audio and mkv files, prefer audio
+            if related_files:
+                has_audio = any(f.lower().endswith(('.mp3', '.wav', '.flac', '.ogg')) for f in related_files)
+                if has_audio:
+                    # Only add if this is the first audio file we've found
+                    if is_audio and file_path == min(f for f in related_files if f.lower().endswith(('.mp3', '.wav', '.flac', '.ogg'))):
+                        seen_base_names.add(base_name)
+                        files_to_process.append(file_path)
+                        return True
+                    return False
+                elif is_mkv:
+                    # No audio exists, add the mkv
+                    seen_base_names.add(base_name)
+                    files_to_process.append(file_path)
+                    return True
+            else:
+                # No related files exist, add this one
+                seen_base_names.add(base_name)
+                files_to_process.append(file_path)
+                return True
+            return False
+
+        # Collect all potential files first
+        all_files = []
+        if self.selected_files:
+            all_files.extend(self.selected_files)
+
         if self.selected_directory:
-            files_to_process.extend([
-                os.path.join(self.selected_directory, f)
-                for f in os.listdir(self.selected_directory)
-                if f.lower().endswith(('.mkv', '.mp3', '.wav', '.flac', '.ogg'))
-            ])
+            for f in os.listdir(self.selected_directory):
+                if f.lower().endswith(('.mkv', '.mp3', '.wav', '.flac', '.ogg')):
+                    all_files.append(os.path.join(self.selected_directory, f))
 
-        if not files_to_process:
+        # Sort all files alphabetically first
+        all_files.sort(key=lambda x: os.path.basename(x).lower())
+
+        # Process files in alphabetical order, applying priority rules
+        for file_path in all_files:
+            add_file_with_priority(file_path)
+
+        # Get YouTube URLs if any
+        youtube_urls = self.youtube_input.toPlainText().strip()
+
+        # No inputs case
+        if not files_to_process and not youtube_urls:
             QMessageBox.warning(self, "Error", "No files, directory, or YouTube URLs selected.")
             return
 
@@ -506,16 +544,18 @@ class TranscriptionApp(QWidget):
         self.run_button.setEnabled(False)
         self.log_output.clear()
 
-        # Create and start the thread
+        # Create thread for processing both files and URLs
         self.transcription_thread = TranscriptionThread(
-            files_to_process, 
-            model_name,
-            self.log
+            files_to_process=files_to_process,
+            model_name=model_name,
+            log_callback=self.log,
+            youtube_urls=youtube_urls if youtube_urls else None
         )
+        
         self.transcription_thread.progress.connect(self.log)
         self.transcription_thread.finished.connect(self.on_transcription_finished)
         self.transcription_thread.error.connect(self.on_transcription_error)
-        self.transcription_thread.start()
+        self.transcription_thread.start(QThread.LowPriority)
 
     def on_transcription_finished(self):
         self.log("Transcription process completed!")

@@ -25,3 +25,4 @@ ai/ai
 ai/Lib
 __pycache__
 ai/__pycache__
+temp_whisper*

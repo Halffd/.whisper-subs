@@ -8,6 +8,8 @@ services:
     volumes:
       - ./input:/data/input
       - ~/Documents/Youtube-Subs:/data/output
+      - ~/.config/yt-dlp:/app/.config/yt-dlp
+      - ~/.config/BraveSoftware:/root/.config/BraveSoftware:ro
     deploy:
       resources:
         reservations:

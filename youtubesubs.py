@@ -406,6 +406,48 @@ class YoutubeSubs:
         self.progress_name = f'progress-{self.start}'
         self.progress_file = os.path.join(self.ytsubs, f'{self.progress_name}.log')
         self.history_file = os.path.join(self.ytsubs, 'history.txt')
+        
+        # Find cookies file
+        self.cookies_file = self._find_cookies_file()
+
+    def _find_cookies_file(self):
+        """Find the cookies file in various possible locations"""
+        cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
+        cookie_file = os.path.join(cookie_dir, 'cookies.txt')
+        
+        # Try to export from Brave if no cookie file exists
+        if not os.path.exists(cookie_file):
+            try:
+                os.makedirs(cookie_dir, exist_ok=True)
+                result = subprocess.run(
+                    ["yt-dlp", "--cookies-from-browser", "brave", "-o", cookie_file],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    self.write("Successfully exported cookies from Brave browser")
+                    # Set proper permissions
+                    os.chmod(cookie_file, 0o600)
+                    return cookie_file
+                else:
+                    self.write(f"Error exporting cookies: {result.stderr}")
+            except Exception as e:
+                self.write(f"Failed to export cookies from Brave: {str(e)}")
+        
+        # Check various possible locations as fallback
+        possible_paths = [
+            cookie_file,
+            'cookies.txt',  # Local to app
+            os.path.join(os.path.expanduser('~'), 'cookies.txt'),  # Home dir
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                self.write(f"Using cookies file: {path}")
+                return path
+                
+        self.write("Warning: No cookies file found. Age-restricted videos may fail.")
+        return None
 
     def write(self, *text, mpv='err'):
         """Log messages to file and through callback"""
@@ -459,9 +501,12 @@ class YoutubeSubs:
                 'format': 'bestaudio/best',
                 'quiet': True,
                 'no_warnings': True,
-                'cookies': 'media/cookies.txt',
                 'ignoreerrors': True
             }
+            
+            # Add cookies if available
+            if self.cookies_file:
+                ydl_opts['cookiefile'] = self.cookies_file
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -487,8 +532,11 @@ class YoutubeSubs:
                 self.write(' '.join([str(self.delay), self.channel_name, str(timestamp), 
                                    str(date_time), self.video_title, audio_file]))
 
-            # Add time range to ffmpeg command if specified
+            # Add time range and cookies to command
             command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3"]
+            
+            if self.cookies_file:
+                command.extend(["--cookies", self.cookies_file])
             
             if self.start_time or self.end_time:
                 time_args = []
@@ -521,9 +569,12 @@ class YoutubeSubs:
                 'outtmpl': '%(title)s.%(ext)s',
                 'quiet': True,
                 'no_warnings': True,
-                'ignoreerrors': True,            
-                'cookies': 'media/cookies.txt'
+                'ignoreerrors': True
             }
+            
+            # Add cookies if available
+            if self.cookies_file:
+                ydl_opts['cookiefile'] = self.cookies_file
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)

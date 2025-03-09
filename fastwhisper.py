@@ -7,12 +7,45 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel, 
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton
 )
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5 import QtGui, QtCore
 import pymkv
 import transcribe
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 import time
 from youtubesubs import YoutubeSubs
 import pyperclip
+
+# Setup Qt message handler to suppress propagateSizeHints warning
+def qt_message_handler(mode, context, message):
+    if mode == QtCore.QtWarningMsg and 'propagateSizeHints' in message:
+        return
+    if mode == QtCore.QtInfoMsg:
+        mode = 'INFO'
+    elif mode == QtCore.QtWarningMsg:
+        mode = 'WARNING'
+    elif mode == QtCore.QtCriticalMsg:
+        mode = 'CRITICAL'
+    elif mode == QtCore.QtFatalMsg:
+        mode = 'FATAL'
+    else:
+        mode = 'DEBUG'
+    print('qt_message_handler: line: %d, func: %s(), file: %s' % (
+          context.line, context.function, context.file))
+    print('  %s: %s\n' % (mode, message))
+
+QtCore.qInstallMessageHandler(qt_message_handler)
+
+# Set High DPI handling before creating QApplication
+if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+if hasattr(QtCore.Qt, 'AA_ShareOpenGLContexts'):
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts, True)
+
+# Set environment variables for better HiDPI support
+os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+os.environ["QT_SCALE_FACTOR"] = "1"
 
 # Debug output for Qt
 #os.environ['QT_DEBUG_PLUGINS'] = '1'
@@ -522,7 +555,7 @@ class TranscriptionApp(QWidget):
             for url in urls:
                 url = url.strip()
                 if 'youtu' in url.lower():
-                    youtube_urls.insert(0, url)
+                    youtube_urls.append(url)
             
             if youtube_urls:
                 self.add_new_urls(youtube_urls)
@@ -578,6 +611,12 @@ class TranscriptionApp(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # Set font DPI
+    font = app.font()
+    font.setPointSize(10)  # Adjust base font size
+    app.setFont(font)
+    
     window = TranscriptionApp()
-    window.show()
+    window.show()  # Use show() instead of exec_() for better compatibility
     sys.exit(app.exec_())

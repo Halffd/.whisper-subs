@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel, 
-    QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton
+    QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout
 )
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5 import QtGui, QtCore
@@ -134,6 +134,26 @@ class TranscriptionThread(QThread):
                     # Extract language code from format "Language (code)"
                     force_lang = selected_lang.split('(')[-1].strip(')')
             
+            # Get VAD and diarization settings
+            vad_filter = hasattr(self, 'vad_enabled') and self.vad_enabled.isChecked()
+            vad_params = None
+            if vad_filter:
+                try:
+                    silence_duration = int(self.vad_silence_duration.text() or "500")
+                    vad_params = dict(min_silence_duration_ms=silence_duration)
+                except ValueError:
+                    vad_params = dict(min_silence_duration_ms=500)
+
+            diarization = hasattr(self, 'diarization_enabled') and self.diarization_enabled.isChecked()
+            diarization_params = None
+            if diarization:
+                try:
+                    min_speakers = int(self.min_speakers.text() or "1")
+                    max_speakers = int(self.max_speakers.text() or "2")
+                    diarization_params = dict(min_speakers=min_speakers, max_speakers=max_speakers)
+                except ValueError:
+                    diarization_params = dict(min_speakers=1, max_speakers=2)
+            
             if force_lang:
                 # If language is forced, use regular transcription
                 success = transcribe.process_create(
@@ -144,6 +164,10 @@ class TranscriptionThread(QThread):
                     device=self.device,
                     compute_type=self.compute_type,
                     force_device=self.force_device,
+                    vad_filter=vad_filter,
+                    vad_parameters=vad_params,
+                    diarization=diarization,
+                    diarization_parameters=diarization_params,
                     write=lambda msg: self.progress.emit(str(msg))
                 )
             else:
@@ -156,59 +180,44 @@ class TranscriptionThread(QThread):
                     download_root=None
                 )
                 
-                # First pass: Detect languages in segments
+                # First pass: Initial transcription with language detection
                 self.progress.emit("Detecting languages in segments...")
-                segments = []
-                current_lang = None
-                current_group = []
-                segment_size = 10.0  # 10 seconds per segment
-                
-                # Initial transcription to get segments with language detection
-                result = model.transcribe(
+                segments, info = model.transcribe(
                     file_path,
                     beam_size=1,
                     word_timestamps=True,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=500)
+                    vad_filter=vad_filter,
+                    vad_parameters=vad_params,
+                    initial_prompt=None,
+                    condition_on_previous_text=True
                 )
                 
-                # Group segments by detected language
-                for segment in result[0]:
-                    if not current_lang:
-                        current_lang = segment.language
-                        current_group = [segment]
-                    elif segment.language == current_lang:
-                        current_group.append(segment)
-                    else:
-                        segments.append((current_lang, current_group))
-                        current_lang = segment.language
-                        current_group = [segment]
+                # Get detected language from info
+                detected_language = info.language
+                self.progress.emit(f"Detected primary language: {detected_language}")
                 
-                # Add the last group
-                if current_group:
-                    segments.append((current_lang, current_group))
-                
-                # Second pass: Transcribe each language group
-                self.progress.emit("Transcribing segments with detected languages...")
+                # Second pass: Transcribe with detected language
+                self.progress.emit(f"Transcribing with detected language...")
                 
                 with open(temp_srt, 'w', encoding='utf-8') as f:
                     subtitle_index = 1
                     
-                    for lang, group in segments:
-                        self.progress.emit(f"Processing segment group in {lang}")
+                    for segment in segments:
+                        # Format timestamps
+                        start_time = self.format_timestamp(segment.start)
+                        end_time = self.format_timestamp(segment.end)
                         
-                        # Write segments for this language group
-                        for segment in group:
-                            # Format timestamps
-                            start_time = self.format_timestamp(segment.start)
-                            end_time = self.format_timestamp(segment.end)
-                            
-                            # Write SRT entry
-                            f.write(f"{subtitle_index}\n")
-                            f.write(f"{start_time} --> {end_time}\n")
-                            f.write(f"{segment.text.strip()}\n\n")
-                            
-                            subtitle_index += 1
+                        # Add speaker label if diarization is enabled
+                        text = segment.text.strip()
+                        if diarization and hasattr(segment, 'speaker'):
+                            text = f"[Speaker {segment.speaker}] {text}"
+                        
+                        # Write SRT entry
+                        f.write(f"{subtitle_index}\n")
+                        f.write(f"{start_time} --> {end_time}\n")
+                        f.write(f"{text}\n\n")
+                        
+                        subtitle_index += 1
                 
                 # Rename temp file to final file
                 if os.path.exists(temp_srt) and os.path.getsize(temp_srt) > 0:
@@ -475,7 +484,85 @@ class TranscriptionApp(QWidget):
         ])
         compute_layout.addWidget(self.compute_combo)
         device_group.addLayout(compute_layout)
+
+        # Add VAD and diarization options
+        vad_diar_layout = QVBoxLayout()
         
+        # VAD options group
+        vad_group = QGroupBox("Voice Activity Detection (VAD)")
+        vad_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #5E81AC;
+                margin-top: 0.5em;
+                padding-top: 0.5em;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px 0 3px;
+            }
+        """)
+        vad_layout = QVBoxLayout()
+        
+        # VAD filter checkbox
+        self.vad_enabled = QCheckBox("Enable VAD Filter")
+        self.vad_enabled.setChecked(True)
+        vad_layout.addWidget(self.vad_enabled)
+        
+        # VAD parameters
+        vad_params = QHBoxLayout()
+        vad_params.addWidget(QLabel("Min Silence Duration (ms):"))
+        self.vad_silence_duration = QLineEdit()
+        self.vad_silence_duration.setPlaceholderText("500")
+        self.vad_silence_duration.setText("500")
+        vad_params.addWidget(self.vad_silence_duration)
+        vad_layout.addLayout(vad_params)
+        
+        vad_group.setLayout(vad_layout)
+        vad_diar_layout.addWidget(vad_group)
+        
+        # Diarization options group
+        diar_group = QGroupBox("Speaker Diarization")
+        diar_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #5E81AC;
+                margin-top: 0.5em;
+                padding-top: 0.5em;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px 0 3px;
+            }
+        """)
+        diar_layout = QVBoxLayout()
+        
+        # Diarization checkbox
+        self.diarization_enabled = QCheckBox("Enable Speaker Diarization")
+        self.diarization_enabled.setChecked(False)
+        diar_layout.addWidget(self.diarization_enabled)
+        
+        # Diarization parameters
+        diar_params = QGridLayout()
+        
+        # Min/max speakers
+        diar_params.addWidget(QLabel("Min Speakers:"), 0, 0)
+        self.min_speakers = QLineEdit()
+        self.min_speakers.setPlaceholderText("1")
+        self.min_speakers.setText("1")
+        diar_params.addWidget(self.min_speakers, 0, 1)
+        
+        diar_params.addWidget(QLabel("Max Speakers:"), 0, 2)
+        self.max_speakers = QLineEdit()
+        self.max_speakers.setPlaceholderText("2")
+        self.max_speakers.setText("2")
+        diar_params.addWidget(self.max_speakers, 0, 3)
+        
+        diar_layout.addLayout(diar_params)
+        diar_group.setLayout(diar_layout)
+        vad_diar_layout.addWidget(diar_group)
+        
+        device_group.addLayout(vad_diar_layout)
         layout.addLayout(device_group)
 
         # Add YouTube URL input with label showing URL count

@@ -69,9 +69,44 @@ class TranscriptionThread(QThread):
         self.model_name = model_name
         self.log_callback = log_callback
         self.youtube_urls = youtube_urls
-        self.device = 'cuda' if hasattr(self, 'gpu_radio') and self.gpu_radio.isChecked() else 'cpu'
-        self.compute_type = self.compute_combo.currentText().split(' ')[0] if hasattr(self, 'compute_combo') else 'int8'
-        self.force_device = hasattr(self, 'force_device_check') and self.force_device_check.isChecked()
+        
+        # Get UI settings from the main window
+        main_window = QApplication.activeWindow()
+        if main_window:
+            self.device = 'cuda' if main_window.gpu_radio.isChecked() else 'cpu'
+            self.compute_type = main_window.compute_combo.currentText().split(' ')[0]
+            self.force_device = main_window.force_device_check.isChecked()
+            
+            # Get language selection
+            selected_lang = main_window.lang_combo.currentText()
+            self.force_lang = None if selected_lang == "Automatic" else selected_lang.split('(')[-1].strip(')')
+            
+            # Get VAD settings
+            self.vad_enabled = main_window.vad_enabled.isChecked()
+            try:
+                self.vad_silence_duration = int(main_window.vad_silence_duration.text() or "500")
+            except ValueError:
+                self.vad_silence_duration = 500
+            
+            # Get diarization settings
+            self.diarization_enabled = main_window.diarization_enabled.isChecked()
+            try:
+                self.min_speakers = int(main_window.min_speakers.text() or "1")
+                self.max_speakers = int(main_window.max_speakers.text() or "2")
+            except ValueError:
+                self.min_speakers = 1
+                self.max_speakers = 2
+        else:
+            # Default values if window not found
+            self.device = 'cuda'
+            self.compute_type = 'int8'
+            self.force_device = False
+            self.force_lang = None
+            self.vad_enabled = True
+            self.vad_silence_duration = 500
+            self.diarization_enabled = False
+            self.min_speakers = 1
+            self.max_speakers = 2
         
         # Setup WebSocket
         import socketio
@@ -126,107 +161,26 @@ class TranscriptionThread(QThread):
             srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
             temp_srt = os.path.join(dir_path, f"{base_name}.{self.model_name}.temp.srt")
             
-            # Get language code from selection if not automatic
-            force_lang = None
-            if hasattr(self, 'lang_combo'):
-                selected_lang = self.lang_combo.currentText()
-                if selected_lang != "Automatic":
-                    # Extract language code from format "Language (code)"
-                    force_lang = selected_lang.split('(')[-1].strip(')')
-            
             # Get VAD and diarization settings
-            vad_filter = hasattr(self, 'vad_enabled') and self.vad_enabled.isChecked()
             vad_params = None
-            if vad_filter:
-                try:
-                    silence_duration = int(self.vad_silence_duration.text() or "500")
-                    vad_params = dict(min_silence_duration_ms=silence_duration)
-                except ValueError:
-                    vad_params = dict(min_silence_duration_ms=500)
+            if self.vad_enabled:
+                vad_params = dict(min_silence_duration_ms=self.vad_silence_duration)
 
-            diarization = hasattr(self, 'diarization_enabled') and self.diarization_enabled.isChecked()
             diarization_params = None
-            if diarization:
-                try:
-                    min_speakers = int(self.min_speakers.text() or "1")
-                    max_speakers = int(self.max_speakers.text() or "2")
-                    diarization_params = dict(min_speakers=min_speakers, max_speakers=max_speakers)
-                except ValueError:
-                    diarization_params = dict(min_speakers=1, max_speakers=2)
+            if self.diarization_enabled:
+                diarization_params = dict(min_speakers=self.min_speakers, max_speakers=self.max_speakers)
             
-            if force_lang:
-                # If language is forced, use regular transcription
-                success = transcribe.process_create(
-                    file=file_path,
-                    model_name=self.model_name,
-                    srt_file=srt_file,
-                    language=force_lang,
-                    device=self.device,
-                    compute_type=self.compute_type,
-                    force_device=self.force_device,
-                    vad_filter=vad_filter,
-                    vad_parameters=vad_params,
-                    diarization=diarization,
-                    diarization_parameters=diarization_params,
-                    write=lambda msg: self.progress.emit(str(msg))
-                )
-            else:
-                # Initialize Whisper model for language detection and transcription
-                import faster_whisper
-                model = faster_whisper.WhisperModel(
-                    self.model_name,
-                    device=self.device,
-                    compute_type=self.compute_type,
-                    download_root=None
-                )
-                
-                # First pass: Initial transcription with language detection
-                self.progress.emit("Detecting languages in segments...")
-                segments, info = model.transcribe(
-                    file_path,
-                    beam_size=1,
-                    word_timestamps=True,
-                    vad_filter=vad_filter,
-                    vad_parameters=vad_params,
-                    initial_prompt=None,
-                    condition_on_previous_text=True
-                )
-                
-                # Get detected language from info
-                detected_language = info.language
-                self.progress.emit(f"Detected primary language: {detected_language}")
-                
-                # Second pass: Transcribe with detected language
-                self.progress.emit(f"Transcribing with detected language...")
-                
-                with open(temp_srt, 'w', encoding='utf-8') as f:
-                    subtitle_index = 1
-                    
-                    for segment in segments:
-                        # Format timestamps
-                        start_time = self.format_timestamp(segment.start)
-                        end_time = self.format_timestamp(segment.end)
-                        
-                        # Add speaker label if diarization is enabled
-                        text = segment.text.strip()
-                        if diarization and hasattr(segment, 'speaker'):
-                            text = f"[Speaker {segment.speaker}] {text}"
-                        
-                        # Write SRT entry
-                        f.write(f"{subtitle_index}\n")
-                        f.write(f"{start_time} --> {end_time}\n")
-                        f.write(f"{text}\n\n")
-                        
-                        subtitle_index += 1
-                
-                # Rename temp file to final file
-                if os.path.exists(temp_srt) and os.path.getsize(temp_srt) > 0:
-                    if os.path.exists(srt_file):
-                        os.remove(srt_file)
-                    os.rename(temp_srt, srt_file)
-                    success = True
-                else:
-                    success = False
+            # Use transcribe module with proper settings
+            success = transcribe.process_create(
+                file=file_path,
+                model_name=self.model_name,
+                srt_file=srt_file,
+                language=self.force_lang,  # Use the language from UI selection
+                device=self.device,
+                compute_type=self.compute_type,
+                force_device=self.force_device,
+                write=lambda msg: self.progress.emit(str(msg))
+            )
             
             if success:
                 self.progress.emit(f"Successfully transcribed {file_path}")

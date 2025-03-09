@@ -20,9 +20,6 @@ import time
 import caption.log as log
 import pyperclip
 
-# Set QT to use offscreen rendering
-os.environ["QT_QPA_PLATFORM"] = "offscreen"
-
 channel_name = 'unknown'
 video_title = 'none'
 subs_dir = os.path.join("Documents", "Youtube-Subs")

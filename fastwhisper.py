@@ -118,32 +118,106 @@ class TranscriptionThread(QThread):
                 pass
 
     def process_local_file(self, file_path):
-        """Process a local file using the transcribe module"""
+        """Process a local file using the transcribe module with multi-language support"""
         try:
             # Create output srt file path
             dir_path = os.path.dirname(file_path)
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
+            temp_srt = os.path.join(dir_path, f"{base_name}.{self.model_name}.temp.srt")
             
-            # Get language code from selection
-            lang = None  # Default to None for automatic
+            # Get language code from selection if not automatic
+            force_lang = None
             if hasattr(self, 'lang_combo'):
                 selected_lang = self.lang_combo.currentText()
                 if selected_lang != "Automatic":
                     # Extract language code from format "Language (code)"
-                    lang = selected_lang.split('(')[-1].strip(')')
+                    force_lang = selected_lang.split('(')[-1].strip(')')
             
-            # Process the file using transcribe module
-            success = transcribe.process_create(
-                file=file_path,
-                model_name=self.model_name,
-                srt_file=srt_file,
-                language=lang,
-                device=self.device,
-                compute_type=self.compute_type,
-                force_device=self.force_device,
-                write=lambda msg: self.progress.emit(str(msg))
-            )
+            if force_lang:
+                # If language is forced, use regular transcription
+                success = transcribe.process_create(
+                    file=file_path,
+                    model_name=self.model_name,
+                    srt_file=srt_file,
+                    language=force_lang,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                    force_device=self.force_device,
+                    write=lambda msg: self.progress.emit(str(msg))
+                )
+            else:
+                # Initialize Whisper model for language detection and transcription
+                import faster_whisper
+                model = faster_whisper.WhisperModel(
+                    self.model_name,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                    download_root=None
+                )
+                
+                # First pass: Detect languages in segments
+                self.progress.emit("Detecting languages in segments...")
+                segments = []
+                current_lang = None
+                current_group = []
+                segment_size = 10.0  # 10 seconds per segment
+                
+                # Initial transcription to get segments with language detection
+                result = model.transcribe(
+                    file_path,
+                    beam_size=1,
+                    word_timestamps=True,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500)
+                )
+                
+                # Group segments by detected language
+                for segment in result[0]:
+                    if not current_lang:
+                        current_lang = segment.language
+                        current_group = [segment]
+                    elif segment.language == current_lang:
+                        current_group.append(segment)
+                    else:
+                        segments.append((current_lang, current_group))
+                        current_lang = segment.language
+                        current_group = [segment]
+                
+                # Add the last group
+                if current_group:
+                    segments.append((current_lang, current_group))
+                
+                # Second pass: Transcribe each language group
+                self.progress.emit("Transcribing segments with detected languages...")
+                
+                with open(temp_srt, 'w', encoding='utf-8') as f:
+                    subtitle_index = 1
+                    
+                    for lang, group in segments:
+                        self.progress.emit(f"Processing segment group in {lang}")
+                        
+                        # Write segments for this language group
+                        for segment in group:
+                            # Format timestamps
+                            start_time = self.format_timestamp(segment.start)
+                            end_time = self.format_timestamp(segment.end)
+                            
+                            # Write SRT entry
+                            f.write(f"{subtitle_index}\n")
+                            f.write(f"{start_time} --> {end_time}\n")
+                            f.write(f"{segment.text.strip()}\n\n")
+                            
+                            subtitle_index += 1
+                
+                # Rename temp file to final file
+                if os.path.exists(temp_srt) and os.path.getsize(temp_srt) > 0:
+                    if os.path.exists(srt_file):
+                        os.remove(srt_file)
+                    os.rename(temp_srt, srt_file)
+                    success = True
+                else:
+                    success = False
             
             if success:
                 self.progress.emit(f"Successfully transcribed {file_path}")
@@ -152,6 +226,20 @@ class TranscriptionThread(QThread):
             
         except Exception as e:
             self.error.emit(f"Error processing {file_path}: {str(e)}")
+            if os.path.exists(temp_srt):
+                try:
+                    os.remove(temp_srt)
+                except:
+                    pass
+
+    def format_timestamp(self, seconds):
+        """Convert seconds to SRT timestamp format"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = seconds % 60
+        milliseconds = int((seconds % 1) * 1000)
+        seconds = int(seconds)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
     def process_url(self, url):
         """Process a YouTube URL using YoutubeSubs"""

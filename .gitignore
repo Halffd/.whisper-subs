@@ -18,6 +18,7 @@ __pycache__
 caption/__pycache__
 caption/Logs
 segments.json
+whisper_env
 Scripts
 Youtube-Subs
 AppData

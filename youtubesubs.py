@@ -380,7 +380,7 @@ def generate(url, i = 0):
     write(f'{i}: {name} {url}', mpv)
 
 class YoutubeSubs:
-    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True):
+    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=False, browser=None, cookie_file=None):
         self.model_name = model_name
         self.device = device
         self.compute = compute
@@ -392,6 +392,9 @@ class YoutubeSubs:
         self.enable_logging = enable_logging
         self.start_time = None
         self.end_time = None
+        self.use_cookies = use_cookies
+        self.specified_browser = browser
+        self.specified_cookie_file = cookie_file
         
         # Setup directories
         self.subs_dir = subs_dir or os.path.join("Documents", "Youtube-Subs")
@@ -405,45 +408,66 @@ class YoutubeSubs:
         self.history_file = os.path.join(self.ytsubs, 'history.txt')
         
         # Find cookies file
-        self.cookies_file = self._find_cookies_file()
+        self.cookies_file = self._find_cookies_file() if self.use_cookies else None
 
     def _find_cookies_file(self):
-        """Find the cookies file in various possible locations"""
-        cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
-        cookie_file = os.path.join(cookie_dir, 'cookies.txt')
-        
-        # Try to export from Brave if no cookie file exists
-        if not os.path.exists(cookie_file):
+        """Find or create the cookies file based on parameters"""
+        # If a specific cookie file was provided, use it
+        if self.specified_cookie_file and os.path.exists(self.specified_cookie_file):
+            self.write(f"Using specified cookie file: {self.specified_cookie_file}")
+            return self.specified_cookie_file
+            
+        # If a browser was specified, try to export from it
+        if self.specified_browser:
+            cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
+            cookie_file = os.path.join(cookie_dir, f'cookies-{self.specified_browser}.txt')
+            
             try:
                 os.makedirs(cookie_dir, exist_ok=True)
+                self.write(f"Exporting cookies from {self.specified_browser} browser...")
                 result = subprocess.run(
-                    ["yt-dlp", "--cookies-from-browser", "brave", "-o", cookie_file],
+                    ["yt-dlp", "--cookies-from-browser", self.specified_browser, "-o", cookie_file],
                     capture_output=True,
                     text=True
                 )
                 if result.returncode == 0:
-                    self.write("Successfully exported cookies from Brave browser")
+                    self.write(f"Successfully exported cookies from {self.specified_browser} browser")
                     # Set proper permissions
                     os.chmod(cookie_file, 0o600)
                     return cookie_file
                 else:
-                    self.write(f"Error exporting cookies: {result.stderr}")
+                    self.write(f"Error exporting cookies from {self.specified_browser}: {result.stderr}")
             except Exception as e:
-                self.write(f"Failed to export cookies from Brave: {str(e)}")
+                self.write(f"Failed to export cookies from {self.specified_browser}: {str(e)}")
         
-        # Check various possible locations as fallback
-        possible_paths = [
-            cookie_file,
-            'cookies.txt',  # Local to app
-            os.path.join(os.path.expanduser('~'), 'cookies.txt'),  # Home dir
-        ]
+        # Default fallback to look for cookies.txt in common locations
+        cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
+        cookie_file = os.path.join(cookie_dir, 'cookies.txt')
         
-        for path in possible_paths:
-            if os.path.exists(path):
-                self.write(f"Using cookies file: {path}")
-                return path
-                
-        self.write("Warning: No cookies file found. Age-restricted videos may fail.")
+        if os.path.exists(cookie_file):
+            self.write(f"Using existing cookie file: {cookie_file}")
+            return cookie_file
+            
+        # Try common browsers if no cookie file found
+        for browser in ['chrome', 'firefox', 'brave', 'edge', 'opera', 'safari']:
+            try:
+                temp_cookie_file = os.path.join(cookie_dir, f'cookies-{browser}.txt')
+                self.write(f"Trying to export cookies from {browser}...")
+                os.makedirs(cookie_dir, exist_ok=True)
+                result = subprocess.run(
+                    ["yt-dlp", "--cookies-from-browser", browser, "-o", temp_cookie_file],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    self.write(f"Successfully exported cookies from {browser}")
+                    # Set proper permissions
+                    os.chmod(temp_cookie_file, 0o600)
+                    return temp_cookie_file
+            except Exception as e:
+                self.write(f"Failed to export cookies from {browser}: {str(e)}")
+        
+        self.write("No cookies file found and couldn't export from any browser")
         return None
 
     def write(self, *text, mpv='err'):
@@ -502,8 +526,9 @@ class YoutubeSubs:
             }
             
             # Add cookies if available
-            if self.cookies_file:
+            if self.use_cookies and self.cookies_file:
                 ydl_opts['cookiefile'] = self.cookies_file
+                self.write(f"Using cookies file for download: {self.cookies_file}")
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -532,7 +557,7 @@ class YoutubeSubs:
             # Add time range and cookies to command
             command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3"]
             
-            if self.cookies_file:
+            if self.use_cookies and self.cookies_file:
                 command.extend(["--cookies", self.cookies_file])
             
             if self.start_time or self.end_time:
@@ -551,7 +576,9 @@ class YoutubeSubs:
 
         except Exception as e:
             self.delay *= 2
-            self.write(self.delay, str(e))
+            self.write(f"Download error: {str(e)}")
+            if "Sign in to confirm your age" in str(e) and not self.use_cookies:
+                self.write("Age-restricted video detected. Enable cookie support to download")
             time.sleep(self.delay)
             return self.download_audio(url, True)
 

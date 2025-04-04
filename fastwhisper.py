@@ -14,6 +14,7 @@ import transcribe
 import time
 from youtubesubs import YoutubeSubs
 import pyperclip
+import json
 
 # Setup Qt message handler to suppress propagateSizeHints warning
 def qt_message_handler(mode, context, message):
@@ -63,12 +64,15 @@ class TranscriptionThread(QThread):
     progress = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, files_to_process, model_name, log_callback, youtube_urls=None):
+    def __init__(self, files_to_process, model_name, log_callback, youtube_urls=None, use_cookies=False, browser=None, cookie_file=None):
         super().__init__()
         self.files_to_process = files_to_process
         self.model_name = model_name
         self.log_callback = log_callback
         self.youtube_urls = youtube_urls
+        self.use_cookies = use_cookies
+        self.browser = browser
+        self.cookie_file = cookie_file
         
         # Get UI settings from the main window
         main_window = QApplication.activeWindow()
@@ -76,6 +80,7 @@ class TranscriptionThread(QThread):
             self.device = 'cuda' if main_window.gpu_radio.isChecked() else 'cpu'
             self.compute_type = main_window.compute_combo.currentText().split(' ')[0]
             self.force_device = main_window.force_device_check.isChecked()
+            self.use_faster_whisper = main_window.faster_whisper_radio.isChecked()
             
             # Get language selection
             selected_lang = main_window.lang_combo.currentText()
@@ -107,6 +112,7 @@ class TranscriptionThread(QThread):
             self.diarization_enabled = False
             self.min_speakers = 1
             self.max_speakers = 2
+            self.use_faster_whisper = False
         
         # Setup WebSocket
         import socketio
@@ -211,7 +217,10 @@ class TranscriptionThread(QThread):
                 model_name=self.model_name,
                 device=self.device,
                 compute=self.compute_type,
-                force_device=self.force_device
+                force_device=self.force_device,
+                use_cookies=self.use_cookies,
+                browser=self.browser,
+                cookie_file=self.cookie_file
             )
             
             # Process the URL
@@ -264,6 +273,9 @@ class TranscriptionApp(QWidget):
         self.clipboard_monitoring = True
         self.force_device = False
         
+        # Settings file path
+        self.settings_file = os.path.join(os.path.expanduser("~"), ".whisper_subs_settings.json")
+        
         # Set window to maximize on primary monitor
         screen = QApplication.primaryScreen()
         screen_geometry = screen.availableGeometry()
@@ -271,6 +283,9 @@ class TranscriptionApp(QWidget):
         self.setWindowState(QtCore.Qt.WindowMaximized)
         
         self.initUI()
+        
+        # Load saved settings
+        self.load_settings()
         
         # Setup clipboard monitoring
         self.clipboard_timer = QTimer()
@@ -407,6 +422,20 @@ class TranscriptionApp(QWidget):
         # Device selection
         device_group = QHBoxLayout()
         
+        # Engine selection
+        engine_layout = QVBoxLayout()
+        engine_label = QLabel("Transcription Engine:")
+        engine_layout.addWidget(engine_label)
+        
+        engine_controls = QHBoxLayout()
+        self.whisper_radio = QRadioButton("Whisper")
+        self.faster_whisper_radio = QRadioButton("FasterWhisper")
+        self.whisper_radio.setChecked(True)  # Default to normal Whisper
+        engine_controls.addWidget(self.whisper_radio)
+        engine_controls.addWidget(self.faster_whisper_radio)
+        engine_layout.addLayout(engine_controls)
+        device_group.addLayout(engine_layout)
+        
         # Device selection
         device_layout = QVBoxLayout()
         device_label = QLabel("Processing Device:")
@@ -517,6 +546,54 @@ class TranscriptionApp(QWidget):
         vad_diar_layout.addWidget(diar_group)
         
         device_group.addLayout(vad_diar_layout)
+
+        # YouTube Cookies Settings
+        youtube_settings_layout = QVBoxLayout()
+        youtube_settings_group = QGroupBox("YouTube Settings")
+        youtube_settings_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #5E81AC;
+                margin-top: 0.5em;
+                padding-top: 0.5em;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px 0 3px;
+            }
+        """)
+        
+        youtube_settings_inner = QVBoxLayout()
+        
+        # Cookie settings
+        cookies_layout = QHBoxLayout()
+        self.use_cookies_check = QCheckBox("Use cookies for age-restricted videos")
+        cookies_layout.addWidget(self.use_cookies_check)
+        youtube_settings_inner.addLayout(cookies_layout)
+        
+        # Browser selection
+        browser_layout = QHBoxLayout()
+        browser_layout.addWidget(QLabel("Browser:"))
+        self.browser_combo = QComboBox()
+        self.browser_combo.addItems([
+            "chrome", "firefox", "edge", "safari", "opera", "brave"
+        ])
+        browser_layout.addWidget(self.browser_combo)
+        
+        # Cookie file selection
+        self.cookie_file_path = QLineEdit()
+        self.cookie_file_path.setPlaceholderText("Or custom cookie file path...")
+        browser_layout.addWidget(self.cookie_file_path)
+        
+        self.browse_cookie_button = QPushButton("Browse")
+        self.browse_cookie_button.clicked.connect(self.select_cookie_file)
+        browser_layout.addWidget(self.browse_cookie_button)
+        
+        youtube_settings_inner.addLayout(browser_layout)
+        youtube_settings_group.setLayout(youtube_settings_inner)
+        youtube_settings_layout.addWidget(youtube_settings_group)
+        
+        device_group.addLayout(youtube_settings_layout)
         layout.addLayout(device_group)
 
         # Add YouTube URL input with label showing URL count
@@ -603,6 +680,9 @@ class TranscriptionApp(QWidget):
                 self.log_output.append(f"Error writing to log file: {str(e)}")
 
     def runTranscription(self):
+        # Save settings before running transcription
+        self.save_settings()
+        
         model_name = self.model_combo.currentText()
         
         # Get device settings
@@ -694,7 +774,10 @@ class TranscriptionApp(QWidget):
             files_to_process=files_to_process,
             model_name=model_name,
             log_callback=self.log,
-            youtube_urls=youtube_urls if youtube_urls else None
+            youtube_urls=youtube_urls if youtube_urls else None,
+            use_cookies=self.use_cookies_check.isChecked(),
+            browser=self.browser_combo.currentText() if not self.cookie_file_path.text() else None,
+            cookie_file=self.cookie_file_path.text() if self.cookie_file_path.text() else None
         )
         
         self.transcription_thread.progress.connect(self.log)
@@ -793,6 +876,155 @@ class TranscriptionApp(QWidget):
             urls.reverse()
             
         self.youtube_input.setPlainText('\n'.join(urls))
+
+    def select_cookie_file(self):
+        """Open file dialog to select a cookie file"""
+        cookie_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Cookie File",
+            "",
+            "Cookie Files (*.txt);;All Files (*.*)"
+        )
+        
+        if cookie_file:
+            self.cookie_file_path.setText(cookie_file)
+            self.use_cookies_check.setChecked(True)
+
+    def save_settings(self):
+        """Save current settings to JSON file"""
+        settings = {
+            'model': self.model_combo.currentText(),
+            'language': self.lang_combo.currentText(),
+            'device': 'cuda' if self.gpu_radio.isChecked() else 'cpu',
+            'compute_type': self.compute_combo.currentText(),
+            'force_device': self.force_device_check.isChecked(),
+            'use_whisper': self.whisper_radio.isChecked(),
+            'vad_enabled': self.vad_enabled.isChecked(),
+            'vad_silence_duration': self.vad_silence_duration.text(),
+            'diarization_enabled': self.diarization_enabled.isChecked(),
+            'min_speakers': self.min_speakers.text(),
+            'max_speakers': self.max_speakers.text(),
+            'start_time': self.start_time.text(),
+            'end_time': self.end_time.text(),
+            'enable_logging': self.enable_logging_check.isChecked(),
+            'clipboard_monitoring': self.clipboard_monitoring,
+            'sort_oldest': self.sort_oldest_check.isChecked(),
+            'reverse_order': self.reverse_order_check.isChecked(),
+            'youtube_urls': self.youtube_input.toPlainText(),
+            'selected_directory': self.selected_directory,
+            'selected_files': self.selected_files,
+            'use_cookies': self.use_cookies_check.isChecked(),
+            'browser': self.browser_combo.currentText(),
+            'cookie_file': self.cookie_file_path.text()
+        }
+        
+        try:
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=4)
+        except Exception as e:
+            self.log(f"Error saving settings: {str(e)}")
+
+    def load_settings(self):
+        """Load settings from JSON file"""
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                
+                # Apply loaded settings
+                if 'model' in settings:
+                    index = self.model_combo.findText(settings['model'])
+                    if index >= 0:
+                        self.model_combo.setCurrentIndex(index)
+                
+                if 'language' in settings:
+                    index = self.lang_combo.findText(settings['language'])
+                    if index >= 0:
+                        self.lang_combo.setCurrentIndex(index)
+                
+                if 'device' in settings:
+                    self.gpu_radio.setChecked(settings['device'] == 'cuda')
+                    self.cpu_radio.setChecked(settings['device'] == 'cpu')
+                
+                if 'compute_type' in settings:
+                    index = self.compute_combo.findText(settings['compute_type'])
+                    if index >= 0:
+                        self.compute_combo.setCurrentIndex(index)
+                
+                if 'force_device' in settings:
+                    self.force_device_check.setChecked(settings['force_device'])
+                
+                if 'use_whisper' in settings:
+                    self.whisper_radio.setChecked(settings['use_whisper'])
+                    self.faster_whisper_radio.setChecked(not settings['use_whisper'])
+                
+                if 'vad_enabled' in settings:
+                    self.vad_enabled.setChecked(settings['vad_enabled'])
+                
+                if 'vad_silence_duration' in settings:
+                    self.vad_silence_duration.setText(settings['vad_silence_duration'])
+                
+                if 'diarization_enabled' in settings:
+                    self.diarization_enabled.setChecked(settings['diarization_enabled'])
+                
+                if 'min_speakers' in settings:
+                    self.min_speakers.setText(settings['min_speakers'])
+                
+                if 'max_speakers' in settings:
+                    self.max_speakers.setText(settings['max_speakers'])
+                
+                if 'start_time' in settings:
+                    self.start_time.setText(settings['start_time'])
+                
+                if 'end_time' in settings:
+                    self.end_time.setText(settings['end_time'])
+                
+                if 'enable_logging' in settings:
+                    self.enable_logging_check.setChecked(settings['enable_logging'])
+                
+                if 'clipboard_monitoring' in settings:
+                    self.clipboard_monitoring = settings['clipboard_monitoring']
+                    self.clipboard_toggle.setChecked(settings['clipboard_monitoring'])
+                    self.clipboard_toggle.setText(f'Clipboard Monitoring: {"ON" if settings["clipboard_monitoring"] else "OFF"}')
+                
+                if 'sort_oldest' in settings:
+                    self.sort_oldest_check.setChecked(settings['sort_oldest'])
+                
+                if 'reverse_order' in settings:
+                    self.reverse_order_check.setChecked(settings['reverse_order'])
+                
+                if 'youtube_urls' in settings:
+                    self.youtube_input.setPlainText(settings['youtube_urls'])
+                
+                if 'selected_directory' in settings and settings['selected_directory']:
+                    self.selected_directory = settings['selected_directory']
+                    self.dir_label.setText(f"Selected directory: {self.selected_directory}")
+                
+                if 'selected_files' in settings:
+                    self.selected_files = settings['selected_files']
+                    if self.selected_files:
+                        self.file_label.setText(f"Selected files: {len(self.selected_files)} files")
+                
+                # Load YouTube cookie settings
+                if 'use_cookies' in settings:
+                    self.use_cookies_check.setChecked(settings['use_cookies'])
+                
+                if 'browser' in settings:
+                    index = self.browser_combo.findText(settings['browser'])
+                    if index >= 0:
+                        self.browser_combo.setCurrentIndex(index)
+                
+                if 'cookie_file' in settings:
+                    self.cookie_file_path.setText(settings['cookie_file'])
+                
+        except Exception as e:
+            self.log(f"Error loading settings: {str(e)}")
+
+    def closeEvent(self, event):
+        """Save settings when closing the application"""
+        self.save_settings()
+        super().closeEvent(event)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

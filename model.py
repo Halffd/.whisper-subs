@@ -53,23 +53,24 @@ def getName(arg, default, captioner = False):
     if not first:
         return
     available_models = model_names
-    pattern = r"^(.*?)\\[^\\]*\.py$"
-    path = arg[0] if len(arg[0]) > 12 else os.getcwd()
-    match = re.match(pattern, path)
-
-    if match:
-        path = match.group(1)  # Get the captured group
-
-    print(path)
+    # Use a platform-independent way to extract directory path
+    path = os.path.dirname(arg[0]) if len(arg[0]) > 12 else os.getcwd()
+    
+    # Initialize result dictionary with defaults
     result = {
         "model_name": default,
         "realtime_model": None,
         "lang": None,
         "path": path,
+        "gui": False,
+        "web": False,
+        "debug_mode": False,
+        "test_mode": False
     }
+    
     if len(arg) > 1 and (arg[1] in ["-h", "--help"] or "-1" in arg):
-        main_module = sys.modules['__main__'].__file__
-        print(f"Usage: python {main_module}.py [options] [model] [realtime_model] [language]")
+        main_module = os.path.basename(sys.modules['__main__'].__file__)
+        print(f"Usage: python {main_module} [options] [model] [realtime_model] [language]")
         print("     -1: Default model")
         if captioner:
             print("     -w, --web: Web server available")
@@ -81,88 +82,141 @@ def getName(arg, default, captioner = False):
             for i, model in enumerate(available_models):
                 print(f"- {i}: {model}")
             if arg[1] == '-1':
-                arg[1] = input("Choose a model: ")
+                try:
+                    arg[1] = input("Choose a model: ")
+                except EOFError:
+                    sys.exit(0)
             elif '-h' in arg[1]:
-                sys.exit(1)
+                sys.exit(0)
+    
     if captioner:
-        result["lang"] = None
-        for i in range(1, len(arg)):
-            rem = len(arg) - i
-            skip = i < len(arg) - 3
-            j = i + 1 if skip else i
-            #print(i, '/',len(arg), arg[i], j, arg[j], rem)
-            if arg[i] == "-m" or arg[i] == "--model" or rem == 3:
-                if is_numeric(arg[j]):
-                    num = int(arg[j])
-                    if num < 0:
-                        num = str(input("Model: "))
-                        nums = num.split(' ')
-                        num2 = None
-                        if len(nums) > 1:
-                            num = int(nums[0])
-                            num2 = int(nums[1])
+        i = 1
+        while i < len(arg):
+            if arg[i] == "-m" or arg[i] == "--model":
+                if i + 1 < len(arg):
+                    if is_numeric(arg[i+1]):
+                        num = int(arg[i+1])
+                        if num < 0:
+                            try:
+                                num = input("Model: ")
+                                nums = num.split(' ')
+                                num2 = None
+                                if len(nums) > 1:
+                                    num = int(nums[0])
+                                    num2 = int(nums[1])
+                                else:
+                                    num = int(num)
+                                result["model_name"] = available_models[num]
+                                result["realtime_model"] = result["model_name"] if not num2 else available_models[num2]
+                            except (ValueError, IndexError, EOFError):
+                                print("Invalid model number. Using default.")
                         else:
-                            num = int(num)
-                        result["model_name"] = available_models[num]
-                        result["realtime_model"] = result["model_name"] if not num2 else num2
+                            try:
+                                result["model_name"] = available_models[num]
+                            except IndexError:
+                                print(f"Invalid model index {num}. Using default.")
                     else:
-                        result["model_name"] = available_models[num]
+                        result["model_name"] = arg[i+1]
+                    i += 2
                 else:
-                    result["model_name"] = arg[j]
-                if skip:
                     i += 1
-            elif arg[i] == "--realtime-model" or rem == 2:
-                if is_numeric(arg[j]):
-                    num = int(arg[j])
-                    if num < 0:
-                        result["realtime_model"] = default
+            elif arg[i] == "--realtime-model":
+                if i + 1 < len(arg):
+                    if is_numeric(arg[i+1]):
+                        num = int(arg[i+1])
+                        if num < 0:
+                            result["realtime_model"] = default
+                        else:
+                            try:
+                                result["realtime_model"] = available_models[num]
+                            except IndexError:
+                                print(f"Invalid realtime model index {num}. Using default.")
                     else:
-                        result["realtime_model"] = available_models[num]
+                        result["realtime_model"] = arg[i+1]
+                    i += 2
                 else:
-                    result["realtime_model"] = arg[j]
-                if skip:
                     i += 1
             elif arg[i] == "-w" or arg[i] == "--web":
                 result["web"] = True
+                i += 1
             elif arg[i] == "-g" or arg[i] == "--gui":
                 result["gui"] = True
+                i += 1
             elif arg[i] == "--debug":
                 result["debug_mode"] = True
+                i += 1
             elif arg[i] == "--test":
                 result["test_mode"] = True
-            elif arg[i] == "--lang" or rem == 1:
-                if arg[j] == "-1":
-                    arg[j] = input("Language: ")
-                result["lang"] = arg[j] if arg[j] != 'none' else None
-                if skip:
+                i += 1
+            elif arg[i] == "--lang":
+                if i + 1 < len(arg):
+                    if arg[i+1] == "-1":
+                        try:
+                            arg[i+1] = input("Language: ")
+                        except EOFError:
+                            arg[i+1] = None
+                    result["lang"] = arg[i+1] if arg[i+1] != 'none' else None
+                    i += 2
+                else:
                     i += 1
             else:
-                print(f"Error: Unknown argument '{arg[i]}'. Please use --model to specify the model.")
-                sys.exit(1)
+                # Positional arguments handling
+                if result["model_name"] == default:
+                    # First unrecognized argument is the model
+                    if is_numeric(arg[i]):
+                        num = int(arg[i])
+                        if num >= 0 and num < len(available_models):
+                            result["model_name"] = available_models[num]
+                    else:
+                        result["model_name"] = arg[i]
+                elif result["realtime_model"] is None:
+                    # Second unrecognized argument is the realtime model
+                    if is_numeric(arg[i]):
+                        num = int(arg[i])
+                        if num >= 0 and num < len(available_models):
+                            result["realtime_model"] = available_models[num]
+                    else:
+                        result["realtime_model"] = arg[i]
+                elif result["lang"] is None:
+                    # Third unrecognized argument is the language
+                    result["lang"] = arg[i] if arg[i] != 'none' else None
+                else:
+                    print(f"Warning: Ignoring unknown argument '{arg[i]}'")
+                i += 1
 
+        # Validate model name
         if result["model_name"] not in available_models:
-            print(f"Error: {result['model_name']} is not a valid model name. Please choose from the available models.")
-            sys.exit(1)
+            print(f"Warning: {result['model_name']} is not a recognized model name.")
+
     else:
+        # For non-captioner usage
         if len(arg) <= 1:
             return default
+        
         name = arg[1]
         args = name.split(' ')
         if len(args) > 1:
             name = args[0]
+        
         if is_numeric(name):
             num = int(name)
             if num < 0:
                 result = default
             else:
-                result= available_models[num]
+                try:
+                    result = available_models[num]
+                except IndexError:
+                    print(f"Invalid model index {num}. Using default.")
+                    result = default
         else:
             result = arg[1]
+        
         if len(args) > 1:
             result = {
                 "model_name": result,
                 "lang": args[1]
             }
+    
     print(result)
     first = False
     return result

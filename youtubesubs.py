@@ -17,7 +17,6 @@ import datetime
 import urllib.parse
 import transcribe
 import time
-import caption.log as log
 import pyperclip
 
 channel_name = 'unknown'

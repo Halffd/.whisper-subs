@@ -88,66 +88,6 @@ def convert_to_seconds(time_str):
     h, m, s = map(int, time_str.split(':'))
     return h * 3600 + m * 60 + s
 
-def download_audio(url, rec=False, audio_start_time='00:00:00'):
-    global model_name, channel_name, delay, start_delay, video_title
-    if not rec or delay > 3600:
-        delay = start_delay
-    try:
-        ydl_opts = {
-            'outtmpl': '%(title)s.%(ext)s',
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
-            'cookies': '/home/all/cookies.txt',  # Replace with the actual path to your cookies file
-            'ignoreerrors': True
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            try:
-                if info['subtitles'] != {}:
-                    if not('live_chat' in info['subtitles'] and len(info['subtitles']) < 2):
-                        return None
-                    elif any(lang in info['subtitles'] for lang in ['en', 'pt', 'pt-BR']):
-                        return None
-            except:
-                print('No subs info')
-            # Get the channel name
-            channel_name = info.get('channel', '')
-            timestamp = info.get('timestamp', '')
-            date_time = datetime.datetime.fromtimestamp(timestamp)
-            timeday = date_time.strftime('%Y-%m-%d')
-            video_title = timeday + '_' + clean_filename(info.get('title', 'unknown'))
-            audio_file = os.path.join(os.getcwd(), f"{video_title}.{model_name}.mp3")
-
-            write(' '.join([str(delay), channel_name, str(timestamp), str(date_time), video_title, audio_file]))
-
-        command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "-o", audio_file, url]
-        subprocess.run(command, check=True)
-
-        # Convert the audio start time from hh:mm:ss to seconds
-        start_time_seconds = convert_to_seconds(audio_start_time)
-
-        # Use ffmpeg to mute the audio before the specified start time
-        if start_time_seconds > 0:
-            muted_audio_file = os.path.join(os.getcwd(), f"{video_title}_muted.mp3")
-            ffmpeg_command = [
-                'ffmpeg', '-i', audio_file,
-                '-af', f"volume=0:enable='between(t,0,{start_time_seconds})'",
-                muted_audio_file,
-                '-y'  # Overwrite output file if it exists
-            ]
-            subprocess.run(ffmpeg_command, check=True)
-
-            # Replace original audio file with the muted version
-            os.replace(muted_audio_file, audio_file)
-
-        return audio_file
-    except Exception as e:
-        delay *= 2
-        write(delay, e)
-        time.sleep(delay)
-        download_audio(url, True, audio_start_time)
 def remove_time_param(url):
     """
     Simplifies a YouTube URL to include only the base URL and the video ID,
@@ -174,44 +114,6 @@ def remove_time_param(url):
         video_id = url[start_index:end_index] if end_index != -1 else url[start_index:]
         
         return f"https://www.youtube.com/watch?v={video_id}"
-def get_youtube_videos(url, rec = False):
-    global oldest, delay, start_delay
-    if not rec or delay > 3600:
-        delay = start_delay
-    try:
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': '%(title)s.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,            
-            'cookies': 'media/cookies.txt'  # Replace with the actual path to your cookies file
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if 'entries' in info:
-                # This is a playlist
-                # print(info['entries'], len(info['entries']),end="\n")
-                video_urls = []
-                for entry in info['entries']:
-                    try:
-                        if entry['subtitles'] == {}:
-                            video_urls.append(entry['webpage_url'])
-                    except Exception as err:
-                        write(err)
-                if oldest:
-                    video_urls.reverse()  # Sort from newest to oldest
-                write(' '.join([str(rec), str(oldest), str(delay), str(video_urls)]))
-                return video_urls
-            else:
-                # This is a single video
-                return [info['webpage_url']]
-    except Exception as e:
-        write(delay + ' ' + e)
-        time.sleep(delay)
-        delay *= 2
-        get_youtube_videos(url, False)
 def get_playlist(current_url):
     # Check if the URL includes "youtube.com/watch?v="
     if "youtube.com/watch?v=" in current_url:
@@ -512,6 +414,9 @@ class YoutubeSubs:
 
     def download_audio(self, url, rec=False):
         """Download audio from YouTube URL"""
+        oldest = '--oldest' in sys.argv or reverse == 1 or '-o' in sys.argv
+        force = '-f' in sys.argv or "--force" in sys.argv
+
         if not rec or self.delay > 3600:
             self.delay = self.start_delay
             
@@ -534,7 +439,7 @@ class YoutubeSubs:
                 
                 # Check for existing subtitles
                 try:
-                    if info['subtitles'] != {}:
+                    if info['subtitles'] != {} and not force:
                         if not('live_chat' in info['subtitles'] and len(info['subtitles']) < 2):
                             return None
                         elif any(lang in info['subtitles'] for lang in ['en', 'pt', 'pt-BR']):
@@ -583,6 +488,8 @@ class YoutubeSubs:
 
     def get_youtube_videos(self, url, rec=False):
         """Get list of video URLs from channel/playlist"""
+        oldest = '--oldest' in sys.argv or reverse == 1 or '-o' in sys.argv
+
         if not rec or self.delay > 3600:
             self.delay = self.start_delay
             
@@ -609,6 +516,8 @@ class YoutubeSubs:
                                 video_urls.append(entry['webpage_url'])
                         except Exception as err:
                             self.write(str(err))
+                    if(oldest):
+                        video_urls.reverse()
                     return video_urls
                 else:
                     return [info['webpage_url']]
@@ -805,14 +714,7 @@ def get_clipboard_content():
 
 def get_video_url() -> str:
     """Get video URL from clipboard or command line arguments"""
-    parser = argparse.ArgumentParser(description='Generate subtitles for YouTube videos')
-    parser.add_argument('model_num', nargs='?', help='Model number')
-    parser.add_argument('reverse', nargs='?', type=int, default=0, help='Reverse order (0 or 1)')
-    args = parser.parse_args()
-    
     urls = []
-    print(args)
-    
     # Try clipboard if no URL in arguments
     clipboard_content = get_clipboard_content()
     if clipboard_content and len(clipboard_content.strip()) > 0:
@@ -823,11 +725,6 @@ def get_video_url() -> str:
     if not urls:
         url = input("Enter YouTube video URL: ")
         urls = [url]
-    
-    # Reverse if requested
-    #print(sys.argv)
-    if args.reverse != 1:
-        urls.reverse()
     
     print("Video count:", len(urls))
     return urls

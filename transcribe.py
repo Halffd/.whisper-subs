@@ -12,13 +12,11 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 
 audiofile, modelname, langcode = '', 'base', None
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
-done = False
 @dataclass
 class Segment:
     start: float
@@ -64,16 +62,14 @@ def check_memory_usage():
     if memory_percent > 95:  # Check if memory usage is above 90%
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
-        check_memory_usage()  # Recursively check again
+        memory_percent = psutil.Process().memory_percent()
 def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cpu', compute_type='int8'):
     """  
     Modified to handle compute_type parameter properly
     """
-    global done
-    done = False
     original = srt_file
     temp_srt = srt_file.replace('.srt','-unfinished.srt')
-
+    make_files(temp_srt)
     # Automatically switch to CPU if CUDA is not available
     if device == 'cuda':
         try:
@@ -118,9 +114,10 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
         if os.path.exists(temp_srt):
             if os.path.exists(original):
                 os.remove(original)
-            os.rename(temp_srt, original)
-            done = True
-            return True
+                os.rename(temp_srt, original)
+                make_files(original)  # Recreate helper files to point at final SRT
+                return True
+
         
     except RuntimeError as e:
         if 'CUDA' in str(e) or 'cuDNN' in str(e):
@@ -171,8 +168,6 @@ def write_srt(segments_file, srt):
             srt.write(f"{text}\n\n")                                        
 def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, write=print):
     """Creates a new process to retry the transcription."""
-    global done
-    
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
     
@@ -389,26 +384,7 @@ finally:
                 write(f"Successfully created {srt_file}")
                 
                 # Create helper files
-                dir_path = os.path.dirname(srt_file)
-                base_name = os.path.splitext(os.path.basename(srt_file))[0]
-                
-                # Try to find corresponding HTML file to get URL
-                html_file = os.path.join(dir_path, f"{base_name}.htm")
-                url = None
-                if os.path.exists(html_file):
-                    try:
-                        with open(html_file, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                            import re
-                            match = re.search(r'URL=\'([^\']+)\'', content)
-                            if match:
-                                url = match.group(1)
-                    except:
-                        pass
-                
-                if url:
-                    create_helper_files(dir_path, base_name, url)
-                    
+                make_files(srt_file)
                 return True
             
             write(f"Process exited with code {exit_code}")
@@ -424,7 +400,25 @@ finally:
     except Exception as e:
         write(f"An error occurred: {e}")
         return False
-
+def make_files(srt_file):
+    dir_path = os.path.dirname(srt_file)
+    base_name = os.path.splitext(os.path.basename(srt_file))[0]
+                
+                # Try to find corresponding HTML file to get URL
+    html_file = os.path.join(dir_path, f"{base_name}.htm")
+    url = None
+    if os.path.exists(html_file):
+        try:
+            with open(html_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                import re
+                match = re.search(r'URL=\'([^\']+)\'', content)
+                if match:
+                    url = match.group(1)
+        except:
+            pass               
+    if url:
+        create_helper_files(dir_path, base_name, url)
 def write_srt_from_segments(segments, srt):
     """Writes the transcription segments to an SRT file."""
     for i, segment in enumerate(segments, start=1):
@@ -436,41 +430,33 @@ def write_srt_from_segments(segments, srt):
         srt.write(f"{start_time} --> {end_time}\n")
         srt.write(f"{segment.text}\n\n")
 
-def create_helper_files(dir_path, base_name, url):
-    """Create helper files (HTML redirect, batch file)"""
+def create_helper_files(dir_path, subtitle_file, url):
+    """Create helper files (HTML redirect, batch file, shell script)"""
     try:
-        # Create HTML redirect
+        base_name = os.path.splitext(os.path.basename(subtitle_file))[0]
+
+        # HTML redirect (same as before)
         html_file = os.path.join(dir_path, f"{base_name}.htm")
         with open(html_file, "w", encoding='utf-8') as f:
-            f.write(f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <meta http-equiv="refresh" content="0; URL='{url}'" />
-            </head>
-            <body>
-            </body>
-            </html>
-            """)
+            f.write(f"""<!DOCTYPE html>
+<html>
+<head><meta http-equiv="refresh" content="0; URL='{url}'" /></head>
+<body></body>
+</html>""")
 
-        # Get subtitle path
-        sub_file = os.path.join(dir_path, f"{base_name}.srt")
-        
-        # Create Linux shell script
+        # Shell script (.sh)
         sh_file = os.path.join(dir_path, f"{base_name}.sh")
-        linux_path = sub_file.replace("\\", "/")
+        linux_path = subtitle_file.replace("\\", "/")
         with open(sh_file, "w", encoding='utf-8') as f:
-            f.write('#!/bin/bash\n')
-            f.write(f'mpv "{url}" --pause --sub-file="{linux_path}"\n')
-        os.chmod(sh_file, 0o755)  # Make executable
+            f.write(f'#!/bin/bash\nmpv "{url}" --pause --sub-file="{linux_path}"\n')
+        os.chmod(sh_file, 0o755)
 
-        # Create Windows batch file
+        # Batch file (.bat)
         bat_file = os.path.join(dir_path, f"{base_name}.bat")
-        win_path = sub_file
+        win_path = subtitle_file
         if win_path.startswith("/home"):
             win_path = f"C:\\Users{win_path[5:]}"
         win_path = win_path.replace("/", "\\")
-        
         with open(bat_file, "w", encoding='utf-8') as f:
             f.write(f'mpv "{url}" --pause --sub-file="{win_path}"\n')
 

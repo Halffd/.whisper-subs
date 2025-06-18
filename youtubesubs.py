@@ -1,4 +1,4 @@
-import sys
+[<35;8;19M]import sys
 import model
 import argparse
 from typing import Optional
@@ -32,6 +32,7 @@ start = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 progress_name = f'progress-{start}'
 progress_file = os.path.join(ytsubs, f'{progress_name}.log')
 history_file = os.path.join(ytsubs, 'history.txt')
+urls_file = os.path.join(ytsubs, 'urls.txt')
 
 def rename(name, repl = False):
     global progress_file, progress_name
@@ -223,6 +224,13 @@ def generate(url, i = 0):
             s += 1
         segments = os.path.join(ytsubs, segments)
         
+        # Create unfinished SRT file and helper files at start
+        unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+        os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
+        with open(unfinished_srt, 'w', encoding='utf-8') as f:
+            f.write('Transcription in progress...')
+        transcribe.make_files(unfinished_srt)  # Create helper files for unfinished transcription
+        
         # Try with small model first
         try:
             transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
@@ -233,7 +241,8 @@ def generate(url, i = 0):
                 transcribe.process_create(audio_file, model_name, srt_file, segments, device='cpu', write=write)
             else:
                 raise e
-                
+        os.remove(unfinished_srt)
+        transcribe.make_files(srt_file)
         # If successful with small model, try with original model
         if original_model != model_name:
             try:
@@ -250,28 +259,17 @@ def generate(url, i = 0):
         write(f"Error: {e}")
         return
     
-    # Get the path to the subtitle file
-    sub_file = srt_file.replace("\\", "/")
-
-    # Open the video and subtitle file with MPV
-    mpv = ["mpv", url, "--pause", f'--sub-file="{sub_file}"']
-
-    current_time = datetime.datetime.now()
-    current_hour = current_time.hour
-
-    #if 12 <= current_hour < 18:
-        #subprocess.Popen(mpv)
-    mpv = ' '.join(mpv)
-    pyperclip.copy(mpv)
-    create_redirect_html_file(os.path.join(folder_name, name + ".htm"), url)
-    bat = os.path.join(folder_name, name + ".bat")
-    write(bat)
-    with open(file=bat, mode='w', encoding="utf-8") as f:
-        try:
-            f.write(mpv)
-        except UnicodeEncodeError:
-            write(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
-            f.write(mpv.encode('ascii', 'ignore').decode('ascii'))
+    # Ensure the SRT file exists before creating helper files
+    if os.path.exists(srt_file):
+        # Use transcribe.make_files to create all helper files
+        transcribe.make_files(srt_file)
+        
+        # Copy the MPV command to clipboard for convenience
+        sub_file = srt_file.replace("\\", "/")
+        mpv_cmd = f'mpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{sub_file}"'
+        pyperclip.copy(mpv_cmd)
+    else:
+        write(f"Warning: SRT file not found at {srt_file}, cannot create helper files")
     with open(file=history_file, mode='a', encoding="utf-8") as f:
         try:
             f.write(id + ' ' + model_name + '\n')
@@ -307,6 +305,7 @@ class YoutubeSubs:
         self.progress_name = f'progress-{self.start}'
         self.progress_file = os.path.join(self.ytsubs, f'{self.progress_name}.log')
         self.history_file = os.path.join(self.ytsubs, 'history.txt')
+        self.urls_file = os.path.join(self.ytsubs, 'urls.txt')
         
         # Find cookies file
         self.cookies_file = self._find_cookies_file() if self.use_cookies else None
@@ -620,24 +619,85 @@ class YoutubeSubs:
 
     def process_urls(self, urls_text, callback=print):
         """Process multiple URLs from text input"""
-        urls = urls_text.replace('\r','').split('\n')
-        urls = [url.strip() for url in urls if 'youtu' in url.strip()]
+        # Fix the urls_file issue
+        if not hasattr(self, 'urls_file') or not self.urls_file:
+            self.urls_file = os.path.join(os.getcwd(), 'urls.txt')
         
-        for i, url in enumerate(urls):
+        # Clean and filter URLs
+        urls = urls_text.replace('\r', '').split('\n')
+        urls = [url.strip() for url in urls if url.strip() and 'youtu' in url.strip()]
+        
+        if not urls:
+            callback("⚠️ No YouTube URLs found!")
+            return
+        
+        callback(f"📋 Found {len(urls)} YouTube URLs to process")
+        
+        processed_videos = []  # Track what we actually process
+        # lambda writer, no duplicates
+        duplicates = set()
+        with open(self.urls_file, 'a', encoding='utf-8') as f:
+            for url in urls:
+                if url not in duplicates:
+                    f.write(url + '\n')
+                    duplicates.add(url)
+        for i, url in enumerate(urls, 1):
             try:
-                callback(f"Processing {i+1}/{len(urls)}: {url}")
-                if '@' in url:
-                    # Handle channel/playlist
+                callback(f"🔄 Processing {i}/{len(urls)}: {url}")
+                
+                # Better channel/playlist detection
+                if self.is_channel_or_playlist_url(url):
+                    callback(f"📺 Detected channel/playlist URL")
                     video_urls = self.get_youtube_videos(url)
-                    for j, video_url in enumerate(video_urls):
-                        callback(f"Processing video {j+1}/{len(video_urls)} from channel")
-                        self.process_single_url(video_url, callback)
+                    
+                    if video_urls:
+                        callback(f"📹 Found {len(video_urls)} videos in channel/playlist")
+                        
+                        # Write all video URLs to file at once
+                        with open(self.urls_file, 'a', encoding='utf-8') as f:
+                            #split by /, = or @     
+                            last_part = re.split(r'[/=@]', url)
+                            f.write(last_part[-1] + '\n')
+                            for video_url in video_urls:
+                                if video_url not in duplicates:
+                                    f.write(video_url + '\n')
+                                    duplicates.add(video_url)
+                        
+                        # Process each video
+                        for j, video_url in enumerate(video_urls, 1):
+                            callback(f"  🎬 Processing video {j}/{len(video_urls)}")
+                            self.process_single_url(video_url, callback)
+                            processed_videos.append(video_url)
+                    else:
+                        callback(f"⚠️ No videos found in channel/playlist")
+                        
                 else:
-                    # Handle single video
+                    # Single video URL
                     self.process_single_url(url, callback)
+                    processed_videos.append(url)
+                    
             except Exception as e:
-                callback(f"Error processing {url}: {str(e)}")
-
+                callback(f"❌ Error processing {url}: {str(e)}")
+        
+        callback(f"✅ Finished! Processed {len(processed_videos)} videos total")
+    def is_channel_or_playlist_url(self, url):
+        """only TRUE playlists/channels, not videos in playlists"""
+        
+        # If it has a specific video ID (v=), it's a single video regardless of list parameter
+        if 'v=' in url:
+            return False  # It's a specific video, even if it has &list=
+        
+        # These are definitely channels/playlists
+        true_playlist_indicators = [
+            '@',  # @username channels
+            '/channel/',
+            '/c/',
+            '/user/',
+            'youtube.com/playlist?list=',  # Direct playlist URLs
+            'youtu.be/playlist?list=',     # Short playlist URLs
+        ]
+        
+        return any(indicator in url for indicator in true_playlist_indicators)
     def process_single_url(self, url, callback=print):
         """Process a single YouTube URL"""
         try:
@@ -671,25 +731,60 @@ class YoutubeSubs:
             name = os.path.splitext(os.path.basename(audio_file))[0]
             srt_file = os.path.join(folder_name, name + ".srt")
             
-            # Transcribe
-            success = transcribe.process_create(
-                file=audio_file, 
-                model_name=self.model_name,
-                srt_file=srt_file,
-                language=None,
-                device=self.device,
-                compute_type=self.compute,
-                force_device=self.force_device,
-                write=callback
-            )
+            # Create unfinished SRT file and helper files at start  
+            unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+            os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
+            with open(unfinished_srt, 'w', encoding='utf-8') as f:
+                f.write('')
+            # Pass the URL to make_files for the unfinished version
+            transcribe.make_files(unfinished_srt, url=url)  # Pass URL for helper files
+            try:
+                # Transcribe
+                success = transcribe.process_create(
+                    file=audio_file, 
+                    model_name=self.model_name,
+                    srt_file=srt_file,
+                    language=None,
+                    device=self.device,
+                    compute_type=self.compute,
+                    force_device=self.force_device,
+                    write=callback
+                )
 
-            if success:
-                # Create helper files
-                self.create_helper_files(folder_name, name, url)
-                # Update history
-                self.update_history(video_id)
-                
+                if success:
+                    # Create helper files for completed transcription
+                    transcribe.make_files(srt_file, url=url)
+                    # Update history
+                    self.update_history(video_id)
+                    
+                    # Clean up unfinished files
+                    try:
+                        if os.path.exists(unfinished_srt):
+                            os.remove(unfinished_srt)
+                            # Remove any helper files for the unfinished version
+                            base_name = os.path.splitext(unfinished_srt)[0]
+                            for ext in ['.sh', '.bat', '.htm']:
+                                helper_file = f"{base_name}{ext}"
+                                if os.path.exists(helper_file):
+                                    os.remove(helper_file)
+                    except Exception as e:
+                        callback(f"Warning: Could not clean up temporary files: {str(e)}")
+                    # Remove url from urls file
+                    with open(urls_file, 'r+', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        f.seek(0)
+                        f.writelines(line for line in lines if line.strip() != url.strip())
+                        f.truncate()
+            except Exception as e:
+                callback(f"Error: {str(e)}")    
             # Cleanup
+            try:
+                for ext in ['.sh', '.bat', '.htm']:
+                    helper_file = f"{os.path.splitext(unfinished_srt)[0]}{ext}"
+                    if os.path.exists(helper_file):
+                        os.remove(helper_file)
+            except Exception as e:
+                callback(f"Warning: Could not clean up temporary files: {str(e)}")
             if os.path.exists(audio_file):
                 os.remove(audio_file)
             

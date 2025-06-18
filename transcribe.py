@@ -65,11 +65,15 @@ def check_memory_usage():
         memory_percent = psutil.Process().memory_percent()
 def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cpu', compute_type='int8'):
     """  
-    Modified to handle compute_type parameter properly
+    Transcribe audio file and generate SRT subtitles with helper files.
+    Creates helper files for both in-progress and completed transcriptions.
     """
     original = srt_file
-    temp_srt = srt_file.replace('.srt','-unfinished.srt')
-    make_files(temp_srt)
+    temp_srt = srt_file.replace('.srt','.unfinished.srt')
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(temp_srt) or '.', exist_ok=True)
+    
     # Automatically switch to CPU if CUDA is not available
     if device == 'cuda':
         try:
@@ -110,13 +114,29 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
                 srt.write(f"{segment.text}\n\n")
                 srt.flush()
 
-        # Only rename if the temporary file was created successfully
+        # Only proceed if the temporary file was created successfully
         if os.path.exists(temp_srt):
+            # Create directory for the final file if it doesn't exist
+            os.makedirs(os.path.dirname(original) or '.', exist_ok=True)
+            
+            # Remove the old file if it exists
             if os.path.exists(original):
                 os.remove(original)
-                os.rename(temp_srt, original)
-                make_files(original)  # Recreate helper files to point at final SRT
-                return True
+                
+            # Rename the temporary file to the final name
+            os.rename(temp_srt, original)
+            
+            # Clean up any temporary helper files
+            temp_base = os.path.splitext(temp_srt)[0]
+            for ext in ['.sh', '.bat']:
+                temp_helper = f"{temp_base}{ext}"
+                if os.path.exists(temp_helper):
+                    try:
+                        os.remove(temp_helper)
+                    except Exception as e:
+                        print(f"Warning: Could not remove temporary file {temp_helper}: {e}")
+            
+            return True
 
         
     except RuntimeError as e:
@@ -200,9 +220,15 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
 def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write):
     """Try transcription with given parameters"""
     try:
+        # Create unfinished SRT file and helper files at start
+        unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+        os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
+        with open(unfinished_srt, 'w', encoding='utf-8') as f:
+            f.write('Transcription in progress...')
+        
         # Format language parameter properly - force 'en' for English-only models
         is_english_only = '.en' in current_model
-        language_param = "'en'" if is_english_only else ('None' if language == 'none' else f"'{language}'")
+        language_param = '\'en\'' if is_english_only else ('None' if language == 'none' else f"'{language}'")
         
         # Create unfinished srt file name
         unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
@@ -337,12 +363,15 @@ finally:
     whisper_logger.removeHandler(file_handler)
 '''
         
-        # Write script to temporary file
-        script_path = os.path.join(os.path.dirname(file), f"temp_whisper_{os.getpid()}.py")
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write(script)
-
+        # Write script to temporary file in system temp directory to ensure cleanup on system reboot
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        script_path = os.path.join(temp_dir, f"temp_whisper_{os.getpid()}.py")
+        
         try:
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(script)
+
             # Run the script
             args = [sys.executable, script_path]
             write(f"Running transcription with model {current_model} on {device}")
@@ -366,8 +395,8 @@ finally:
                         write(f"{prefix}: {line}")
 
             # Create threads for stdout and stderr
-            stdout_thread = threading.Thread(target=log_output, args=(process.stdout, "Out"))
-            stderr_thread = threading.Thread(target=log_output, args=(process.stderr, "Error"))
+            stdout_thread = threading.Thread(target=log_output, args=(process.stdout, "Out"), daemon=True)
+            stderr_thread = threading.Thread(target=log_output, args=(process.stderr, "Error"), daemon=True)
             
             # Start threads
             stdout_thread.start()
@@ -376,49 +405,111 @@ finally:
             # Wait for process to complete
             exit_code = process.wait()
             
-            # Wait for output threads to complete
-            stdout_thread.join()
-            stderr_thread.join()
+            # Wait for output threads to complete with timeout
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
             
             if exit_code == 0 and os.path.exists(srt_file) and os.path.getsize(srt_file) > 10:
                 write(f"Successfully created {srt_file}")
-                
-                # Create helper files
                 make_files(srt_file)
                 return True
             
             write(f"Process exited with code {exit_code}")
             return False
+
+        except Exception as e:
+            write(f"Error during transcription: {e}")
+            return False
             
         finally:
-            # Clean up temporary script
+            # Ensure cleanup of temporary script in all cases
             try:
-                os.remove(script_path)
-            except:
-                pass
+                if os.path.exists(script_path):
+                    os.unlink(script_path)
+            except Exception as e:
+                write(f"Warning: Could not remove temporary file {script_path}: {e}")
 
     except Exception as e:
         write(f"An error occurred: {e}")
         return False
-def make_files(srt_file):
-    dir_path = os.path.dirname(srt_file)
-    base_name = os.path.splitext(os.path.basename(srt_file))[0]
-                
-                # Try to find corresponding HTML file to get URL
-    html_file = os.path.join(dir_path, f"{base_name}.htm")
-    url = None
-    if os.path.exists(html_file):
-        try:
-            with open(html_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+def make_files(srt_file, url=None):
+    """
+    Create helper files (HTML, .sh, .bat) for the given SRT file.
+    Handles both finished and unfinished transcriptions.
+    
+    Args:
+        srt_file (str): Path to the SRT file
+        url (str, optional): URL to use for helper files. If not provided, will try to extract from HTML.
+    """
+    if not srt_file:
+        print("No SRT file provided")
+        return
+    try:
+        print(f"Creating helper files for {srt_file}")
+        if not os.path.exists(srt_file):
+            # Create an empty file if it doesn't exist
+            os.makedirs(os.path.dirname(srt_file) or '.', exist_ok=True)
+            with open(srt_file, 'w', encoding='utf-8') as f:
+                f.write('Transcription in progress...')
+        
+        dir_path = os.path.dirname(srt_file)
+        base_name = os.path.splitext(os.path.basename(srt_file))[0]
+        
+        # Handle both finished and unfinished files
+        is_unfinished = '.unfinished' in base_name
+        clean_base = base_name.replace('.unfinished', '') if is_unfinished else base_name
+        print(f"Base name: {base_name}, Clean base: {clean_base}")
+        print(f"Dir path: {dir_path}")
+        # Create directory if it doesn't exist
+        os.makedirs(dir_path, exist_ok=True)
+        
+        # If URL was provided, use it directly
+        if url:
+            print(f"Using provided URL: {url}")
+            create_helper_files(dir_path, srt_file, url)
+            return
+            
+        # For unfinished files without URL, try to extract video ID from filename
+        if is_unfinished:
+            # Extract video ID from the filename if possible
+            video_id = 'video_id_placeholder'  # Default if we can't extract
+            try:
+                # Try to get the YouTube video ID from the URL if it exists in the filename
                 import re
-                match = re.search(r'URL=\'([^\']+)\'', content)
+                match = re.search(r'[?&]v=([^&\s]+)', base_name)
                 if match:
-                    url = match.group(1)
-        except:
-            pass               
-    if url:
-        create_helper_files(dir_path, base_name, url)
+                    video_id = match.group(1)
+                else:
+                    # If no URL in filename, try to use the first part of the filename
+                    video_id = base_name.split('_')[0]
+                    if len(video_id) > 20:  # Probably not a video ID if too long
+                        video_id = 'video_id_placeholder'
+            except:
+                pass
+                
+            url = f"https://youtube.com/watch?v={video_id}"
+            print(f"Using generated URL for unfinished transcription: {url}")
+            create_helper_files(dir_path, base_name, url)
+        else:
+            # For finished files, try to get URL from HTML file
+            html_file = os.path.join(dir_path, f"{clean_base}.htm")
+            
+            if os.path.exists(html_file):
+                try:
+                    print(f"Reading HTML file {html_file}")
+                    with open(html_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        import re
+                        match = re.search(r'URL=[\'"]([^\'"]+)[\'"]', content)
+                        if match:
+                            url = match.group(1)
+                            print(f"URL from HTML: {url}")
+                            create_helper_files(dir_path, base_name, url)
+                except Exception as e:
+                    print(f"Error reading HTML file {html_file}: {e}")
+            
+    except Exception as e:
+        print(f"Error in make_files for {srt_file}: {e}")
 def write_srt_from_segments(segments, srt):
     """Writes the transcription segments to an SRT file."""
     for i, segment in enumerate(segments, start=1):
@@ -432,34 +523,57 @@ def write_srt_from_segments(segments, srt):
 
 def create_helper_files(dir_path, subtitle_file, url):
     """Create helper files (HTML redirect, batch file, shell script)"""
+    print(f"Creating helper files for {subtitle_file}")
     try:
+        if not subtitle_file.endswith('.srt'):
+            subtitle_file += '.srt'
+        #if subtitle_file is not a full path, add Documents/Youtube-Subs to the path
+        if not any(x in subtitle_file for x in ['/', '\\']):
+            subtitle_file = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs", subtitle_file)
         base_name = os.path.splitext(os.path.basename(subtitle_file))[0]
-
+        print(f"Base name: {base_name}")
+        print(f"Dir path: {dir_path}")
+        print(f"URL: {url}")
         # HTML redirect (same as before)
         html_file = os.path.join(dir_path, f"{base_name}.htm")
-        with open(html_file, "w", encoding='utf-8') as f:
-            f.write(f"""<!DOCTYPE html>
+        try:
+            with open(html_file, "w", encoding='utf-8') as f:
+                f.write(f"""<!DOCTYPE html>
 <html>
 <head><meta http-equiv="refresh" content="0; URL='{url}'" /></head>
 <body></body>
 </html>""")
-
+        except OSError as e:
+            print(f"OS error creating HTML file: {e}")
+        except Exception as e:
+            print(f"Error creating HTML file: {e}")
         # Shell script (.sh)
-        sh_file = os.path.join(dir_path, f"{base_name}.sh")
-        linux_path = subtitle_file.replace("\\", "/")
-        with open(sh_file, "w", encoding='utf-8') as f:
-            f.write(f'#!/bin/bash\nmpv "{url}" --pause --sub-file="{linux_path}"\n')
-        os.chmod(sh_file, 0o755)
+        try:
+            sh_file = os.path.join(dir_path, f"{base_name}.sh")
+            linux_path = subtitle_file.replace("\\", "/")
+            with open(sh_file, "w", encoding='utf-8') as f:
+                f.write(f'#!/bin/bash\nmpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{linux_path}"\n')
+            os.chmod(sh_file, 0o755)
+        except OSError as e:
+            print(f"OS error creating shell script: {e}")
+        except Exception as e:
+            print(f"Error creating shell script: {e}")
 
         # Batch file (.bat)
         bat_file = os.path.join(dir_path, f"{base_name}.bat")
         win_path = subtitle_file
-        if win_path.startswith("/home"):
-            win_path = f"C:\\Users{win_path[5:]}"
-        win_path = win_path.replace("/", "\\")
-        with open(bat_file, "w", encoding='utf-8') as f:
-            f.write(f'mpv "{url}" --pause --sub-file="{win_path}"\n')
-
+        print(f"Win path: {win_path}")
+        try:
+            if win_path.startswith("/home"):
+                win_path = f"C:\\Users{win_path[5:]}"
+            win_path = win_path.replace("/", "\\")
+            print(f"Win path after replacement: {win_path}")
+            with open(bat_file, "w", encoding='utf-8') as f:
+                f.write(f'mpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{win_path}"\n')
+        except OSError as e:
+            print(f"OS error creating batch file: {e}")
+        except Exception as e:
+            print(f"Error creating batch file: {e}")
     except Exception as e:
         print(f"Error creating helper files: {e}")
 

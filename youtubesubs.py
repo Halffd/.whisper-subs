@@ -1,4 +1,4 @@
-[<35;8;19M]import sys
+import sys
 import model
 import argparse
 from typing import Optional
@@ -18,6 +18,11 @@ import urllib.parse
 import transcribe
 import time
 import pyperclip
+import twitch_vod
+import shlex
+from urllib.parse import urlparse
+from html import unescape
+from html import escape
 
 channel_name = 'unknown'
 video_title = 'none'
@@ -298,7 +303,9 @@ class YoutubeSubs:
         # Setup directories
         self.subs_dir = subs_dir or os.path.join("Documents", "Youtube-Subs")
         self.ytsubs = os.path.join(os.path.expanduser("~"), self.subs_dir)
+        self.localsubs = os.path.join(self.ytsubs, "local")
         os.makedirs(self.ytsubs, exist_ok=True)
+        os.makedirs(self.localsubs, exist_ok=True)
         
         # Setup logging
         self.start = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
@@ -309,7 +316,7 @@ class YoutubeSubs:
         
         # Find cookies file
         self.cookies_file = self._find_cookies_file() if self.use_cookies else None
-
+        self.clean_dirs()
     def _find_cookies_file(self):
         """Find or create the cookies file based on parameters"""
         # If a specific cookie file was provided, use it
@@ -390,7 +397,19 @@ class YoutubeSubs:
                 f.write(text.encode('ascii', 'ignore').decode('ascii') + '\n')
             except Exception as e:
                 f.write(f"Error writing to log: {str(e)}\n")
-
+    def clean_dirs(self):
+        """Clean up directories"""
+        try:
+            scriptDir = os.path.dirname(os.path.abspath(__file__))
+            files = os.listdir(scriptDir) + os.listdir(self.ytsubs)
+            mediaFiles = [file for file in files if file.endswith('.mp3') or file.endswith('.mp4') or file.endswith('.webm') or file.endswith('.m4a')]
+            for file in mediaFiles:
+                # check date, minimum 1h
+                if os.path.getmtime(os.path.join(scriptDir, file)) < time.time() - 3600:
+                    os.remove(os.path.join(scriptDir, file))
+            self.write("Cleaned up directories")
+        except Exception as e:
+            self.write(str(e))
     def rename_log(self, name, repl=False):
         """Rename the progress log file"""
         try:
@@ -418,16 +437,25 @@ class YoutubeSubs:
 
         if not rec or self.delay > 3600:
             self.delay = self.start_delay
-            
+        os.chdir(self.ytsubs)
         try:
             ydl_opts = {
                 'outtmpl': '%(title)s.%(ext)s',
-                'format': 'bestaudio/best',
+                # More flexible format selection
+                'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
                 'quiet': True,
                 'no_warnings': True,
-                'ignoreerrors': True
+                'ignoreerrors': True,
+                # Add these for rate limiting
+                'sleep_interval': 10,
+                'max_sleep_interval': 30,
+                'sleep_interval_requests': 5,
+                'sleep_interval_subtitles': 5,
+                # Retry settings
+                'retries': 3,
+                'fragment_retries': 3,
             }
-            
+        
             # Add cookies if available
             if self.use_cookies and self.cookies_file:
                 ydl_opts['cookiefile'] = self.cookies_file
@@ -488,17 +516,23 @@ class YoutubeSubs:
     def get_youtube_videos(self, url, rec=False):
         """Get list of video URLs from channel/playlist"""
         oldest = '--oldest' in sys.argv or reverse == 1 or '-o' in sys.argv
-
-        if not rec or self.delay > 3600:
-            self.delay = self.start_delay
-            
+        if not rec:
+            self.delay = 120  # Start with 2 minutes minimum
+        else:
+            # Exponential backoff that actually works
+            self.delay = min(self.delay * 1.5, 7200)  # Cap at 2 hours
+        
+        self.write(f"Waiting {self.delay}s before request...")
+        time.sleep(self.delay) if self.use_cookies else 0
         try:
             ydl_opts = {
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'outtmpl': '%(title)s.%(ext)s',
                 'quiet': True,
                 'no_warnings': True,
-                'ignoreerrors': True
+                'ignoreerrors': True,
+                'sleep_interval': 3,  # Built-in delay between requests
+                'max_sleep_interval': 10,
             }
             
             # Add cookies if available
@@ -511,22 +545,26 @@ class YoutubeSubs:
                     video_urls = []
                     for entry in info['entries']:
                         try:
-                            if entry['subtitles'] == {}:
+                            if entry and entry.get('subtitles') == {}:
                                 video_urls.append(entry['webpage_url'])
-                        except Exception as err:
-                            self.write(str(err))
-                    if(oldest):
+                        except (KeyError, TypeError):
+                            continue
+                            
+                    if oldest:
                         video_urls.reverse()
                     return video_urls
                 else:
                     return [info['webpage_url']]
                     
         except Exception as e:
-            self.write(f"{self.delay} {str(e)}")
-            time.sleep(self.delay)
-            self.delay *= 2
-            return self.get_youtube_videos(url, True)
-
+            error_msg = str(e).lower()
+            if 'rate' in error_msg or 'limit' in error_msg or 'unavailable' in error_msg:
+                self.delay = min(self.delay * 2, 3600)  # Cap at 1 hour
+                self.write(f"Rate limited. Next retry in {self.delay}s")
+                return self.get_youtube_videos(url, True)
+            else:
+                self.write(f"Error: {str(e)}")
+                return []
     def create_helper_files(self, folder_name, name, url):
         """Create helper files (HTML redirect, batch file)"""
         # Create HTML redirect
@@ -616,16 +654,92 @@ class YoutubeSubs:
         except Exception as e:
             self.write(f"Error sorting videos: {str(e)}")
             return urls
-
+    def remove_from_urls(self, url):
+        urls = []
+        with open(self.urls_file, 'r', encoding='utf-8') as f:
+            urls = f.read().splitlines()
+        with open(self.urls_file, 'w', encoding='utf-8') as f:
+            for u in urls:
+                if u != url:
+                    f.write(u + '\n')
+    @staticmethod
+    def is_url(url):
+        try:
+            result = urlparse(url)
+            return all([result.scheme, result.netloc])
+        except ValueError:
+            return False
+    @staticmethod
+    def is_file(text):
+        return YoutubeSubs.file(text) is not None
+    @staticmethod
+    def is_dir(text):
+        file = YoutubeSubs.file(text)
+        if not file:
+            return False
+        return os.path.isdir(file)
+    @staticmethod
+    def file(text):
+        try:
+            # Let shlex handle the unescaping like a shell would
+            unescaped = shlex.split(text)[0] if text else ""
+            full_path = os.path.expanduser(unescaped)
+            if os.path.isfile(full_path):
+                return full_path
+            return None
+        except ValueError:
+            return None
+    def process_file(self, file_path, callback=print):
+        """Process multiple URLs from file or audio file"""
+        ext = os.path.splitext(os.path.basename(file_path))[1].lower()
+        callback(f"{file_path} extension: {ext}")
+        if any(ext in s for s in ['.mp3', '.wav', '.flac', '.m4a', '.ogg']):
+            srt_file = os.path.splitext(file_path)[0] + '.srt' if not 'downloads' in file_path else os.path.join(self.localsubs, os.path.splitext(file_path)[0] + '.srt')
+            callback(f"Processing file: {file_path} to {srt_file}")
+            success = transcribe.process_create(
+                    file=file_path, 
+                    model_name=self.model_name,
+                    srt_file=srt_file,
+                    language=None,
+                    device=self.device,
+                    compute_type=self.compute,
+                    force_device=self.force_device,
+                    write=callback
+                )
+            if success:
+                print(f"Transcribed {file_path}")
+            else:
+                print(f"Failed to transcribe {file_path}")
+            return
+        callback(f"Processing URLs from file: {file_path}")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            urls = f.read().splitlines()
+        self.process_urls('\n'.join(urls), callback)
+    def process_twitch_channel(self, channel, callback=print):
+        downloader = twitch_vod.StreamlinkVODDownloader()
     def process_urls(self, urls_text, callback=print):
         """Process multiple URLs from text input"""
+        callback(f"Processing URLs: {urls_text}")
         # Fix the urls_file issue
         if not hasattr(self, 'urls_file') or not self.urls_file:
             self.urls_file = os.path.join(os.getcwd(), 'urls.txt')
-        
         # Clean and filter URLs
         urls = urls_text.replace('\r', '').split('\n')
-        urls = [url.strip() for url in urls if url.strip() and 'youtu' in url.strip()]
+        urls = [url.strip() for url in urls if url and 'youtu' in url]
+        file_path = self.file(urls_text)
+            
+        if file_path:
+            if self.is_dir(urls_text):
+                files = os.listdir(urls_text)
+                callback(f"Found {len(files)} files in directory: {urls_text}")
+                for file in files:
+                    callback(f"Processing file: {file}")
+                    if file.endswith('.mp3') or file.endswith('.wav') or file.endswith('.flac') or file.endswith('.m4a') or file.endswith('.ogg'):
+                        self.process_file(file, callback)
+                return  
+            callback(f"File path: {file_path}")
+            self.process_file(file_path, callback)
+            return
         
         if not urls:
             callback("⚠️ No YouTube URLs found!")
@@ -649,25 +763,19 @@ class YoutubeSubs:
                 if self.is_channel_or_playlist_url(url):
                     callback(f"📺 Detected channel/playlist URL")
                     video_urls = self.get_youtube_videos(url)
-                    
                     if video_urls:
                         callback(f"📹 Found {len(video_urls)} videos in channel/playlist")
-                        
-                        # Write all video URLs to file at once
-                        with open(self.urls_file, 'a', encoding='utf-8') as f:
-                            #split by /, = or @     
-                            last_part = re.split(r'[/=@]', url)
-                            f.write(last_part[-1] + '\n')
+                        with open(self.urls_file + '.tmp', 'a', encoding='utf-8') as f:
                             for video_url in video_urls:
                                 if video_url not in duplicates:
                                     f.write(video_url + '\n')
                                     duplicates.add(video_url)
-                        
                         # Process each video
                         for j, video_url in enumerate(video_urls, 1):
                             callback(f"  🎬 Processing video {j}/{len(video_urls)}")
                             self.process_single_url(video_url, callback)
                             processed_videos.append(video_url)
+                        self.remove_from_urls(url)
                     else:
                         callback(f"⚠️ No videos found in channel/playlist")
                         
@@ -675,7 +783,7 @@ class YoutubeSubs:
                     # Single video URL
                     self.process_single_url(url, callback)
                     processed_videos.append(url)
-                    
+                    self.remove_from_urls(url)                    
             except Exception as e:
                 callback(f"❌ Error processing {url}: {str(e)}")
         
@@ -723,7 +831,7 @@ class YoutubeSubs:
             audio_file = self.download_audio(url)
             if audio_file is None:
                 raise FileNotFoundError("No audio file, subtitles may be available")
-
+    
             # Setup output paths - ensure using Documents/Youtube-Subs
             folder_name = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs", self.channel_name)
             os.makedirs(folder_name, exist_ok=True)
@@ -818,15 +926,23 @@ def get_video_url() -> str:
     
     # If still no URLs, prompt user
     if not urls:
-        url = input("Enter YouTube video URL: ")
+        url = input("Enter video URL/path: ")
         urls = [url]
-    
+    if not YoutubeSubs.is_url(urls[0]) and not YoutubeSubs.is_file(urls[0]):
+        urls = [sys.argv[-1]]
     print("Video count:", len(urls))
     return urls
 
 def main():
     try:
+        reverse = True
+        if '--reverse' in sys.argv or '-r' in sys.argv:
+            reverse = False
         urls = get_video_url()
+        if reverse:
+            temp = urls.copy()
+            for i in range(len(urls)):
+                urls[i] = temp[len(urls) - 1 - i]
         yt = YoutubeSubs(model_name, device=device)
         yt.process_urls('\n'.join(urls))
     except Exception as e:

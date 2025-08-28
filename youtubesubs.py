@@ -284,7 +284,7 @@ def generate(url, i = 0):
     write(f'{i}: {name} {url}', mpv)
 
 class YoutubeSubs:
-    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=False, browser=None, cookie_file=None):
+    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=True, browser='chrome', cookie_file=None):
         self.model_name = model_name
         self.device = device
         self.compute = compute
@@ -316,12 +316,13 @@ class YoutubeSubs:
         
         # Find cookies file
         self.cookies_file = self._find_cookies_file() if self.use_cookies else None
+        print("Cookies", self.cookies_file)
         self.clean_dirs()
     def _find_cookies_file(self):
         """Find or create the cookies file based on parameters"""
         # If a specific cookie file was provided, use it
         if self.specified_cookie_file and os.path.exists(self.specified_cookie_file):
-            self.write(f"Using specified cookie file: {self.specified_cookie_file}")
+            print(f"Using specified cookie file: {self.specified_cookie_file}")
             return self.specified_cookie_file
             
         # If a browser was specified, try to export from it
@@ -331,21 +332,22 @@ class YoutubeSubs:
             
             try:
                 os.makedirs(cookie_dir, exist_ok=True)
-                self.write(f"Exporting cookies from {self.specified_browser} browser...")
+                print(f"Exporting cookies from {self.specified_browser} browser...")
                 result = subprocess.run(
-                    ["yt-dlp", "--cookies-from-browser", self.specified_browser, "-o", cookie_file],
+                    ["yt-dlp", "https://www.youtube.com", "--skip-download", "--cookies-from-browser", self.specified_browser, "--cookies", cookie_file],
                     capture_output=True,
                     text=True
                 )
+                print(result)
                 if result.returncode == 0:
                     self.write(f"Successfully exported cookies from {self.specified_browser} browser")
                     # Set proper permissions
                     os.chmod(cookie_file, 0o600)
                     return cookie_file
                 else:
-                    self.write(f"Error exporting cookies from {self.specified_browser}: {result.stderr}")
+                    print(f"Error exporting cookies from {self.specified_browser}: {result.stderr}")
             except Exception as e:
-                self.write(f"Failed to export cookies from {self.specified_browser}: {str(e)}")
+                print(f"Failed to export cookies from {self.specified_browser}: {str(e)}")
         
         # Default fallback to look for cookies.txt in common locations
         cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
@@ -362,10 +364,11 @@ class YoutubeSubs:
                 self.write(f"Trying to export cookies from {browser}...")
                 os.makedirs(cookie_dir, exist_ok=True)
                 result = subprocess.run(
-                    ["yt-dlp", "--cookies-from-browser", browser, "-o", temp_cookie_file],
+                    ["yt-dlp", "https://www.youtube.com", "--skip-download", "--cookies-from-browser", browser, "--cookies", temp_cookie_file],
                     capture_output=True,
                     text=True
                 )
+                print(result)
                 if result.returncode == 0:
                     self.write(f"Successfully exported cookies from {browser}")
                     # Set proper permissions
@@ -750,10 +753,15 @@ class YoutubeSubs:
         processed_videos = []  # Track what we actually process
         # lambda writer, no duplicates
         duplicates = set()
+        with open(self.urls_file, 'w+', encoding='utf-8') as f:
+            for line in f:
+                if line.strip() not in duplicates:
+                    f.write(line)
+                duplicates.add(line.strip())
         with open(self.urls_file, 'a', encoding='utf-8') as f:
             for url in urls:
                 if url not in duplicates:
-                    f.write(url + '\n')
+                    f.write(url + ' ' + self.model_name + '\n')
                     duplicates.add(url)
         for i, url in enumerate(urls, 1):
             try:

@@ -284,7 +284,7 @@ def generate(url, i = 0):
     write(f'{i}: {name} {url}', mpv)
 
 class YoutubeSubs:
-    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=True, browser='chrome', cookie_file=None):
+    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=True, browser='chrome'):
         self.model_name = model_name
         self.device = device
         self.compute = compute
@@ -298,7 +298,6 @@ class YoutubeSubs:
         self.end_time = None
         self.use_cookies = use_cookies
         self.specified_browser = browser
-        self.specified_cookie_file = cookie_file
         
         # Setup directories
         self.subs_dir = subs_dir or os.path.join("Documents", "Youtube-Subs")
@@ -314,72 +313,7 @@ class YoutubeSubs:
         self.history_file = os.path.join(self.ytsubs, 'history.txt')
         self.urls_file = os.path.join(self.ytsubs, 'urls.txt')
         
-        # Find cookies file
-        self.cookies_file = self._find_cookies_file() if self.use_cookies else None
-        print("Cookies", self.cookies_file)
         self.clean_dirs()
-    def _find_cookies_file(self):
-        """Find or create the cookies file based on parameters"""
-        # If a specific cookie file was provided, use it
-        if self.specified_cookie_file and os.path.exists(self.specified_cookie_file):
-            print(f"Using specified cookie file: {self.specified_cookie_file}")
-            return self.specified_cookie_file
-            
-        # If a browser was specified, try to export from it
-        if self.specified_browser:
-            cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
-            cookie_file = os.path.join(cookie_dir, f'cookies-{self.specified_browser}.txt')
-            
-            try:
-                os.makedirs(cookie_dir, exist_ok=True)
-                print(f"Exporting cookies from {self.specified_browser} browser...")
-                result = subprocess.run(
-                    ["yt-dlp", "https://www.youtube.com", "--skip-download", "--cookies-from-browser", self.specified_browser, "--cookies", cookie_file],
-                    capture_output=True,
-                    text=True
-                )
-                print(result)
-                if result.returncode == 0:
-                    self.write(f"Successfully exported cookies from {self.specified_browser} browser")
-                    # Set proper permissions
-                    os.chmod(cookie_file, 0o600)
-                    return cookie_file
-                else:
-                    print(f"Error exporting cookies from {self.specified_browser}: {result.stderr}")
-            except Exception as e:
-                print(f"Failed to export cookies from {self.specified_browser}: {str(e)}")
-        
-        # Default fallback to look for cookies.txt in common locations
-        cookie_dir = os.path.join(os.path.expanduser('~'), '.config', 'yt-dlp')
-        cookie_file = os.path.join(cookie_dir, 'cookies.txt')
-        
-        if os.path.exists(cookie_file):
-            self.write(f"Using existing cookie file: {cookie_file}")
-            return cookie_file
-            
-        # Try common browsers if no cookie file found
-        for browser in ['chrome', 'firefox', 'brave', 'edge', 'opera', 'safari']:
-            try:
-                temp_cookie_file = os.path.join(cookie_dir, f'cookies-{browser}.txt')
-                self.write(f"Trying to export cookies from {browser}...")
-                os.makedirs(cookie_dir, exist_ok=True)
-                result = subprocess.run(
-                    ["yt-dlp", "https://www.youtube.com", "--skip-download", "--cookies-from-browser", browser, "--cookies", temp_cookie_file],
-                    capture_output=True,
-                    text=True
-                )
-                print(result)
-                if result.returncode == 0:
-                    self.write(f"Successfully exported cookies from {browser}")
-                    # Set proper permissions
-                    os.chmod(temp_cookie_file, 0o600)
-                    return temp_cookie_file
-            except Exception as e:
-                self.write(f"Failed to export cookies from {browser}: {str(e)}")
-        
-        self.write("No cookies file found and couldn't export from any browser")
-        return None
-
     def write(self, *text, mpv='err'):
         """Log messages to file and through callback"""
         if not self.enable_logging:
@@ -460,10 +394,8 @@ class YoutubeSubs:
             }
         
             # Add cookies if available
-            if self.use_cookies and self.cookies_file:
-                ydl_opts['cookiefile'] = self.cookies_file
-                self.write(f"Using cookies file for download: {self.cookies_file}")
-
+            if self.use_cookies and self.specified_browser:
+                 ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
@@ -491,8 +423,8 @@ class YoutubeSubs:
             # Add time range and cookies to command
             command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3"]
             
-            if self.use_cookies and self.cookies_file:
-                command.extend(["--cookies", self.cookies_file])
+            if self.use_cookies and self.specified_browser:
+                command.extend(["--cookies-from-browser", self.specified_browser])
             
             if self.start_time or self.end_time:
                 time_args = []
@@ -537,10 +469,8 @@ class YoutubeSubs:
                 'sleep_interval': 3,  # Built-in delay between requests
                 'max_sleep_interval': 10,
             }
-            
-            # Add cookies if available
-            if self.cookies_file:
-                ydl_opts['cookiefile'] = self.cookies_file
+            if self.use_cookies and self.specified_browser:
+                 ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)

@@ -1,20 +1,24 @@
 import model
 import faster_whisper
-import torch
+import torch.cuda as cuda
+import torch.backends.cudnn as cudnn
 import logging
 import psutil
 import time
 import sys
 import subprocess
-import json
 import os
+import json
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List
-
+from whisper_model_chooser import WhisperModelChooser
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
-
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 audiofile, modelname, langcode = '', 'base', None
+cuda.empty_cache()  # Clear GPU cache
+cudnn.benchmark = False
+cudnn.deterministic = True
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 @dataclass
@@ -63,6 +67,7 @@ def check_memory_usage():
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
         memory_percent = psutil.Process().memory_percent()
+
 def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cpu', compute_type='int8'):
     """  
     Transcribe audio file and generate SRT subtitles with helper files.
@@ -186,17 +191,25 @@ def write_srt(segments_file, srt):
             srt.write(f"{i}\n")
             srt.write(f"{start_time} --> {end_time}\n")
             srt.write(f"{text}\n\n")                                        
-def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, write=print):
+def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print):
     """Creates a new process to retry the transcription."""
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
     
     # Only switch to CPU if not forcing device
-    if not force_device:
+    if not force_device and device == 'cpu':
         device = 'cpu'
         compute_type = 'int8'
-    
+        write(f"Falling back to CPU and int8")
     model_names = model.model_names
+
+    if device == 'cuda' and auto:
+        chooser = WhisperModelChooser()
+        best = chooser.choose_best_model(english_only='en' in model_name)
+        model_name = best['model']
+        compute_type = best['compute_type']
+        write(f"Selected model: {model_name} {compute_type}")
+    compute_type = 'int8'
     if model_name in model_names:
         i = model_names.index(model_name)
         
@@ -212,7 +225,11 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
                 current_model = model_names[j]
                 success = try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write)
                 if success:
+                    write(f"Successfully transcribed with {current_model}")
                     return True
+            if device == 'cuda':
+                write("All GPU models failed, falling back to CPU...")
+                return try_transcribe(file, 'medium.en' if 'en' in model_name else 'large-v3', srt_file, language, 'cpu', 'int8', False, write)
     else:
         write('No model')
     return False

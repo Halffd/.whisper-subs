@@ -31,7 +31,7 @@ class StreamlinkVODDownloader:
     def __init__(self):
         self.client_id = os.getenv('TWITCH_CLIENT_ID')
         self.client_secret = os.getenv('TWITCH_CLIENT_SECRET')
-        self.output_dir = os.getenv('OUTPUT_DIR', 'downloads')
+        self.output_dir = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs", "Twitch")
         self.audio_quality = os.getenv('AUDIO_QUALITY', '128k')
         
         if not self.client_id or not self.client_secret:
@@ -47,7 +47,8 @@ class StreamlinkVODDownloader:
             'Authorization': f'Bearer {self.access_token}'
         }
         
-        Path(self.output_dir).mkdir(exist_ok=True)
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+
     def get_user_id(self, username):
         """Get user ID from username - original method, keeping for compatibility"""
         url = f"https://api.twitch.tv/helix/users?login={username}"
@@ -111,6 +112,18 @@ class StreamlinkVODDownloader:
                 
         return all_vods
     
+    def get_vod_info(self, vod_id):
+        """Get details for a single VOD."""
+        url = f"https://api.twitch.tv/helix/videos?id={vod_id}"
+        response = requests.get(url, headers=self.headers)
+
+        if response.status_code != 200:
+            print(f"API Error getting VOD info: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+        return data['data'][0] if data.get('data') else None
+
     def sanitize_filename(self, filename):
         """Clean filename for filesystem"""
         invalid_chars = '<>:"/\\|?*'
@@ -119,15 +132,14 @@ class StreamlinkVODDownloader:
         return filename[:200]  # Limit length
     
     def download_vod_audio(self, vod_id, title, duration):
-        """Download VOD audio using streamlink"""
+        """Download VOD audio using streamlink and return the final file path."""
         safe_title = self.sanitize_filename(title)
-        temp_file = f"{self.output_dir}/{vod_id}_{safe_title}.ts"
-        final_file = f"{self.output_dir}/{vod_id}_{safe_title}.mp3"
+        final_file = os.path.join(self.output_dir, f"{vod_id}_{safe_title}.mp3")
         
         # Check if already downloaded
         if os.path.exists(final_file):
             print(f"Already exists: {safe_title}")
-            return True
+            return final_file
         
         print(f"Downloading: {safe_title} ({duration})")
         
@@ -152,23 +164,23 @@ class StreamlinkVODDownloader:
             
             if result.returncode != 0:
                 print(f"Streamlink failed for {vod_id}: {result.stderr}")
-                return False
+                return None
             
             print(f"✓ Completed: {safe_title}")
-            return True
+            return final_file
             
         except subprocess.TimeoutExpired:
             print(f"Timeout downloading {vod_id}")
-            return False
+            return None
         except Exception as e:
             print(f"Error downloading {vod_id}: {e}")
-            return False
+            return None
     
     def download_channel_vods(self, username, limit=None, skip_existing=True):
         """Download all VODs from a channel"""
         print(f"Getting VODs for {username}...")
         
-        user_id = self.get_user_id_by_login(username)  # Fixed: removed extra argument
+        user_id = self.get_user_id_by_login(username)
         if not user_id:
             print(f"User {username} not found")
             return
@@ -186,13 +198,14 @@ class StreamlinkVODDownloader:
         for i, vod in enumerate(vods, 1):
             print(f"\n[{i}/{len(vods)}] Processing VOD {vod['id']}")
             
-            success = self.download_vod_audio(
+            # Using download_vod_audio which now returns a path or None
+            result_path = self.download_vod_audio(
                 vod['id'], 
                 vod['title'], 
                 vod['duration']
             )
             
-            if success:
+            if result_path:
                 success_count += 1
             else:
                 failed_count += 1

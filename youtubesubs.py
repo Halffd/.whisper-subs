@@ -2,10 +2,18 @@ import sys
 import model
 import argparse
 from typing import Optional
+from whisper_model_chooser import WhisperModelChooser
 default = 'base'
-device = 'cuda'
-if 'cpu' in sys.argv:
-    device = 'cpu'
+device = 'cpu'
+g = ['gpu', 'cuda', '-g']
+for a in sys.argv:
+    for b in g:
+        if b in a:
+            print("Using GPU")
+            device = 'cuda'
+            break
+    if device == 'cuda':
+        break
 model_name = model.getName(sys.argv, default)
 start_time = '00:00:00'
 reverse = 0
@@ -15,7 +23,6 @@ import yt_dlp
 import re
 import datetime
 import urllib.parse
-import transcribe
 import time
 import pyperclip
 import twitch_vod
@@ -71,220 +78,8 @@ def write(*text, mpv = 'err'):
         except Exception as e:
             print(e)
             f.write(e + '\n')
-def clean_filename(filename):
-    # Remove leading/trailing spaces
-    filename = filename.strip()
-    
-    # Remove leading/trailing periods
-    filename = filename.strip('.')
-    
-    # Replace multiple consecutive periods with a single period
-    filename = re.sub(r'\.+', '.', filename)
-        
-    # Remove other special characters
-    cleaned_filename = re.sub(r"[<>!@#$%^&*(),/'?\|\"\-;:\[\]\{\}|\\]", "", filename)
-    if cleaned_filename[-1] == ".":
-        cleaned_filename = cleaned_filename[:-1]
-    write(cleaned_filename)
-    return cleaned_filename
-def convert_to_seconds(time_str):
-    """Convert hh:mm:ss format to seconds."""
-    if not time_str:
-        return 0
-    h, m, s = map(int, time_str.split(':'))
-    return h * 3600 + m * 60 + s
-
-def remove_time_param(url):
-    """
-    Simplifies a YouTube URL to include only the base URL and the video ID,
-    supporting both 'youtube.com' and 'youtu.be' formats.
-    
-    Args:
-        url (str): The YouTube URL to be processed.
-        
-    Returns:
-        str: The simplified URL containing only the base URL and video ID.
-    """
-    if "youtu.be" in url:
-        # Extract video ID from youtu.be format
-        video_id = url.split('/')[-1]
-        return f"https://www.youtube.com/watch?v={video_id}"
-    else:
-        # Extract video ID from youtube.com format
-        v_index = url.find('v=')
-        if v_index == -1:
-            return url  # Return original if 'v=' not found
-        
-        start_index = v_index + 2
-        end_index = url.find('&', start_index)
-        video_id = url[start_index:end_index] if end_index != -1 else url[start_index:]
-        
-        return f"https://www.youtube.com/watch?v={video_id}"
-def get_playlist(current_url):
-    # Check if the URL includes "youtube.com/watch?v="
-    if "youtube.com/watch?v=" in current_url:
-        # Parse the URL
-        url = urllib.parse.urlparse(current_url)
-        
-        # Update the query parameters
-        query_params = urllib.parse.parse_qs(url.query)
-        query_params["list"] = ["ULcxqQ59vzyTk"]
-        
-        # Rebuild the URL with the updated query parameters
-        updated_url = urllib.parse.urlunparse((
-            url.scheme,
-            url.netloc,
-            url.path,
-            url.params,
-            urllib.parse.urlencode(query_params, doseq=True),
-            url.fragment
-        ))
-        return updated_url
-    return '[]'
-
-def get_video_id(url):
-    """
-    Extracts the YouTube video ID from a given URL.
-    """
-    # Define a regular expression pattern to match the video ID
-    pattern = r'(?:https?://)?(?:www\.)?(?:youtu\.be/|youtube\.com/(?:watch\?v=|embed/|v/|user/\S+|[^/]+\?v=))([^&"\'<>\s]+)'
-    
-    # Use the pattern to search for the video ID in the URL
-    match = re.search(pattern, url)
-    write(match)
-    if match:
-        return match.group(1)
-    else:
-        return None
-def create_redirect_html_file(filename, url):
-  """Creates an HTML file with a meta refresh tag to redirect to the specified URL.
-
-  Args:
-    filename: The name of the HTML file to create.
-    url: The URL to redirect to.
-  """
-  write(filename)
-  with open(filename, "w", encoding='utf-8') as f:
-    f.write(f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta http-equiv="refresh" content="0; URL='{url}'" />
-    </head>
-    <body>
-    </body>
-    </html>
-    """)
-def generate(url, i = 0):
-    global history_file, progress_file, model_name
-    
-    # Set CPU-specific settings
-    os.environ['OMP_NUM_THREADS'] = '8'  # Use more CPU threads
-    os.environ['KMP_BLOCKTIME'] = '1'
-    os.environ['KMP_AFFINITY'] = 'granularity=fine,compact,1,0'
-    
-    # Start with CPU for large models
-    if any(large_model in model_name for large_model in ['large', 'medium']):
-        device = 'cpu'
-        compute = 'int8'
-        write(f"Using CPU for {model_name} model")
-    
-    url = remove_time_param(url)
-    id = get_video_id(url)
-    write(url, id)
-    
-    # Start with smaller model
-    original_model = model_name
-    model_name = "small"  # Start with small model
-    
-    try:
-        history = open(history_file, "r", encoding='utf-8').readlines()
-        for h in history:
-            sep = h.replace('\n','').split(' ')
-            if sep[0] == id:
-                if sep[1] >= model.getIndex(model_name):
-                    continue
-    except Exception as e:
-        write(e)    
-    # Download the audio
-    try:
-        audio_file = download_audio(url, False, start_time)
-        progress_file = progress_file.replace("___", video_title)
-        rename(progress_file, True)
-        if audio_file is None:
-            raise FileNotFoundError("No audio file, subtitles may be available")
-        # Transcribe the audio
-        # Create the SRT file
-        srt_dir = os.path.join(os.path.expanduser("~"), subs_dir)
-        # Create a folder for the channel name
-        folder_name = os.path.join(srt_dir, channel_name)
-        os.makedirs(folder_name, exist_ok=True)
-        name = os.path.splitext(os.path.basename(audio_file))[0]
-        srt_file = os.path.join(folder_name, name + ".srt")
-        segments = 'segments-0.json'
-        cd = os.getcwd()
-        s = 0
-        while os.path.exists(os.path.join(ytsubs, segments)):
-            segments = f'segments-{s}.json'
-            s += 1
-        segments = os.path.join(ytsubs, segments)
-        
-        # Create unfinished SRT file and helper files at start
-        unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
-        os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
-        with open(unfinished_srt, 'w', encoding='utf-8') as f:
-            f.write('Transcription in progress...')
-        transcribe.make_files(unfinished_srt)  # Create helper files for unfinished transcription
-        
-        # Try with small model first
-        try:
-            transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
-        except Exception as e:
-            if "CUDA out of memory" in str(e):
-                # Fall back to CPU
-                write("Falling back to CPU due to memory issues")
-                transcribe.process_create(audio_file, model_name, srt_file, segments, device='cpu', write=write)
-            else:
-                raise e
-        os.remove(unfinished_srt)
-        transcribe.make_files(srt_file)
-        # If successful with small model, try with original model
-        if original_model != model_name:
-            try:
-                model_name = original_model
-                transcribe.process_create(audio_file, model_name, srt_file, segments, write=write)
-            except:
-                # If fails, keep using small model
-                model_name = "small"
-                write("Could not use larger model, keeping small model results")
-        
-        # Delete the audio file
-        os.remove(audio_file)
-    except Exception as e:
-        write(f"Error: {e}")
-        return
-    
-    # Ensure the SRT file exists before creating helper files
-    if os.path.exists(srt_file):
-        # Use transcribe.make_files to create all helper files
-        transcribe.make_files(srt_file)
-        
-        # Copy the MPV command to clipboard for convenience
-        sub_file = srt_file.replace("\\", "/")
-        mpv_cmd = f'mpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{sub_file}"'
-        pyperclip.copy(mpv_cmd)
-    else:
-        write(f"Warning: SRT file not found at {srt_file}, cannot create helper files")
-    with open(file=history_file, mode='a', encoding="utf-8") as f:
-        try:
-            f.write(id + ' ' + model_name + '\n')
-        except UnicodeEncodeError:
-            write(f"Warning: Could not write all characters to the file. Skipping problematic characters.")
-            f.write('\n' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' : ' + mpv.encode('ascii', 'ignore').decode('ascii'))
-    write(f'{i}: {name} {url}', mpv)
-
 class YoutubeSubs:
-    def __init__(self, model_name='base', device='cuda', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=True, browser='chrome'):
+    def __init__(self, model_name='base', device='cpu', compute='int8_float32', force_device=False, subs_dir=None, enable_logging=True, use_cookies=True, browser='chrome'):
         self.model_name = model_name
         self.device = device
         self.compute = compute
@@ -624,6 +419,7 @@ class YoutubeSubs:
             return None
     def process_file(self, file_path, callback=print):
         """Process multiple URLs from file or audio file"""
+        import transcribe
         ext = os.path.splitext(os.path.basename(file_path))[1].lower()
         callback(f"{file_path} extension: {ext}")
         if any(ext in s for s in ['.mp3', '.wav', '.flac', '.m4a', '.ogg']):
@@ -746,6 +542,7 @@ class YoutubeSubs:
         return any(indicator in url for indicator in true_playlist_indicators)
     def process_single_url(self, url, callback=print):
         """Process a single YouTube URL"""
+        import transcribe
         try:
             url = self.remove_time_param(url)
             video_id = self.get_video_id(url)
@@ -785,6 +582,7 @@ class YoutubeSubs:
             # Pass the URL to make_files for the unfinished version
             transcribe.make_files(unfinished_srt, url=url)  # Pass URL for helper files
             try:
+                print(f"File: {audio_file}\nModel: {self.model_name}\nDevice: {self.device}\nCompute: {self.compute}\nForce Device: {self.force_device}\nSrt file: {srt_file}")
                 # Transcribe
                 success = transcribe.process_create(
                     file=audio_file, 
@@ -794,6 +592,7 @@ class YoutubeSubs:
                     device=self.device,
                     compute_type=self.compute,
                     force_device=self.force_device,
+                    auto=True,
                     write=callback
                 )
 
@@ -882,6 +681,8 @@ def main():
             for i in range(len(urls)):
                 urls[i] = temp[len(urls) - 1 - i]
         yt = YoutubeSubs(model_name, device=device)
+        print(f"Model: {model_name}")
+        print(f"Device: {device}")
         yt.process_urls('\n'.join(urls))
     except Exception as e:
         write(f"Error in main: {e}")

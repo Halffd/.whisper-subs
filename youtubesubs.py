@@ -14,7 +14,7 @@ for a in sys.argv:
             break
     if device == 'cuda':
         break
-model_name = model.getName(sys.argv, default)
+model_name = model.getName(sys.argv[1])
 start_time = '00:00:00'
 reverse = 0
 import os

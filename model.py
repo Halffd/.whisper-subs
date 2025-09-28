@@ -1,222 +1,182 @@
 import sys
-import re
-
 import os
-os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+import argparse
 
-first = True
-model_names = [
-        "tiny",
-        "base",
-        "small",
-        "medium",
-        "large",
-        "large-v2",
-        "large-v3",
-        "tiny.en",
-        "base.en",
-        "small.en",
-        "medium.en",
-        "jlondonobo/whisper-medium-pt",
-        "clu-ling/whisper-large-v2-japanese-5k-steps",
-        "distil-whisper/distil-medium.en",
-        "distil-whisper/distil-small.en",
-        "distil-whisper/distil-base",
-        "distil-whisper/distil-small",
-        "distil-whisper/distil-medium",
-        "distil-whisper/distil-large",
-        "distil-whisper/distil-large-v2",
-        "distil-whisper/distil-large-v3",
-        "Systran/faster-distil-medium",
-        "Systran/faster-distil-large",
-        "Systran/faster-distil-large-v2",
-        "Systran/faster-distil-large-v3",
-        "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"
-    ]
-def __getattr__(name):
-    global model_names
-    if name == "model_names":
-        return model_names
-    else:
-        return None #super().__getattr__(name)
-def is_numeric(input_str):
+# KMP_DUPLICATE_LIB_OK is a workaround for a common issue on macOS and Windows with Intel MKL libraries.
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# --- Model Configuration ---
+# A single, clear source of truth for all available model names.
+MODEL_NAMES = [
+    "tiny", "base", "small", "medium", "large", "large-v2", "large-v3",
+    "tiny.en", "base.en", "small.en", "medium.en",
+    "jlondonobo/whisper-medium-pt",
+    "clu-ling/whisper-large-v2-japanese-5k-steps",
+    "distil-whisper/distil-medium.en", "distil-whisper/distil-small.en",
+    "distil-whisper/distil-base", "distil-whisper/distil-small",
+    "distil-whisper/distil-medium", "distil-whisper/distil-large",
+    "distil-whisper/distil-large-v2", "distil-whisper/distil-large-v3",
+    "Systran/faster-distil-medium", "Systran/faster-distil-large",
+    "Systran/faster-distil-large-v2", "Systran/faster-distil-large-v3",
+    "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"
+]
+
+def getIndex(model_name: str) -> int:
+    """Returns the index of a given model name."""
     try:
-        float(input_str)
-        return True
+        return MODEL_NAMES.index(model_name)
     except ValueError:
-        return False
-def getIndex(model_name):
-    global model_names
-    return model_names.index(model_name)
-def getName(arg, default, captioner = False):
-    global first
-    if not first:
-        return
-    available_models = model_names
-    # Use a platform-independent way to extract directory path
-    path = os.path.dirname(arg[0]) if len(arg[0]) > 12 else os.getcwd()
-    
-    # Initialize result dictionary with defaults
-    result = {
-        "model_name": default,
-        "realtime_model": None,
-        "lang": None,
-        "path": path,
-        "gui": False,
-        "web": False,
-        "debug_mode": False,
-        "test_mode": False
-    }
-    
-    if len(arg) > 1 and (arg[1] in ["-h", "--help"] or "-1" in arg):
-        main_module = os.path.basename(sys.modules['__main__'].__file__)
-        print(f"Usage: python {main_module} [options] [model] [realtime_model] [language]")
-        print("     -1: Default model")
-        if captioner:
-            print("     -w, --web: Web server available")
-            print("     -g, --gui: User interface")
-            print('     --debug: Debug mode')
-            print('     --test: Test mode')
-        if "-1" in arg:
-            print("Available models:")
-            for i, model in enumerate(available_models):
-                print(f"- {i}: {model}")
-            if arg[1] == '-1':
-                try:
-                    arg[1] = input("Choose a model: ")
-                except EOFError:
-                    sys.exit(0)
-            elif '-h' in arg[1]:
-                sys.exit(0)
-    
-    if captioner:
-        i = 1
-        while i < len(arg):
-            if arg[i] == "-m" or arg[i] == "--model":
-                if i + 1 < len(arg):
-                    if is_numeric(arg[i+1]):
-                        num = int(arg[i+1])
-                        if num < 0:
-                            try:
-                                num = input("Model: ")
-                                nums = num.split(' ')
-                                num2 = None
-                                if len(nums) > 1:
-                                    num = int(nums[0])
-                                    num2 = int(nums[1])
-                                else:
-                                    num = int(num)
-                                result["model_name"] = available_models[num]
-                                result["realtime_model"] = result["model_name"] if not num2 else available_models[num2]
-                            except (ValueError, IndexError, EOFError):
-                                print("Invalid model number. Using default.")
-                        else:
-                            try:
-                                result["model_name"] = available_models[num]
-                            except IndexError:
-                                print(f"Invalid model index {num}. Using default.")
-                    else:
-                        result["model_name"] = arg[i+1]
-                    i += 2
-                else:
-                    i += 1
-            elif arg[i] == "--realtime-model":
-                if i + 1 < len(arg):
-                    if is_numeric(arg[i+1]):
-                        num = int(arg[i+1])
-                        if num < 0:
-                            result["realtime_model"] = default
-                        else:
-                            try:
-                                result["realtime_model"] = available_models[num]
-                            except IndexError:
-                                print(f"Invalid realtime model index {num}. Using default.")
-                    else:
-                        result["realtime_model"] = arg[i+1]
-                    i += 2
-                else:
-                    i += 1
-            elif arg[i] == "-w" or arg[i] == "--web":
-                result["web"] = True
-                i += 1
-            elif arg[i] == "-g" or arg[i] == "--gui":
-                result["gui"] = True
-                i += 1
-            elif arg[i] == "--debug":
-                result["debug_mode"] = True
-                i += 1
-            elif arg[i] == "--test":
-                result["test_mode"] = True
-                i += 1
-            elif arg[i] == "--lang":
-                if i + 1 < len(arg):
-                    if arg[i+1] == "-1":
-                        try:
-                            arg[i+1] = input("Language: ")
-                        except EOFError:
-                            arg[i+1] = None
-                    result["lang"] = arg[i+1] if arg[i+1] != 'none' else None
-                    i += 2
-                else:
-                    i += 1
-            else:
-                # Positional arguments handling
-                if result["model_name"] == default:
-                    # First unrecognized argument is the model
-                    if is_numeric(arg[i]):
-                        num = int(arg[i])
-                        if num >= 0 and num < len(available_models):
-                            result["model_name"] = available_models[num]
-                    else:
-                        result["model_name"] = arg[i]
-                elif result["realtime_model"] is None:
-                    # Second unrecognized argument is the realtime model
-                    if is_numeric(arg[i]):
-                        num = int(arg[i])
-                        if num >= 0 and num < len(available_models):
-                            result["realtime_model"] = available_models[num]
-                    else:
-                        result["realtime_model"] = arg[i]
-                elif result["lang"] is None:
-                    # Third unrecognized argument is the language
-                    result["lang"] = arg[i] if arg[i] != 'none' else None
-                else:
-                    print(f"Warning: Ignoring unknown argument '{arg[i]}'")
-                i += 1
+        return -1
 
-        # Validate model name
-        if result["model_name"] not in available_models:
-            print(f"Warning: {result['model_name']} is not a recognized model name.")
+def list_available_models():
+    """Prints a formatted list of all available models with their indices."""
+    print("Available models:")
+    for i, model in enumerate(MODEL_NAMES):
+        print(f"  {i:2d}: {model}")
 
-    else:
-        # For non-captioner usage
-        if len(arg) <= 1:
-            return default
-        
-        name = arg[1]
-        args = name.split(' ')
-        if len(args) > 1:
-            name = args[0]
-        
-        if is_numeric(name):
-            num = int(name)
-            if num < 0:
-                result = default
-            else:
-                try:
-                    result = available_models[num]
-                except IndexError:
-                    print(f"Invalid model index {num}. Using default.")
-                    result = default
+# --- Argument Parsing ---
+
+def getName(value: str):
+    """
+    Custom argparse type to validate and convert a model identifier (name or index)
+    into a valid model name string.
+    """
+    try:
+        # Check if the value is an integer index
+        model_index = int(value)
+        if 0 <= model_index < len(MODEL_NAMES):
+            return MODEL_NAMES[model_index]
         else:
-            result = arg[1]
-        
-        if len(args) > 1:
-            result = {
-                "model_name": result,
-                "lang": args[1]
-            }
+            raise argparse.ArgumentTypeError(f"Model index {model_index} is out of range (0-{len(MODEL_NAMES)-1}).")
+    except ValueError:
+        # If it's not an integer, treat it as a model name
+        if value in MODEL_NAMES:
+            return value
+        else:
+            # Provide a helpful error message with close matches if possible
+            import difflib
+            matches = difflib.get_close_matches(value, MODEL_NAMES)
+            error_msg = f"Invalid model name: '{value}'. Not found in available models."
+            if matches:
+                error_msg += f" Did you mean: '{', '.join(matches)}'?"
+            raise argparse.ArgumentTypeError(error_msg)
+
+def parse_arguments(description: str = "Whisper Model CLI"):
+    """
+    Parses command-line arguments using argparse for robust and clear configuration.
+    Returns a namespace object with parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description=description)
+
+    parser.add_argument(
+        "model",
+        nargs='?',  # Make the model argument optional
+        type=getName,
+        help="The primary Whisper model to use (name or index).",
+        default=None # Default to None to handle multiple scenarios
+    )
+    parser.add_argument(
+        "realtime_model",
+        nargs='?',
+        type=getName,
+        help="[Captioner Mode] The faster, real-time model to use (name or index).",
+        default=None
+    )
+    parser.add_argument(
+        "--lang",
+        type=str,
+        default=None,
+        help="Language code for transcription (e.g., 'en', 'ja'). Set to 'none' for auto-detection."
+    )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="List all available models and their indices, then exit."
+    )
+
+    # --- Flags for Captioner Mode ---
+    captioner_group = parser.add_argument_group('Captioner Mode Options')
+    captioner_group.add_argument(
+        "-w", "--web",
+        action="store_true",
+        help="Enable the web UI for the captioner."
+    )
+    captioner_group.add_argument(
+        "-g", "--gui",
+        action="store_true",
+        help="Enable the GUI for the captioner."
+    )
+    captioner_group.add_argument(
+        "--debug",
+        dest="debug_mode",
+        action="store_true",
+        help="Enable debug mode."
+    )
+    captioner_group.add_argument(
+        "--test",
+        dest="test_mode",
+        action="store_true",
+        help="Enable test mode."
+    )
     
-    print(result)
-    first = False
-    return result
+    # --- Deprecated flags for backward compatibility ---
+    # These will still be accepted but won't be shown in the help text.
+    parser.add_argument("-m", "--model-flag", dest="model", type=getName, help=argparse.SUPPRESS)
+    
+    args = parser.parse_args()
+    
+    # If --list-models is used, print the list and exit cleanly.
+    if args.list_models:
+        list_available_models()
+        sys.exit(0)
+
+    # If no model is provided positionally, prompt the user.
+    if args.model is None:
+        list_available_models()
+        try:
+            selection = input("Choose a model by its index or name: ")
+            args.model = getName(selection) # Validate user input
+        except (EOFError, KeyboardInterrupt):
+            print("\nNo model selected. Exiting.")
+            sys.exit(1)
+        except argparse.ArgumentTypeError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    # In captioner mode, if no realtime_model is specified, it defaults to the main model.
+    if args.realtime_model is None:
+        args.realtime_model = args.model
+
+    # Handle 'none' as a special case for language to mean None
+    if args.lang and args.lang.lower() == 'none':
+        args.lang = None
+
+    return args
+
+if __name__ == '__main__':
+    # Example of how to use the new parser
+    print("--- Running Argument Parser Example ---")
+    
+    # To test, run from your terminal:
+    # python model.py
+    # python model.py 3
+    # python model.py base.en
+    # python model.py large-v3 --lang ja --web
+    # python model.py --list-models
+    
+    try:
+        config = parse_arguments()
+        
+        print("\n--- Parsed Configuration ---")
+        print(f"Primary Model:  {config.model}")
+        print(f"Real-time Model:{config.realtime_model}")
+        print(f"Language:       {config.lang or 'Auto-Detect'}")
+        print(f"Web UI:         {'Enabled' if config.web else 'Disabled'}")
+        print(f"GUI:            {'Enabled' if config.gui else 'Disabled'}")
+        print(f"Debug Mode:     {'Enabled' if config.debug_mode else 'Disabled'}")
+        print(f"Test Mode:      {'Enabled' if config.test_mode else 'Disabled'}")
+        print("--------------------------")
+
+    except SystemExit as e:
+        if e.code != 0:
+            print(f"\nExited with code {e.code}. Likely due to --help, --list-models, or an error.")

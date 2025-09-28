@@ -10,6 +10,8 @@ import subprocess
 import os
 import json
 import threading
+import re
+import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List
 from whisper_model_chooser import WhisperModelChooser
@@ -26,6 +28,56 @@ class Segment:
     start: float
     end: float
     text: str
+
+def srt_time_to_seconds(time_str: str) -> float:
+    """Converts SRT time format HH:MM:SS,mmm to seconds."""
+    try:
+        parts = re.split('[:,]', time_str)
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]) + int(parts[3]) / 1000.0
+    except (ValueError, IndexError):
+        return 0.0
+
+def get_srt_resume_info(srt_path: str) -> (float, int):
+    """
+    Parses an SRT file to find the last segment's number and end time.
+    Returns (last_end_time_seconds, last_segment_number).
+    """
+    if not os.path.exists(srt_path) or os.path.getsize(srt_path) < 10:
+        return 0.0, 0
+
+    last_segment_number = 0
+    last_end_time = 0.0
+    
+    try:
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            
+        segments = content.split('\n\n')
+        if not segments:
+            return 0.0, 0
+        
+        # Iterate backwards to find the last valid segment block
+        for segment_block in reversed(segments):
+            lines = segment_block.strip().split('\n')
+            if len(lines) >= 2:
+                try:
+                    current_segment_number = int(lines[0])
+                    time_line = lines[1]
+                    match = re.search(r'\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
+                    if match:
+                        end_time_str = match.group(1)
+                        last_end_time = srt_time_to_seconds(end_time_str)
+                        last_segment_number = current_segment_number
+                        # Found a valid segment, break the loop
+                        return last_end_time, last_segment_number
+                except (ValueError, IndexError):
+                    # This block was malformed, continue to the previous one
+                    continue
+        
+        return 0.0, 0 # Return defaults if no valid segment was found
+    except Exception as e:
+        print(f"Could not parse SRT for resume info: {e}")
+        return 0.0, 0
 
 def dict_to_segment(data: Dict[str, Any]) -> Segment:
     """Convert a dictionary to a Segment dataclass instance."""
@@ -201,7 +253,7 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
         device = 'cpu'
         compute_type = 'int8'
         write(f"Falling back to CPU and int8")
-    model_names = model.model_names
+    model_names = model.MODEL_NAMES
 
     if device == 'cuda' and auto:
         chooser = WhisperModelChooser()
@@ -235,21 +287,50 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
     return False
 
 def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write):
-    """Try transcription with given parameters"""
+    """Try transcription with given parameters, supporting resume."""
+    script_path = None
+    resume_audio_path = None
     try:
-        # Create unfinished SRT file and helper files at start
         unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
         os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
-        with open(unfinished_srt, 'w', encoding='utf-8') as f:
-            f.write('Transcription in progress...')
         
-        # Format language parameter properly - force 'en' for English-only models
+        # --- RESUME LOGIC ---
+        resume_offset_seconds = 0.0
+        start_index = 0
+        audio_to_transcribe = file
+        open_mode = 'w'
+
+        last_end_time, last_segment_number = get_srt_resume_info(unfinished_srt)
+
+        if last_end_time > 0.1:  # Resume if there's more than 0.1s transcribed
+            write(f"Found unfinished transcription. Resuming from {last_end_time:.2f} seconds.")
+            resume_offset_seconds = last_end_time
+            start_index = last_segment_number
+            open_mode = 'a'
+            resume_audio_path = os.path.splitext(file)[0] + ".resume.mp3"
+            
+            try:
+                ss_time = str(datetime.timedelta(seconds=resume_offset_seconds))
+                ffmpeg_command = ['ffmpeg', '-y', '-ss', ss_time, '-i', file, '-c:a', 'libmp3lame', resume_audio_path]
+                write(f"Creating partial audio file for resume...")
+                
+                result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
+                if result.returncode != 0:
+                    raise Exception(f"FFmpeg failed to create resume audio file: {result.stderr}")
+                
+                audio_to_transcribe = resume_audio_path
+            except Exception as e:
+                write(f"Could not create resume audio file: {e}. Starting from beginning.")
+                resume_offset_seconds, start_index, open_mode = 0.0, 0, 'w'
+                audio_to_transcribe = file
+                with open(unfinished_srt, 'w', encoding='utf-8') as f: f.write('')
+        else:
+            with open(unfinished_srt, 'w', encoding='utf-8') as f: f.write('')
+        # --- END RESUME LOGIC ---
+        
         is_english_only = '.en' in current_model
         language_param = '\'en\'' if is_english_only else ('None' if language == 'none' else f"'{language}'")
-        
-        # Create unfinished srt file name
-        unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
-        whisper_log = srt_file.replace('.srt', '.whisper.log')  # Add log file path
+        whisper_log = srt_file.replace('.srt', '.whisper.log')
         
         script = f'''
 import faster_whisper
@@ -259,70 +340,68 @@ import threading
 import queue
 import time
 import logging
+from dataclasses import dataclass
 
-# Setup logging
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 whisper_logger = logging.getLogger("faster_whisper")
 whisper_logger.setLevel(logging.DEBUG)
-# Add file handler for whisper output
 log_file = r"{whisper_log}"
 file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
 whisper_logger.addHandler(file_handler)
 
-# Ensure output directory exists
 os.makedirs(os.path.dirname(r"{srt_file}"), exist_ok=True)
 
+@dataclass
+class Segment:
+    start: float
+    end: float
+    text: str
+
 def format_timestamp(seconds):
-    """Convert seconds to SRT timestamp format"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
-    seconds = seconds % 60
-    milliseconds = int((seconds % 1) * 1000)
-    seconds = int(seconds)
-    return f"{{hours:02d}}:{{minutes:02d}}:{{seconds:02d}},{{milliseconds:03d}}"
+    seconds_val = seconds % 60
+    milliseconds = int((seconds_val % 1) * 1000)
+    seconds_int = int(seconds_val)
+    return f"{{hours:02d}}:{{minutes:02d}}:{{seconds_int:02d}},{{milliseconds:03d}}"
 
-# Create a queue with size limit for memory management
 segment_queue = queue.Queue(maxsize=100)
 write_event = threading.Event()
 stop_event = threading.Event()
-
-# Set device and compute type
 device = "{device}"
 compute_type = "{compute_type}"
-force_device = {str(force_device)}  # Add force_device parameter
 
 def write_segments():
-    current_index = 1
-    with open(r"{unfinished_srt}", "w", encoding="utf-8") as f:
+    current_index = {start_index} + 1
+    with open(r"{unfinished_srt}", "{open_mode}", encoding="utf-8") as f:
+        if "{open_mode}" == "a" and os.path.getsize(r"{unfinished_srt}") > 0:
+            f.write("\\n")
+
         while not stop_event.is_set() or not segment_queue.empty():
             try:
-                # Wait for new segments with timeout
                 segment = segment_queue.get(timeout=0.5)
                 start_time = format_timestamp(segment.start)
                 end_time = format_timestamp(segment.end)
                 
-                # Write segment immediately
                 f.write(f"{{current_index}}\\n")
                 f.write(f"{{start_time}} --> {{end_time}}\\n")
                 f.write(f"{{segment.text.strip()}}\\n\\n")
-                f.flush()  # Force write to disk
+                f.flush()
                 
                 current_index += 1
                 segment_queue.task_done()
-                write_event.set()  # Signal that we wrote something
+                write_event.set()
                 
                 if current_index % 10 == 0:
-                    print(f"Written {{current_index}} segments")
-                    
+                    print(f"Written {{current_index - {start_index} - 1}} new segments (total {{current_index-1}})")
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Error writing segment: {{e}}")
 
-# Start writer thread
 writer_thread = threading.Thread(target=write_segments, daemon=True)
 writer_thread.start()
 
@@ -330,125 +409,95 @@ try:
     print(f"Starting transcription with model {current_model} on device {{device}}")
     print(f"Full log will be written to: {{log_file}}")
     
-    # Initialize model with verbose logging
-    model = faster_whisper.WhisperModel(
-        "{current_model}",
-        device=device,
-        compute_type=compute_type
-    )
+    model = faster_whisper.WhisperModel("{current_model}", device=device, compute_type=compute_type)
     
-    # Process segments as they come
-    segments, info = model.transcribe(r"{file}")
+    segments, info = model.transcribe(r"{audio_to_transcribe}")
     
-    # Process each segment
+    resume_offset = {resume_offset_seconds}
+    
     for segment in segments:
-        # Wait if queue is full
         while segment_queue.full() and not stop_event.is_set():
             time.sleep(0.1)
+        if stop_event.is_set(): break
+
+        adjusted_segment = Segment(
+            start=segment.start + resume_offset,
+            end=segment.end + resume_offset,
+            text=segment.text
+        )
+        segment_queue.put(adjusted_segment)
         
-        if stop_event.is_set():
-            break
-            
-        segment_queue.put(segment)
-        
-        # Wait for at least one write to happen
         write_event.wait(timeout=1.0)
         write_event.clear()
     
-    # Signal completion and wait for writer
     stop_event.set()
     writer_thread.join(timeout=30)
     
-    # Verify and rename
     if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
-        if os.path.exists(r"{srt_file}"):
-            os.remove(r"{srt_file}")
+        if os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
         os.rename(r"{unfinished_srt}", r"{srt_file}")
         print("Transcription completed successfully")
     else:
         print("Output file is empty or too small")
         exit(1)
-        
 except Exception as e:
     print(f"Error during transcription: {{e}}")
     import traceback
     traceback.print_exc()
     exit(1)
 finally:
-    # Close log file handler
     file_handler.close()
     whisper_logger.removeHandler(file_handler)
 '''
         
-        # Write script to temporary file in system temp directory to ensure cleanup on system reboot
         import tempfile
         temp_dir = tempfile.gettempdir()
         script_path = os.path.join(temp_dir, f"temp_whisper_{os.getpid()}.py")
         
-        try:
-            with open(script_path, 'w', encoding='utf-8') as f:
-                f.write(script)
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(script)
 
-            # Run the script
-            args = [sys.executable, script_path]
-            write(f"Running transcription with model {current_model} on {device}")
-            
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding='utf-8',
-                errors='replace',
-                text=True,
-                bufsize=1,  # Line buffered
-                universal_newlines=True
-            )
+        args = [sys.executable, script_path]
+        write(f"Running transcription with model {current_model} on {device}")
+        
+        process = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding='utf-8', errors='replace', text=True, bufsize=1, universal_newlines=True
+        )
 
-            # Monitor both stdout and stderr simultaneously
-            def log_output(pipe, prefix):
-                for line in pipe:
-                    line = line.strip()
-                    if line:
-                        write(f"{prefix}: {line}")
+        def log_output(pipe, prefix):
+            for line in pipe:
+                if line := line.strip(): write(f"{prefix}: {line}")
 
-            # Create threads for stdout and stderr
-            stdout_thread = threading.Thread(target=log_output, args=(process.stdout, "Out"), daemon=True)
-            stderr_thread = threading.Thread(target=log_output, args=(process.stderr, "Error"), daemon=True)
-            
-            # Start threads
-            stdout_thread.start()
-            stderr_thread.start()
-            
-            # Wait for process to complete
-            exit_code = process.wait()
-            
-            # Wait for output threads to complete with timeout
-            stdout_thread.join(timeout=5)
-            stderr_thread.join(timeout=5)
-            
-            if exit_code == 0 and os.path.exists(srt_file) and os.path.getsize(srt_file) > 10:
-                write(f"Successfully created {srt_file}")
-                make_files(srt_file)
-                return True
-            
-            write(f"Process exited with code {exit_code}")
-            return False
-
-        except Exception as e:
-            write(f"Error during transcription: {e}")
-            return False
-            
-        finally:
-            # Ensure cleanup of temporary script in all cases
-            try:
-                if os.path.exists(script_path):
-                    os.unlink(script_path)
-            except Exception as e:
-                write(f"Warning: Could not remove temporary file {script_path}: {e}")
+        stdout_thread = threading.Thread(target=log_output, args=(process.stdout, "Out"), daemon=True)
+        stderr_thread = threading.Thread(target=log_output, args=(process.stderr, "Error"), daemon=True)
+        stdout_thread.start(); stderr_thread.start()
+        
+        exit_code = process.wait()
+        
+        stdout_thread.join(timeout=5); stderr_thread.join(timeout=5)
+        
+        if exit_code == 0 and os.path.exists(srt_file) and os.path.getsize(srt_file) > 10:
+            write(f"Successfully created {srt_file}")
+            make_files(srt_file)
+            return True
+        
+        write(f"Process exited with code {exit_code}")
+        return False
 
     except Exception as e:
         write(f"An error occurred: {e}")
         return False
+            
+    finally:
+        try:
+            if script_path and os.path.exists(script_path): os.unlink(script_path)
+            if resume_audio_path and os.path.exists(resume_audio_path):
+                os.unlink(resume_audio_path)
+                write("Removed temporary resume audio file.")
+        except Exception as e:
+            write(f"Warning: Could not remove temporary file: {e}")
+
 def make_files(srt_file, url=None):
     """
     Create helper files (HTML, .sh, .bat) for the given SRT file.

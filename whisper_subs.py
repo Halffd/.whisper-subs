@@ -13,7 +13,7 @@ import pyperclip
 # Assuming these modules are in the same directory or installed
 import transcribe
 import twitch_vod
-import model  # Assuming model.py provides model_names
+import model
 import yt_dlp
 
 # --- Configuration ---
@@ -27,12 +27,9 @@ HISTORY_FILE = os.path.join(OUTPUT_DIR, "history.txt")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-
 # --- Job Management ---
 def get_jobs():
-    """Loads transcription jobs from the JSON file."""
-    if not os.path.exists(JOBS_FILE):
-        return []
+    if not os.path.exists(JOBS_FILE): return []
     try:
         with open(JOBS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -40,60 +37,76 @@ def get_jobs():
         return []
 
 def save_jobs(jobs):
-    """Saves transcription jobs to the JSON file."""
     with open(JOBS_FILE, 'w', encoding='utf-8') as f:
         json.dump(jobs, f, indent=4)
 
-def add_job(source, model_name, title):
-    """Adds a new job to the jobs file."""
+def add_job(source, model_name):
     jobs = get_jobs()
     job_id = len(jobs) + 1
     new_job = {
         "id": job_id,
         "date": datetime.datetime.now().isoformat(),
         "model": model_name,
-        "title": title,
         "source": source,
-        "status": "pending"
+        "status": "initializing",
+        "tasks": []
     }
     jobs.append(new_job)
     save_jobs(jobs)
-    return job_id
+    return new_job
 
-def update_job_status(job_id, status, new_title=None):
-    """Updates the status and optionally the title of a specific job."""
+def update_job(job_id, updates):
     jobs = get_jobs()
+    job_updated = False
     for job in jobs:
         if job["id"] == job_id:
-            job["status"] = status
-            if new_title:
-                job["title"] = new_title
+            job.update(updates)
+            job_updated = True
             break
-    save_jobs(jobs)
+    if job_updated:
+        save_jobs(jobs)
+
+def update_task_status(job_id, task_source, status, title=None):
+    jobs = get_jobs()
+    job_found = False
+    for job in jobs:
+        if job["id"] == job_id:
+            job_found = True
+            for task in job["tasks"]:
+                if task["source"] == task_source:
+                    task["status"] = status
+                    if title:
+                        task["title"] = title
+                    break
+            break
+    if job_found:
+        save_jobs(jobs)
 
 def get_last_unfinished_job():
-    """Finds the most recent job that is not completed."""
     jobs = get_jobs()
     for job in reversed(jobs):
-        if job["status"] not in ["completed", "failed", "skipped"]:
+        if job["status"] not in ["completed", "failed"]:
             return job
     return None
 
 def list_jobs():
-    """Prints a formatted list of all jobs."""
     jobs = get_jobs()
     if not jobs:
         print("No transcription jobs found.")
         return
-    print(f"{'ID':<4} {'Date':<20} {'Model':<12} {'Status':<12} {'Title'}")
-    print("-" * 80)
+    print(f"{'ID':<4} {'Date':<20} {'Model':<15} {'Status':<12} {'Progress':<12} {'Source'}")
+    print("-" * 100)
     for job in jobs:
         date_str = datetime.datetime.fromisoformat(job['date']).strftime('%Y-%m-%d %H:%M')
-        title_str = job['title'][:40] + '...' if len(job['title']) > 40 else job['title']
-        print(f"{job['id']:<4} {date_str:<20} {job['model']:<12} {job['status']:<12} {title_str}")
+        source_str = job['source'][:40] + '...' if len(job['source']) > 40 else job['source']
+        
+        total_tasks = len(job['tasks'])
+        completed_tasks = len([t for t in job['tasks'] if t['status'] in ['completed', 'skipped']])
+        progress_str = f"{completed_tasks}/{total_tasks}" if total_tasks > 0 else "N/A"
+
+        print(f"{job['id']:<4} {date_str:<20} {job['model']:<15} {job['status']:<12} {progress_str:<12} {source_str}")
 
 # --- Core Class ---
-
 class WhisperSubs:
     def __init__(self, model_name, device, compute_type, force, ignore_subs, sub_lang):
         self.model_name = model_name
@@ -106,9 +119,9 @@ class WhisperSubs:
         self.channel_name = "unknown_channel"
         self.delay = 30
         self.start_delay = 30
+        self.specified_browser = 'chrome'
 
     def log(self, message):
-        """Simple logger."""
         message_str = str(message)
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"[{timestamp}] {message_str}")
@@ -116,90 +129,84 @@ class WhisperSubs:
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 f.write(f"[{timestamp}] {message_str}\n")
 
-    def is_youtube(self, url):
-        return url and 'youtu' in urlparse(url).netloc
+    def is_youtube(self, url): return url and 'youtu' in urlparse(url).netloc
+    def is_twitch(self, url): return url and 'twitch.tv' in urlparse(url).netloc
+    def is_local_file(self, path): return path and os.path.exists(path)
+    def is_local_dir(self, path): return path and os.path.isdir(path)
 
-    def is_twitch(self, url):
-        return url and 'twitch.tv' in urlparse(url).netloc
-
-    def is_local_file(self, path):
-        return path and os.path.exists(path)
-        
     def is_channel_or_playlist_url(self, url):
-        if not self.is_youtube(url):
-            return False
-        if 'v=' in url and 'list=' in url:
-            return False
-        true_playlist_indicators = [
-            '@', '/channel/', '/c/', '/user/',
-            'youtube.com/playlist?list=', 'youtu.be/playlist?list=',
-        ]
-        return any(indicator in url for indicator in true_playlist_indicators)
-
+        if not self.is_youtube(url) or ('v=' in url and 'list=' in url): return False
+        return any(indicator in url for indicator in ['@', '/channel/', '/c/', '/user/', 'youtube.com/playlist?list=', 'youtu.be/playlist?list='])
     def is_twitch_channel(self, url):
         parsed = urlparse(url)
         if 'twitch.tv' in parsed.netloc:
-            path_parts = [part for part in parsed.path.split('/') if part]
-            if len(path_parts) == 1 or (len(path_parts) == 2 and path_parts[1] in ['videos', 'clips', 'about']):
-                if path_parts[0] != 'videos': # Exclude direct VOD links
-                    return path_parts[0]
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if len(path_parts) == 1:
+                return path_parts[0]
+            elif len(path_parts) == 2 and path_parts[1] == 'videos':
+                return path_parts[0]
         return None
 
     def get_video_info(self, url):
         try:
             ydl_opts = {'quiet': True, 'no_warnings': True}
+            if self.specified_browser:
+                ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'unknown_title')
-                channel = info.get('channel') or info.get('uploader') or "unknown_channel"
-                return title, channel
+                return info.get('title', 'unknown_title'), info.get('channel') or info.get('uploader') or "unknown_channel"
         except Exception:
             return os.path.basename(url), "unknown_channel"
 
     def clean_filename(self, filename):
         return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
-    def get_youtube_videos_from_url(self, url):
-        self.log(f"Fetching video list from: {url}")
-        try:
+    def resolve_source_to_tasks(self, source):
+        self.log(f"Resolving source: {source}")
+        task_sources = []
+        if self.is_local_dir(source):
+            self.log(f"Source is a local directory.")
+            for root, _, files in os.walk(source):
+                for file in files:
+                    if file.lower().endswith(('.mp3', '.wav', '.flac', '.m4a', '.ogg', '.mkv')):
+                        task_sources.append(os.path.join(root, file))
+        elif self.is_local_file(source):
+            self.log("Source is a single local file.")
+            task_sources.append(source)
+        elif twitch_username := self.is_twitch_channel(source):
+            self.log(f"Source is Twitch channel: {twitch_username}")
+            downloader = twitch_vod.StreamlinkVODDownloader()
+            user_id = downloader.get_user_id_by_login(twitch_username)
+            if user_id:
+                vods = downloader.get_all_vods(user_id)
+                task_sources = [f"https://www.twitch.tv/videos/{vod['id']}" for vod in vods]
+        elif self.is_channel_or_playlist_url(source):
+            self.log(f"Source is YouTube channel/playlist.")
             ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True, 'ignoreerrors': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(source, download=False)
                 if 'entries' in info:
-                    return [entry['url'] for entry in info['entries'] if entry]
-                return []
-        except Exception as e:
-            self.log(f"Error fetching video list: {e}")
-            return []
-            
-    def check_and_download_subs(self, url, output_dir, title):
-        if self.ignore_subs:
-            return False
+                    task_sources = [entry['url'] for entry in info.get('entries', []) if entry]
+        else: # Assumed single URL or file
+            self.log("Source is a single URL or file.")
+            task_sources.append(source)
         
+        self.log(f"Resolved to {len(task_sources)} tasks.")
+        return task_sources
+    def check_and_download_subs(self, url, output_dir, title):
+        if self.ignore_subs: 
+            return False
         self.log(f"Checking for existing subtitles for '{title}'...")
         try:
             ydl_opts = {'quiet': True, 'no_warnings': True, 'listsubtitles': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl: 
                 info = ydl.extract_info(url, download=False)
-
-            video_lang = (info.get('language') or info.get('lang') or 'en').split('-')[0]
-            target_langs = {video_lang}
-            if self.sub_lang:
-                target_langs.add(self.sub_lang)
-
-            available_subs = info.get('subtitles', {})
-            if not available_subs:
-                self.log("No subtitles available.")
-                return False
-
-            best_sub_lang = None
-            for lang in target_langs:
-                if lang in available_subs:
-                    for sub_info in available_subs[lang]:
-                        if not sub_info.get('is_automatic'):
-                            best_sub_lang = lang
-                            break
-                    if best_sub_lang: break
+            
+            video_lang = (info.get('language') or 'en').split('-')[0]
+            target_langs = {video_lang, self.sub_lang} if self.sub_lang else {video_lang}
+            best_sub_lang = next((lang for lang in target_langs 
+                                if any(not s.get('is_automatic') 
+                                    for s in info.get('subtitles', {}).get(lang, []))), None)
             
             if not best_sub_lang:
                 self.log("No suitable human-made subtitles found.")
@@ -207,212 +214,273 @@ class WhisperSubs:
 
             self.log(f"Found human-made '{best_sub_lang}' subtitles. Downloading...")
             safe_title = self.clean_filename(title)
-            sub_path_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
             
+            # FIX: Use proper template in output directory
+            sub_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
             ydl_opts_dl = {
-                'quiet': True, 'no_warnings': True, 'writesubtitles': True,
-                'subtitleslangs': [best_sub_lang], 'subtitlesformat': 'srt',
-                'skip_download': True, 'outtmpl': sub_path_template,
+                'quiet': True, 
+                'no_warnings': True, 
+                'writesubtitles': True, 
+                'subtitleslangs': [best_sub_lang], 
+                'subtitlesformat': 'srt', 
+                'skip_download': True, 
+                'outtmpl': sub_template  # This is correct usage
             }
-            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
+            
+            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl: 
                 ydl.download([url])
-
-            expected_sub_file = os.path.join(output_dir, f"{safe_title}.{best_sub_lang}.srt")
-            final_sub_file = os.path.join(output_dir, f"{safe_title}.srt")
-
-            if os.path.exists(expected_sub_file):
-                if os.path.exists(final_sub_file): os.remove(final_sub_file)
-                os.rename(expected_sub_file, final_sub_file)
-                self.log(f"Subtitle saved to {final_sub_file}")
-                transcribe.make_files(final_sub_file, url=url)
+            
+            # Look for the downloaded subtitle
+            expected_file = os.path.join(output_dir, f"{safe_title}.{best_sub_lang}.srt")
+            final_file = os.path.join(output_dir, f"{safe_title}.srt")
+            
+            if os.path.exists(expected_file):
+                if os.path.exists(final_file): 
+                    os.remove(final_file)
+                os.rename(expected_file, final_file)
+                self.log(f"Subtitle saved to {final_file}")
+                transcribe.make_files(final_file, url=url)
                 return True
-            return False
-        except Exception as e:
+            else:
+                self.log(f"Expected subtitle file not found: {expected_file}")
+                
+        except Exception as e: 
             self.log(f"Error checking subtitles: {e}")
-            return False
-
+        
+        return False
     def download_audio(self, url, output_path):
+        """Downloads audio and returns the actual file path."""
         self.log(f"Downloading audio from {url}...")
-        while True:
+        
+        # Ensure output directory exists
+        os.makedirs(output_path, exist_ok=True)
+        
+        title = None
+        # Quick check for existing files before attempting download
+        if not self.force:
             try:
-                ydl_opts = {
-                    'format': 'bestaudio/best', 'outtmpl': output_path,
-                    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
-                    'quiet': True, 'no_warnings': True
-                }
+                ydl_opts = {'quiet': True, 'no_warnings': True}
+                if self.specified_browser:
+                    ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                actual_file = os.path.splitext(output_path)[0] + ".mp3"
-                if os.path.exists(actual_file): return actual_file
-                return None
-            except Exception as e:
-                error_str = str(e).lower()
-                if 'rate' in error_str or 'unavailable' in error_str:
-                    self.delay = min(self.delay * 1.5, 3600)
-                    self.log(f"Download failed (rate limit?). Retrying in {self.delay:.0f}s...")
-                    time.sleep(self.delay)
-                    continue
-                else:
-                    self.log(f"Audio download failed: {e}")
+                    info = ydl.extract_info(url, download=False)
+                    title = self.clean_filename(info.get('title', 'unknown_title'))
+                    
+                    # Check for existing files with various extensions
+                    for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
+                        existing_file = os.path.join(output_path, f"{title}{ext}")
+                        if os.path.exists(existing_file):
+                            self.log(f"File already exists: {existing_file}")
+                            return existing_file
+            except Exception:
+                pass  # If we can't check, just proceed with download
+        
+        # Change to output directory like the old version
+        original_cwd = os.getcwd()
+        os.chdir(output_path)
+        
+        try:
+            while True:
+                try:
+                    ydl_opts = {
+                        'outtmpl': '%(title)s.%(ext)s',
+                        'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                        'quiet': True,
+                        'no_warnings': True,
+                        'ignoreerrors': True,
+                        'sleep_interval': 10,
+                        'max_sleep_interval': 30,
+                        'sleep_interval_requests': 5,
+                        'retries': 3,
+                        'fragment_retries': 3,
+                    }
+                    
+                    if self.specified_browser:
+                        ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                        
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        # Get title if we don't have it yet
+                        if not title:
+                            info = ydl.extract_info(url, download=False)
+                            title = self.clean_filename(info.get('title', 'unknown_title'))
+                        
+                        ydl.download([url])
+                    
+                    # Look for the downloaded file
+                    for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
+                        predicted_path = f"{title}{ext}"
+                        full_path = os.path.join(output_path, predicted_path)
+                        if os.path.exists(full_path):
+                            self.log(f"Successfully downloaded: {full_path}")
+                            return full_path
+                    
+                    # Fallback: find any new audio file in the directory
+                    for file in os.listdir('.'):
+                        if file.endswith(('.mp3', '.m4a', '.webm', '.ogg')):
+                            full_path = os.path.join(output_path, file)
+                            self.log(f"Found audio file: {full_path}")
+                            return full_path
+                    
+                    self.log(f"Expected file not found: {title}")
                     return None
-
+                    
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if 'rate' in error_str or 'unavailable' in error_str:
+                        self.delay = min(self.delay * 1.5, 3600)
+                        self.log(f"Download failed (rate limit?). Retrying in {self.delay:.0f}s...")
+                        time.sleep(self.delay)
+                        continue
+                    else:
+                        self.log(f"Audio download failed: {e}")
+                        return None
+                        
+        finally:
+            # Always restore original working directory
+            os.chdir(original_cwd)
     def get_unique_id(self, source):
-        if self.is_youtube(source):
-            match = re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', source)
-            if match: return match.group(1)
-        elif self.is_twitch(source):
-             match = re.search(r'/videos/(\d+)', source)
-             if match: return match.group(1)
-        elif self.is_local_file(source):
-            return os.path.basename(source)
+        if self.is_youtube(source): return (re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', source) or [None, None])[1]
+        if self.is_twitch(source): return (re.search(r'/videos/(\d+)', source) or [None, None])[1]
+        if self.is_local_file(source): return os.path.basename(source)
         return source
 
     def is_processed(self, unique_id):
         if not os.path.exists(HISTORY_FILE): return False
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[0] == unique_id and parts[1] == self.model_name:
-                    return True
+                parts = line.strip().split(); 
+                if len(parts) >= 2 and parts[0] == unique_id and parts[1] == self.model_name: return True
         return False
 
     def mark_as_processed(self, unique_id):
         with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{unique_id} {self.model_name}\n")
-
-    def process_single_source(self, source):
-        unique_id = self.get_unique_id(source)
+    def process_task(self, job_id, task):
+        task_source = task['source']
+        unique_id = self.get_unique_id(task_source)
         if not self.force and self.is_processed(unique_id):
-            self.log(f"Skipping '{source}' - already processed with model '{self.model_name}'.")
+            self.log(f"Skipping task '{task_source}' - already processed.")
+            update_task_status(job_id, task_source, 'skipped', task['title'])
             return
-        
-        job_id = add_job(source, self.model_name, "Initializing...")
-        audio_file = None
-        is_local = self.is_local_file(source)
 
+        audio_file, is_local = None, self.is_local_file(task_source)
         try:
-            title, self.channel_name = self.get_video_info(source)
-            if is_local: self.channel_name = "local_files"
+            title, self.channel_name = self.get_video_info(task_source)
+            if is_local: 
+                self.channel_name = "local_files"
+            update_task_status(job_id, task_source, 'processing', title)
 
             channel_dir = os.path.join(OUTPUT_DIR, self.clean_filename(self.channel_name))
             os.makedirs(channel_dir, exist_ok=True)
-            update_job_status(job_id, "processing", new_title=title)
-            
-            if not is_local and self.check_and_download_subs(source, channel_dir, title):
-                self.log(f"Downloaded existing subtitle for '{title}'. Skipping transcription.")
+
+            if not is_local and self.check_and_download_subs(task_source, channel_dir, title):
+                self.log(f"Downloaded existing subtitle for '{title}'.")
                 self.mark_as_processed(unique_id)
-                update_job_status(job_id, "skipped")
+                update_task_status(job_id, task_source, 'skipped')
                 return
 
-            if is_local:
-                audio_file = source
-            else:
-                safe_title = self.clean_filename(title)
-                temp_audio_path = os.path.join(channel_dir, f"{safe_title}.%(ext)s")
-                audio_file = self.download_audio(source, temp_audio_path)
-
+            # FIX: Just pass the directory, not a template path
+            audio_file = task_source if is_local else self.download_audio(task_source, channel_dir)
             if not audio_file or not os.path.exists(audio_file):
-                raise FileNotFoundError(f"Failed to obtain audio file for '{title}'.")
+                raise FileNotFoundError(f"Failed to obtain audio for '{title}'.")
 
-            update_job_status(job_id, "transcribing")
-            self.log(f"Starting transcription for '{title}'")
-            output_basename = self.clean_filename(os.path.splitext(os.path.basename(audio_file))[0])
-            srt_file = os.path.join(channel_dir, f"{output_basename}.srt")
+            update_task_status(job_id, task_source, 'transcribing')
+            srt_file = os.path.join(channel_dir, f"{self.clean_filename(os.path.splitext(os.path.basename(audio_file))[0])}.srt")
             
-            success = transcribe.process_create(
-                file=audio_file, model_name=self.model_name, srt_file=srt_file,
-                language=None, device=self.device, compute_type=self.compute_type,
-                force_device=False, auto=True, write=self.log
-            )
-            
-            if success:
+            if transcribe.process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
                 self.log("Transcription successful.")
-                update_job_status(job_id, "completed")
+                update_task_status(job_id, task_source, 'completed')
                 self.mark_as_processed(unique_id)
             else:
                 raise Exception("Transcription process failed.")
+                
         except Exception as e:
-            self.log(f"An error occurred for source '{source}': {e}")
-            update_job_status(job_id, "failed")
+            self.log(f"Error on task '{task_source}': {e}")
+            update_task_status(job_id, task_source, 'failed')
+            
         finally:
             if audio_file and not is_local and os.path.exists(audio_file):
-                self.log(f"Removing temporary audio file: {audio_file}")
-                try: os.remove(audio_file)
-                except OSError as e: self.log(f"Error removing temp file: {e}")
+                try:
+                    self.log(f"Removing temp audio: {audio_file}")
+                    os.remove(audio_file)
+                except OSError as e:
+                    self.log(f"Error removing temp file: {e}")
+    def process(self, job_or_source):
+        job = job_or_source if isinstance(job_or_source, dict) else add_job(job_or_source, self.model_name)
+        
+        if job['status'] == 'initializing':
+            tasks = [{"source": src, "status": "pending", "title": os.path.basename(src)} for src in self.resolve_source_to_tasks(job['source'])]
+            update_job(job['id'], {"tasks": tasks, "status": "processing" if tasks else "completed"})
+            job['tasks'], job['status'] = tasks, "processing"
 
-    def process(self, source):
-        twitch_username = self.is_twitch_channel(source)
-        if twitch_username:
-            self.log(f"Processing all VODs for Twitch channel: {twitch_username}")
-            downloader = twitch_vod.StreamlinkVODDownloader()
-            user_id = downloader.get_user_id_by_login(twitch_username)
-            if not user_id:
-                self.log(f"Could not find Twitch user: {twitch_username}"); return
-            vods = downloader.get_all_vods(user_id)
-            self.log(f"Found {len(vods)} VODs for {twitch_username}. Processing...")
-            for vod in vods:
-                self.process_single_source(f"https://www.twitch.tv/videos/{vod['id']}")
-            return
+        self.log(f"Starting job {job['id']} for source: {job['source']}")
+        for task in job['tasks']:
+            if task['status'] == 'pending':
+                self.process_task(job['id'], task)
 
-        if self.is_channel_or_playlist_url(source):
-            self.log(f"Processing YouTube channel/playlist: {source}")
-            video_urls = self.get_youtube_videos_from_url(source)
-            self.log(f"Found {len(video_urls)} videos. Processing...")
-            for url in video_urls:
-                self.process_single_source(url)
-            return
-
-        self.process_single_source(source)
-
+        final_statuses = [t['status'] for t in get_jobs() if t['id'] == job['id']][0]['tasks']
+        final_status = "completed" if all(s in ['completed', 'skipped', 'failed'] for s in final_statuses) else "processing"
+        update_job(job['id'], {"status": final_status})
+        self.log(f"Job {job['id']} finished with status: {final_status}")
 def main():
-    parser = argparse.ArgumentParser(
-        description="Transcribe audio from YouTube, Twitch, other URLs, or local files.",
-        usage="whisper_subs.py <model> [source] [options]"
-    )
-    parser.add_argument('model', nargs='?', help="Whisper model name (e.g., 'base'). Required unless using -l or -c.")
-    parser.add_argument('source', nargs='?', help="URL or local file path. If empty, checks clipboard.")
-    parser.add_argument('-l', '--list', action='store_true', help="List all transcription jobs and exit.")
+    parser = argparse.ArgumentParser(description="Transcribe audio from various sources.", usage="whisper_subs.py <model> [source] [options]")
+    parser.add_argument('model', nargs='?', help="Whisper model name/index. Required unless using -l or -c.")
+    parser.add_argument('source', nargs='?', help="URL, local file/directory path. If empty, checks clipboard.")
+    parser.add_argument('-l', '--list', action='store_true', help="List all jobs and exit.")
     parser.add_argument('-c', '--continue', dest='continue_last', action='store_true', help="Continue the last unfinished job.")
-    parser.add_argument('-g', '--gpu', action='store_true', help="Use GPU (CUDA) for transcription.")
+    parser.add_argument('-g', '--gpu', action='store_true', help="Use GPU (CUDA).")
     parser.add_argument('--device', default='cpu', help="Device to use ('cpu', 'cuda').")
-    parser.add_argument('--compute', default='int8', help="Compute type (e.g., 'int8', 'float16').")
+    parser.add_argument('--compute', default='int8', help="Compute type ('int8', 'float16').")
     parser.add_argument('-f', '--force', action='store_true', help="Force transcription even if already processed.")
-    parser.add_argument('-i', '--ignore-subs', action='store_true', help="Ignore existing subtitles and transcribe anyway.")
-    parser.add_argument('-lang', '--language', help="Language code (e.g., 'en', 'ja') for subtitle priority.")
-
+    parser.add_argument('-i', '--ignore-subs', action='store_true', help="Ignore existing subtitles.")
+    parser.add_argument('-lang', '--language', help="Language code for subtitle priority.")
     args = parser.parse_args()
 
-    if args.list:
-        list_jobs(); return
+    if args.list: 
+        list_jobs()
+        return
 
-    source_to_process, model_to_use = args.source, args.model
-    
+    # Handle continue case first
     if args.continue_last:
-        last_job = get_last_unfinished_job()
-        if not last_job:
-            print("No unfinished jobs to continue."); return
-        print(f"Continuing job ID {last_job['id']}: {last_job['title']}")
-        source_to_process, model_to_use = last_job['source'], last_job['model']
+        job_or_source = get_last_unfinished_job()
+        if not job_or_source: 
+            print("No unfinished jobs to continue.")
+            return
+        print(f"Continuing job ID {job_or_source['id']}: {job_or_source['source']}")
+        model_to_use = job_or_source['model']
+    else:
+        # Handle normal source input
+        job_or_source = args.source
+        model_to_use = args.model
+        
+        # If no source provided, check clipboard
+        if not job_or_source:
+            try:
+                job_or_source = pyperclip.paste().strip()
+                if not job_or_source: 
+                    parser.error("No source provided and clipboard is empty.")
+                print(f"Using source from clipboard: {job_or_source}")
+            except Exception: 
+                parser.error("No source provided and could not read clipboard.")
     
-    if not model_to_use:
-        parser.error("The 'model' argument is required unless using --list or --continue.")
-
-    if not source_to_process:
-        try:
-            source_to_process = pyperclip.paste().strip()
-            if not source_to_process:
-                parser.error("No source provided and clipboard is empty.")
-            print(f"Using source from clipboard: {source_to_process}")
-        except Exception:
-             parser.error("No source provided and could not read clipboard.")
+    if not model_to_use: 
+        parser.error("Model argument is required unless using --list or --continue.")
     
-    device = 'cuda' if args.gpu else args.device
-
     processor = WhisperSubs(
-        model_name=model_to_use, device=device, compute_type=args.compute,
-        force=args.force, ignore_subs=args.ignore_subs, sub_lang=args.language
+        model_name=model.getName(model_to_use), 
+        device='cuda' if args.gpu else args.device, 
+        compute_type=args.compute, 
+        force=args.force, 
+        ignore_subs=args.ignore_subs, 
+        sub_lang=args.language
     )
-    processor.process(source_to_process)
+    processor.process(job_or_source)
 
 if __name__ == "__main__":
     main()

@@ -618,7 +618,7 @@ def create_helper_files(dir_path, subtitle_file, url):
             sh_file = os.path.join(dir_path, f"{base_name}.sh")
             linux_path = subtitle_file.replace("\\", "/")
             with open(sh_file, "w", encoding='utf-8') as f:
-                f.write(f'#!/bin/bash\nmpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{linux_path}"\n')
+                f.write(f'#!/bin/bash\nmpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{linux_path}" $@\n')
             os.chmod(sh_file, 0o755)
         except OSError as e:
             print(f"OS error creating shell script: {e}")

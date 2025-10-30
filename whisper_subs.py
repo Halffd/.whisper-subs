@@ -100,21 +100,22 @@ def list_jobs():
         date_str = datetime.datetime.fromisoformat(job['date']).strftime('%Y-%m-%d %H:%M')
         source_str = job['source'][:40] + '...' if len(job['source']) > 40 else job['source']
         
-        total_tasks = len(job['tasks'])
-        completed_tasks = len([t for t in job['tasks'] if t['status'] in ['completed', 'skipped']])
+        total_tasks = len(job.get('tasks', []))
+        completed_tasks = len([t for t in job.get('tasks', []) if t.get('status') in ['completed', 'skipped']])
         progress_str = f"{completed_tasks}/{total_tasks}" if total_tasks > 0 else "N/A"
 
         print(f"{job['id']:<4} {date_str:<20} {job['model']:<15} {job['status']:<12} {progress_str:<12} {source_str}")
 
 # --- Core Class ---
 class WhisperSubs:
-    def __init__(self, model_name, device, compute_type, force, ignore_subs, sub_lang):
+    def __init__(self, model_name, device, compute_type, force, ignore_subs, sub_lang, run_mpv=False):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
         self.force = force
         self.ignore_subs = ignore_subs
         self.sub_lang = sub_lang
+        self.run_mpv = run_mpv
         self.log_file = None
         self.channel_name = "unknown_channel"
         self.delay = 30
@@ -185,7 +186,7 @@ class WhisperSubs:
             ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True, 'ignoreerrors': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(source, download=False)
-                if 'entries' in info:
+                if info and 'entries' in info:
                     task_sources = [entry['url'] for entry in info.get('entries', []) if entry]
         else: # Assumed single URL or file
             self.log("Source is a single URL or file.")
@@ -202,6 +203,10 @@ class WhisperSubs:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl: 
                 info = ydl.extract_info(url, download=False)
             
+            if info is None:
+                self.log(f"Failed to get video info for '{title}'")
+                return False
+                
             video_lang = (info.get('language') or 'en').split('-')[0]
             target_langs = {video_lang, self.sub_lang} if self.sub_lang else {video_lang}
             best_sub_lang = next((lang for lang in target_langs 
@@ -213,9 +218,16 @@ class WhisperSubs:
                 return False
 
             self.log(f"Found human-made '{best_sub_lang}' subtitles. Downloading...")
-            safe_title = self.clean_filename(title)
             
-            # FIX: Use proper template in output directory
+            # Get timestamp from video info if available
+            timestamp = info.get('timestamp', '')
+            date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
+            timeday = date_time.strftime('%Y-%m-%d')
+            
+            # Create base filename with timestamp and cleaned title
+            safe_title = f"{timeday}_{self.clean_filename(title)}"
+            
+            # Use proper template in output directory
             sub_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
             ydl_opts_dl = {
                 'quiet': True, 
@@ -224,13 +236,13 @@ class WhisperSubs:
                 'subtitleslangs': [best_sub_lang], 
                 'subtitlesformat': 'srt', 
                 'skip_download': True, 
-                'outtmpl': sub_template  # This is correct usage
+                'outtmpl': sub_template
             }
             
             with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl: 
                 ydl.download([url])
             
-            # Look for the downloaded subtitle
+            # Look for the downloaded subtitle with language code
             expected_file = os.path.join(output_dir, f"{safe_title}.{best_sub_lang}.srt")
             final_file = os.path.join(output_dir, f"{safe_title}.srt")
             
@@ -265,7 +277,14 @@ class WhisperSubs:
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                    title = self.clean_filename(info.get('title', 'unknown_title'))
+                    if info is None:
+                        self.log(f"Failed to get video info for {url}")
+                        return None
+                    timestamp = info.get('timestamp', '')
+                    date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
+                    timeday = date_time.strftime('%Y-%m-%d')
+                    title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
+                    title = f"{title}.{self.model_name}"
                     
                     # Check for existing files with various extensions
                     for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
@@ -288,9 +307,10 @@ class WhisperSubs:
                         'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
                         'postprocessors': [{
                             'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
+                            'preferredcodec': 'm4a',
                             'preferredquality': '192',
                         }],
+                        'writethumbnail': True,
                         'quiet': True,
                         'no_warnings': True,
                         'ignoreerrors': True,
@@ -308,7 +328,14 @@ class WhisperSubs:
                         # Get title if we don't have it yet
                         if not title:
                             info = ydl.extract_info(url, download=False)
-                            title = self.clean_filename(info.get('title', 'unknown_title'))
+                            if info is None:
+                                self.log(f"Failed to get video info for {url}")
+                                return None
+                            timestamp = info.get('timestamp', '')
+                            date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
+                            timeday = date_time.strftime('%Y-%m-%d')
+                            title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
+                            title = f"{title}.{self.model_name}"
                         
                         ydl.download([url])
                     
@@ -388,15 +415,36 @@ class WhisperSubs:
             # FIX: Just pass the directory, not a template path
             audio_file = task_source if is_local else self.download_audio(task_source, channel_dir)
             if not audio_file or not os.path.exists(audio_file):
-                raise FileNotFoundError(f"Failed to obtain audio for '{title}'.")
+                # Log what files exist in the directory to debug
+                self.log(f"Audio file not found: {audio_file}")
+                self.log(f"Files in {channel_dir}: {os.listdir(channel_dir) if os.path.exists(channel_dir) else 'Directory does not exist'}")
+                return
 
             update_task_status(job_id, task_source, 'transcribing')
-            srt_file = os.path.join(channel_dir, f"{self.clean_filename(os.path.splitext(os.path.basename(audio_file))[0])}.srt")
+            # Get base filename without extension and ensure it includes the model name
+            base_name = os.path.splitext(os.path.basename(audio_file))[0]
+            if not base_name.endswith(f".{self.model_name}"):
+                base_name = f"{base_name}.{self.model_name}"
+            srt_file = os.path.join(channel_dir, f"{base_name}.srt")
+            
+            # Create helper files (bash, bat, thumbnail) before transcription
+            transcribe.make_files(srt_file, url=task_source)
             
             if transcribe.process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
                 self.log("Transcription successful.")
+                # Update the SRT filename in case it was changed during processing
+                if os.path.exists(srt_file):
+                    base_name = os.path.splitext(srt_file)[0]
+                    new_srt_file = f"{base_name}.srt"
+                    if new_srt_file != srt_file and os.path.exists(new_srt_file):
+                        srt_file = new_srt_file
+                transcribe.make_files(srt_file, url=task_source)
                 update_task_status(job_id, task_source, 'completed')
                 self.mark_as_processed(unique_id)
+                
+                # Launch mpv in background if --run option is specified
+                if hasattr(self, 'run_mpv') and self.run_mpv:
+                    self.launch_mpv(audio_file, srt_file, task_source)
             else:
                 raise Exception("Transcription process failed.")
                 
@@ -411,11 +459,44 @@ class WhisperSubs:
                     os.remove(audio_file)
                 except OSError as e:
                     self.log(f"Error removing temp file: {e}")
+
+    def launch_mpv(self, audio_file, srt_file, task_source):
+        """Launch mpv with the audio file, subtitles, and --pause flag."""
+        import subprocess
+        try:
+            # Determine the media source to use - prefer the original source if it's a URL
+            # If it's a local file, use the audio file directly
+            is_local = self.is_local_file(task_source)
+            media_source = audio_file if is_local else task_source
+            
+            # Create the mpv command with --pause and input-ipc-server
+            cmd = [
+                'mpv',
+                media_source,
+                '--pause',
+                '--input-ipc-server=/tmp/mpvsocket',
+                f'--sub-file={srt_file}'
+            ]
+            
+            self.log(f"Launching mpv: {' '.join(cmd)}")
+            
+            # Run mpv in the background
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.log("mpv launched in background with --pause and mpvsocket")
+            
+        except Exception as e:
+            self.log(f"Error launching mpv: {e}")
+    
     def process(self, job_or_source):
         job = job_or_source if isinstance(job_or_source, dict) else add_job(job_or_source, self.model_name)
-        
+        if "\n" in job['source']:
+            job['source'] = job['source'].split('\n')
+        else:
+            job['source'] = [job['source']]
         if job['status'] == 'initializing':
-            tasks = [{"source": src, "status": "pending", "title": os.path.basename(src)} for src in self.resolve_source_to_tasks(job['source'])]
+            tasks = []
+            for src in job['source']:
+                tasks.extend([{"source": src, "status": "pending", "title": os.path.basename(src)} for src in self.resolve_source_to_tasks(src)])
             update_job(job['id'], {"tasks": tasks, "status": "processing" if tasks else "completed"})
             job['tasks'], job['status'] = tasks, "processing"
 
@@ -424,7 +505,13 @@ class WhisperSubs:
             if task['status'] == 'pending':
                 self.process_task(job['id'], task)
 
-        final_statuses = [t['status'] for t in get_jobs() if t['id'] == job['id']][0]['tasks']
+        # Get the updated job to get current task statuses
+        updated_jobs = get_jobs()
+        target_job = next((t for t in updated_jobs if t['id'] == job['id']), None)
+        if target_job:
+            final_statuses = [task['status'] for task in target_job['tasks']]
+        else:
+            final_statuses = []
         final_status = "completed" if all(s in ['completed', 'skipped', 'failed'] for s in final_statuses) else "processing"
         update_job(job['id'], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
@@ -440,6 +527,7 @@ def main():
     parser.add_argument('-f', '--force', action='store_true', help="Force transcription even if already processed.")
     parser.add_argument('-i', '--ignore-subs', action='store_true', help="Ignore existing subtitles.")
     parser.add_argument('-lang', '--language', help="Language code for subtitle priority.")
+    parser.add_argument('-r', '--run', action='store_true', help="Run mpv in background after transcription.")
     args = parser.parse_args()
 
     if args.list: 
@@ -478,7 +566,8 @@ def main():
         compute_type=args.compute, 
         force=args.force, 
         ignore_subs=args.ignore_subs, 
-        sub_lang=args.language
+        sub_lang=args.language,
+        run_mpv=args.run
     )
     processor.process(job_or_source)
 

@@ -216,7 +216,7 @@ class YoutubeSubs:
                                    str(date_time), self.video_title, audio_file]))
 
             # Add time range and cookies to command
-            command = ["yt-dlp", "--extract-audio", "--audio-format", "mp3"]
+            command = ["yt-dlp", "--extract-audio", "--audio-format", "m4a"]
             
             if self.use_cookies and self.specified_browser:
                 command.extend(["--cookies-from-browser", self.specified_browser])

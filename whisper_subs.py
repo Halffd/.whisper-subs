@@ -159,12 +159,51 @@ class WhisperSubs:
         except Exception:
             return os.path.basename(url), "unknown_channel"
 
+    def clean_youtube_url(self, url):
+        """Remove playlist and other parameters from YouTube URLs."""
+        if not isinstance(url, str):
+            return url
+            
+        # Handle YouTube URLs
+        if 'youtube.com/watch' in url or 'youtu.be/' in url:
+            from urllib.parse import urlparse, parse_qs, urlunparse
+            
+            # Parse the URL
+            parsed = urlparse(url)
+            
+            # For youtu.be short links
+            if 'youtu.be' in parsed.netloc:
+                video_id = parsed.path.lstrip('/')
+                return f"https://youtu.be/{video_id.split('?')[0]}"
+                
+            # For full YouTube URLs
+            if 'youtube.com' in parsed.netloc:
+                query = parse_qs(parsed.query)
+                if 'v' in query:
+                    # Keep only the video ID parameter
+                    clean_query = f"v={query['v'][0]}"
+                    # Rebuild the URL
+                    parsed = parsed._replace(query=clean_query, fragment='')
+                    return urlunparse(parsed)
+        
+        return url
+
     def clean_filename(self, filename):
-        return re.sub(r'[<>:"/\\|?*]', '_', filename)
+        # If it's a YouTube URL, clean it first
+        if isinstance(filename, str) and ('youtube.com' in filename or 'youtu.be' in filename):
+            filename = self.clean_youtube_url(filename)
+            
+        # Remove invalid characters from filename
+        filename = re.sub(r'[\\/*?:"<>|]', '_', str(filename))
+        return filename.strip()
 
     def resolve_source_to_tasks(self, source):
         self.log(f"Resolving source: {source}")
         task_sources = []
+        if "youtu" in source and '&llst=' in source:
+            listeqPosition = source.find('&llst=')
+            if listeqPosition != -1:
+                source = source[:listeqPosition]
         if self.is_local_dir(source):
             self.log(f"Source is a local directory.")
             for root, _, files in os.walk(source):
@@ -268,6 +307,9 @@ class WhisperSubs:
         os.makedirs(output_path, exist_ok=True)
         
         title = None
+        # Clean the URL first to remove playlist parameters
+        clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
+        
         # Quick check for existing files before attempting download
         if not self.force:
             try:
@@ -276,22 +318,28 @@ class WhisperSubs:
                     ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
+                    info = ydl.extract_info(clean_url, download=False)
                     if info is None:
-                        self.log(f"Failed to get video info for {url}")
+                        self.log(f"Failed to get video info for {clean_url}")
                         return None
+                        
+                    # Get timestamp and format it
                     timestamp = info.get('timestamp', '')
                     date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
                     timeday = date_time.strftime('%Y-%m-%d')
-                    title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
-                    title = f"{title}.{self.model_name}"
+                    
+                    # Clean and format the title
+                    clean_title = self.clean_filename(info.get('title', 'unknown'))
+                    base_title = f"{timeday}_{clean_title}"
                     
                     # Check for existing files with various extensions
                     for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
-                        existing_file = os.path.join(output_path, f"{title}{ext}")
-                        if os.path.exists(existing_file):
-                            self.log(f"File already exists: {existing_file}")
-                            return existing_file
+                        # Check both with and without model name for backward compatibility
+                        for pattern in [f"{base_title}.{self.model_name}{ext}", f"{base_title}{ext}"]:
+                            existing_file = os.path.join(output_path, pattern)
+                            if os.path.exists(existing_file):
+                                self.log(f"File already exists: {existing_file}")
+                                return existing_file
             except Exception:
                 pass  # If we can't check, just proceed with download
         
@@ -302,17 +350,34 @@ class WhisperSubs:
         try:
             while True:
                 try:
-                    ydl_opts = {
-                        'outtmpl': '%(title)s.%(ext)s',
-                        'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'm4a',
-                            'preferredquality': '192',
-                        }],
-                        'writethumbnail': True,
-                        'quiet': True,
-                        'no_warnings': True,
+                    # Get video info to build the output filename
+                    with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                        info = ydl.extract_info(clean_url, download=False)
+                        if info is None:
+                            self.log(f"Failed to get video info for {clean_url}")
+                            return None
+                            
+                        # Get timestamp and format it
+                        timestamp = info.get('timestamp', '')
+                        date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
+                        timeday = date_time.strftime('%Y-%m-%d')
+                        
+                        # Clean and format the title
+                        clean_title = self.clean_filename(info.get('title', 'unknown'))
+                        base_title = f"{timeday}_{clean_title}"
+                        output_template = f"{base_title}.{self.model_name}.%(ext)s"
+                        
+                        ydl_opts = {
+                            'outtmpl': output_template,
+                            'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
+                            'postprocessors': [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'm4a',
+                                'preferredquality': '192',
+                            }],
+                            'writethumbnail': True,
+                            'quiet': True,
+                            'no_warnings': True,
                         'ignoreerrors': True,
                         'sleep_interval': 10,
                         'max_sleep_interval': 30,
@@ -428,7 +493,7 @@ class WhisperSubs:
             srt_file = os.path.join(channel_dir, f"{base_name}.srt")
             
             # Create helper files (bash, bat, thumbnail) before transcription
-            transcribe.make_files(srt_file, url=task_source)
+            transcribe.make_files(srt_file.replace('.srt', '.unfinished.srt'), url=task_source)
             
             if transcribe.process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
                 self.log("Transcription successful.")

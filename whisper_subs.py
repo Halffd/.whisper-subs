@@ -7,8 +7,13 @@ import datetime
 import re
 import subprocess
 import time
-from urllib.parse import urlparse
+import shutil
 import pyperclip
+import yt_dlp
+import hashlib
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 # Assuming these modules are in the same directory or installed
 import transcribe
@@ -108,7 +113,7 @@ def list_jobs():
 
 # --- Core Class ---
 class WhisperSubs:
-    def __init__(self, model_name, device, compute_type, force, ignore_subs, sub_lang, run_mpv=False, strict_language_tier=True):
+    def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser=None, strict_language_tier=False):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
@@ -116,12 +121,14 @@ class WhisperSubs:
         self.ignore_subs = ignore_subs
         self.sub_lang = sub_lang
         self.run_mpv = run_mpv
+        self.specified_browser = browser
         self.strict_language_tier = strict_language_tier
-        self.log_file = None
-        self.channel_name = "unknown_channel"
+        self.model = None
+        self.log_file = os.path.join(os.path.expanduser("~/.config/WhisperSubs"), 'whisper_subs.log')
+        self.info_cache = {}  # Cache for video info to avoid re-fetching
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         self.delay = 30
         self.start_delay = 30
-        self.specified_browser = 'chrome'
 
     def log(self, message):
         message_str = str(message)
@@ -171,6 +178,19 @@ class WhisperSubs:
                 return info.get('title', 'unknown_title'), info.get('channel') or info.get('uploader') or "unknown_channel"
         except Exception:
             return os.path.basename(url), "unknown_channel"
+
+    def get_video_info_cached(self, url):
+        """Get video info with caching to avoid re-fetching the same URL."""
+        # Clean URL first for consistent cache keys
+        clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
+        
+        if clean_url in self.info_cache:
+            self.log(f"Using cached info for {clean_url[:50]}...")
+            return self.info_cache[clean_url]
+        
+        info = self.get_video_info(clean_url)
+        self.info_cache[clean_url] = info
+        return info
 
     def clean_youtube_url(self, url):
         """Clean YouTube URLs by removing tracking parameters and extracting just the video ID.
@@ -234,25 +254,36 @@ class WhisperSubs:
         filename = re.sub(r'[\\/*?:"<>|]', '_', str(filename))
         return filename.strip()
 
-    def resolve_source_to_tasks(self, source):
-        """Resolve source to tasks (eager loading, kept for backward compatibility)."""
-        self.log(f"[DEPRECATED] Using eager loading for source: {source}")
-        return list(self.resolve_source_to_tasks_lazy(source))
-
     def resolve_source_to_tasks_lazy(self, source):
-        """Generator that yields tasks one at a time instead of resolving all upfront."""
+        """Lazy resolution with parallel metadata fetching for playlists."""
         self.log(f"Resolving source (lazy): {source}")
         
-        # Clean the source URL first (especially important for YouTube URLs)
+        # Clean YouTube URLs for consistent processing
         if self.is_youtube(source):
             clean_source = self.clean_youtube_url(source)
             if clean_source != source:
                 self.log(f"Cleaned URL: {clean_source}")
                 source = clean_source
-        
-        # Local directory - yield files one by one
-        if self.is_local_dir(source):
-            self.log(f"Source is a local directory.")
+                
+        if isinstance(source, list):
+            self.log(f"Source is a list of {len(source)} items.")
+            for item in source:
+                if not item.strip():
+                    continue
+                try:
+                    if self.is_youtube(item) or self.is_twitch(item):
+                        title, _ = self.get_video_info_cached(item)
+                    else:
+                        title = os.path.basename(item)
+                    if self.is_youtube(item):
+                        title = self.clean_filename(title)
+                    yield {"source": item, "status": "pending", "title": title}
+                except Exception as e:
+                    self.log(f"Error processing {item}: {e}")
+                    yield {"source": item, "status": "pending", "title": os.path.basename(item)}
+                    
+        elif self.is_local_dir(source):
+            self.log(f"Source is a local directory: {source}")
             for root, _, files in os.walk(source):
                 for file in files:
                     if file.lower().endswith(('.mp3', '.wav', '.flac', '.m4a', '.ogg', '.mkv')):
@@ -260,85 +291,76 @@ class WhisperSubs:
                         yield {
                             "source": file_path,
                             "status": "pending",
-                            "title": os.path.basename(file_path)
+                            "title": os.path.splitext(file)[0]
                         }
-        
-        # Single local file
-        elif self.is_local_file(source):
-            self.log("Source is a single local file.")
-            yield {
-                "source": source,
-                "status": "pending",
-                "title": os.path.basename(source)
-            }
-        
-        # Twitch channel - yield VODs one by one
-        elif twitch_username := self.is_twitch_channel(source):
-            self.log(f"Source is Twitch channel: {twitch_username}")
-            downloader = twitch_vod.StreamlinkVODDownloader()
-            user_id = downloader.get_user_id_by_login(twitch_username)
-            if user_id:
-                vods = downloader.get_all_vods(user_id)
-                for vod in vods:
-                    vod_url = f"https://www.twitch.tv/videos/{vod['id']}"
-                    yield {
-                        "source": vod_url,
-                        "status": "pending",
-                        "title": vod.get('title', f"VOD {vod['id']}")
-                    }
-        
-        # YouTube channel/playlist - yield videos one by one using pagination
+                            
         elif self.is_channel_or_playlist_url(source):
             self.log(f"Source is YouTube channel/playlist (streaming entries).")
+            
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
-                'extract_flat': True,  # Don't download full metadata
-                'ignoreerrors': True,
-                'playlistend': None,  # Process all videos
+                'extract_flat': 'in_playlist',  # Fast flat extraction
+                'socket_timeout': 10,
+                'no_check_certificate': True,
             }
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    # extract_info returns a generator if extract_flat is True
+            if self.specified_browser:
+                ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(source, download=False)
                     
                     if info and 'entries' in info:
-                        for i, entry in enumerate(info['entries'], 1):
-                            if entry and entry.get('url'):
-                                self.log(f"Discovered video {i}: {entry.get('title', 'Unknown')}")
-                                yield {
-                                    "source": entry['url'],
-                                    "status": "pending",
-                                    "title": entry.get('title', 'Unknown')
-                                }
-                            else:
-                                self.log(f"Skipping invalid entry {i}")
-                except Exception as e:
-                    self.log(f"Error resolving playlist/channel: {e}")
-        
-        # Single URL
+                        # Get all URLs first (fast)
+                        urls = [entry['url'] for entry in info['entries'] 
+                               if entry and entry.get('url')]
+                        
+                        # Fetch metadata in parallel (5 at a time)
+                        with ThreadPoolExecutor(max_workers=5) as executor:
+                            # Submit all tasks
+                            future_to_url = {
+                                executor.submit(self.get_video_info_cached, url): url 
+                                for url in urls
+                            }
+                            
+                            # Yield results as they complete
+                            for future in as_completed(future_to_url):
+                                url = future_to_url[future]
+                                try:
+                                    title, _ = future.result()
+                                    if self.is_youtube(url):
+                                        title = self.clean_filename(title)
+                                    yield {
+                                        "source": url,
+                                        "status": "pending",
+                                        "title": title
+                                    }
+                                except Exception as e:
+                                    self.log(f"Failed to get info for {url}: {e}")
+                                    yield {
+                                        "source": url,
+                                        "status": "pending",
+                                        "title": os.path.basename(url)
+                                    }
+            except Exception as e:
+                self.log(f"Error processing playlist: {e}")
+                
         else:
-            self.log("Source is a single URL.")
+            self.log("Source is a single URL or file.")
             try:
-                # Try to get the video title for better task naming
                 if self.is_youtube(source) or self.is_twitch(source):
-                    title, _ = self.get_video_info(source)
+                    title, _ = self.get_video_info_cached(source)
                 else:
                     title = os.path.basename(source)
-                
-                # Clean up the title if it's a YouTube URL
                 if self.is_youtube(source):
                     title = self.clean_filename(title)
-                
-                yield {
-                    "source": source,
-                    "status": "pending",
-                    "title": title
-                }
+                yield {"source": source, "status": "pending", "title": title}
             except Exception as e:
                 self.log(f"Error getting video info: {e}")
-                # Fallback to basic info if we can't get the title
+                yield {"source": source, "status": "pending", "title": os.path.basename(source)}
+
                 yield {
                     "source": source,
                     "status": "pending",
@@ -437,144 +459,194 @@ class WhisperSubs:
         """Downloads audio and returns the actual file path."""
         self.log(f"Downloading audio from {url}...")
         
-        # Ensure output directory exists
         os.makedirs(output_path, exist_ok=True)
         
-        title = None
-        # Clean the URL first to remove playlist parameters
+        # Clean the URL first
         clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
         
-        # Quick check for existing files before attempting download
+        # === STEP 1: Check for existing files (fast) ===
         if not self.force:
             try:
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
                     'skip_download': True,
-                    'extract_flat': True,  # Super fast
+                    'extract_flat': True,
                     'socket_timeout': 5,
                     'no_check_certificate': True,
                 }
-                if self.specified_browser:
+                
+                if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
                     ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(clean_url, download=False)
-                    if info is None:
-                        self.log(f"Failed to get video info for {clean_url}")
-                        return None
+                    
+                    if info:
+                        timestamp = info.get('timestamp', '')
+                        if timestamp:
+                            date_time = datetime.datetime.fromtimestamp(timestamp)
+                            timeday = date_time.strftime('%Y-%m-%d_%H-%M')
+                        else:
+                            timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
                         
-                    # Get timestamp and format it
-                    timestamp = info.get('timestamp', '')
-                    date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-                    timeday = date_time.strftime('%Y-%m-%d_%H-%M')
-                    
-                    # Clean and format the title
-                    clean_title = self.clean_filename(info.get('title', 'unknown'))
-                    base_title = f"{timeday}_{clean_title}"
-                    
-                    # Check for existing files with various extensions
-                    for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
-                        # Check both with and without model name for backward compatibility
-                        for pattern in [f"{base_title}.{self.model_name}{ext}", f"{base_title}{ext}"]:
-                            existing_file = os.path.join(output_path, pattern)
-                            if os.path.exists(existing_file):
-                                self.log(f"File already exists: {existing_file}")
-                                return existing_file
-            except Exception:
-                pass  # If we can't check, just proceed with download
+                        clean_title = self.clean_filename(info.get('title', 'unknown'))
+                        base_title = f"{timeday}_{clean_title}"
+                        
+                        # Check for existing files
+                        for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
+                            for pattern in [
+                                f"{base_title}.{self.model_name}{ext}",
+                                f"{base_title}{ext}"
+                            ]:
+                                existing_file = os.path.join(output_path, pattern)
+                                if os.path.exists(existing_file):
+                                    self.log(f"File already exists: {existing_file}")
+                                    return existing_file
+            except Exception as e:
+                self.log(f"Quick check failed: {e}")
         
-        # Change to output directory like the old version
+        # === STEP 2: Download the file ===
         original_cwd = os.getcwd()
         os.chdir(output_path)
         
+        # Define progress hook once outside the loop
+        def progress_hook(d):
+            """Show clean progress updates."""
+            if d['status'] == 'downloading':
+                if 'total_bytes' in d or 'total_bytes_estimate' in d:
+                    total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                    downloaded = d.get('downloaded_bytes', 0)
+                    
+                    if total > 0:
+                        percent = (downloaded / total) * 100
+                        last_percent = getattr(progress_hook, 'last_percent', -1)
+                        
+                        # Show at 10%, 20%, 30%... milestones
+                        if int(percent) % 10 == 0 and int(percent) != last_percent:
+                            speed = d.get('speed', 0)
+                            speed_mb = speed / (1024 * 1024) if speed else 0
+                            self.log(f"Download: {int(percent)}% ({speed_mb:.1f} MB/s)")
+                            progress_hook.last_percent = int(percent)
+            
+            elif d['status'] == 'finished':
+                filename = os.path.basename(d.get('filename', 'unknown'))
+                self.log(f"Download complete: {filename}")
+        
+        progress_hook.last_percent = -1
+        
         try:
-            while True:
+            attempt = 0
+            max_attempts = 3
+            
+            while attempt < max_attempts:
+                attempt += 1
+                
                 try:
-                    # Get video info to build the output filename
-                    with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                    # Get video info once
+                    info_opts = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'skip_download': True,
+                        'socket_timeout': 10,
+                        'no_check_certificate': True,
+                    }
+                    
+                    if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
+                        info_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                    
+                    with yt_dlp.YoutubeDL(info_opts) as ydl:
                         info = ydl.extract_info(clean_url, download=False)
+                        
                         if info is None:
                             self.log(f"Failed to get video info for {clean_url}")
                             return None
-                            
-                        # Get timestamp and format it
-                        timestamp = info.get('timestamp', '')
-                        date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-                        timeday = date_time.strftime('%Y-%m-%d_%H-%M')
-                        
-                        # Clean and format the title
-                        clean_title = self.clean_filename(info.get('title', 'unknown'))
-                        base_title = f"{timeday}_{clean_title}"
-                        output_template = f"{base_title}.{self.model_name}.%(ext)s"
-                        ydl_opts = {
-                            'outtmpl': '%(upload_date)s_%(title)s.%(ext)s',  # Let yt-dlp format it
-                            'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                            'postprocessors': [{
-                                'key': 'FFmpegExtractAudio',
-                                'preferredcodec': 'm4a',
-                                'preferredquality': '192',
-                            }],
-                            'writethumbnail': True,
-                            'quiet': True,
-                            'no_warnings': True,
-                            'ignoreerrors': True,
-                            'socket_timeout': 30,
-                            'no_check_certificate': True,
-                            'extractor_retries': 3,
-                            'fragment_retries': 3,
-                            'http_chunk_size': 10485760,  # 10MB chunks (faster for big files)
-                            'concurrent_fragment_downloads': 5,  # Parallel downloads
-                        }
-                    if self.specified_browser:
-                        ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
-                        
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Get title if we don't have it yet
-                        if not title:
-                            info = ydl.extract_info(url, download=False)
-                            if info is None:
-                                self.log(f"Failed to get video info for {url}")
-                                return None
-                            timestamp = info.get('timestamp', '')
-                            date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-                            timeday = date_time.strftime('%Y-%m-%d_%H-%M')
-                            title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
-                            title = f"{title}.{self.model_name}"
-                        
-                        ydl.download([url])
                     
-                    # Look for the downloaded file
-                    for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
-                        predicted_path = f"{title}{ext}"
+                    # Build filename
+                    timestamp = info.get('timestamp', '')
+                    if timestamp:
+                        date_time = datetime.datetime.fromtimestamp(timestamp)
+                        timeday = date_time.strftime('%Y-%m-%d_%H-%M')
+                    else:
+                        timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
+                    
+                    clean_title = self.clean_filename(info.get('title', 'unknown'))
+                    expected_base = f"{timeday}_{clean_title}.{self.model_name}"
+                    
+                    # Download with proper template
+                    download_opts = {
+                        'outtmpl': f'{expected_base}.%(ext)s',  # Use our format
+                        'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'm4a',
+                            'preferredquality': '192',
+                        }],
+                        'writethumbnail': True,
+                        'quiet': True,
+                        'no_warnings': True,
+                        'noprogress': False,
+                        'progress_hooks': [progress_hook],
+                        'ignoreerrors': True,
+                        'socket_timeout': 30,
+                        'no_check_certificate': True,
+                        'extractor_retries': 3,
+                        'fragment_retries': 3,
+                        'http_chunk_size': 10485760,
+                        'concurrent_fragment_downloads': 5,
+                    }
+                    
+                    if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
+                        download_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                    
+                    self.log(f"Starting download (attempt {attempt}/{max_attempts})...")
+                    
+                    with yt_dlp.YoutubeDL(download_opts) as ydl:
+                        ydl.download([clean_url])
+                    
+                    # Find the downloaded file
+                    for ext in ['.m4a', '.mp3', '.webm', '.ogg']:
+                        predicted_path = f"{expected_base}{ext}"
                         full_path = os.path.join(output_path, predicted_path)
+                        
                         if os.path.exists(full_path):
                             self.log(f"Successfully downloaded: {full_path}")
                             return full_path
                     
-                    # Fallback: find any new audio file in the directory
-                    for file in os.listdir('.'):
-                        if file.endswith(('.mp3', '.m4a', '.webm', '.ogg')):
-                            full_path = os.path.join(output_path, file)
-                            self.log(f"Found audio file: {full_path}")
-                            return full_path
+                    # Fallback: find most recent audio file
+                    audio_files = [
+                        f for f in os.listdir('.')
+                        if f.endswith(('.mp3', '.m4a', '.webm', '.ogg'))
+                    ]
                     
-                    self.log(f"Expected file not found: {title}")
+                    if audio_files:
+                        # Get most recent file
+                        latest_file = max(audio_files, key=lambda f: os.path.getmtime(f))
+                        full_path = os.path.join(output_path, latest_file)
+                        self.log(f"Found audio file: {full_path}")
+                        return full_path
+                    
+                    self.log(f"Download completed but file not found: {expected_base}")
                     return None
                     
                 except Exception as e:
                     error_str = str(e).lower()
-                    if 'rate' in error_str or 'unavailable' in error_str:
-                        self.delay = min(self.delay * 1.5, 3600)
-                        self.log(f"Download failed (rate limit?). Retrying in {self.delay:.0f}s...")
-                        time.sleep(self.delay)
-                        continue
+                    
+                    # Handle rate limiting with exponential backoff
+                    if 'rate' in error_str or 'unavailable' in error_str or '429' in error_str:
+                        if attempt < max_attempts:
+                            delay = min(30 * (2 ** attempt), 3600)  # 30s, 60s, 120s...
+                            self.log(f"Rate limited. Retrying in {delay}s... (attempt {attempt}/{max_attempts})")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            self.log(f"Max retry attempts reached. Giving up.")
+                            return None
                     else:
-                        self.log(f"Audio download failed: {e}")
+                        self.log(f"Download failed: {e}")
                         return None
-                        
+        
         finally:
-            # Always restore original working directory
             os.chdir(original_cwd)
     def get_unique_id(self, source):
         """Extract a unique identifier from various source types.
@@ -948,14 +1020,7 @@ Examples:
                              help="Language code for subtitle priority.")
     process_group.add_argument('--cross-tier', action='store_true',
                              help="Allow comparison between multilingual and English-only models.")
-    process_group.add_argument('-r', '--run', action='store_true',
-                             help="Run mpv player after transcription.")
-    process_group.add_argument('-r', '--run', action='store_true', 
-                             help="Run mpv in background after transcription.")
-    parser.add_argument('--cross-tier', action='store_true', dest='strict_language_tier',
-                       help="Allow comparison between multilingual and English-only models. "
-                            "By default, large-v3 and medium.en are treated as incomparable. "
-                            "Use this flag to compare them by raw model index.")
+    process_group.add_argument('-r', '--run', action='store_true', help="Run player in background.")
     args = parser.parse_args()
 
     if args.list: 
@@ -1033,7 +1098,7 @@ Examples:
         ignore_subs=args.ignore_subs, 
         sub_lang=args.language,
         run_mpv=args.run,
-        strict_language_tier=args.strict_language_tier
+        strict_language_tier=args.cross_tier
     )
     processor.process(job_or_source)
 

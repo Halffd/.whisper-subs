@@ -151,7 +151,19 @@ class WhisperSubs:
 
     def get_video_info(self, url):
         try:
-            ydl_opts = {'quiet': True, 'no_warnings': True}
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': 'in_playlist',  # Fast extraction
+                'skip_download': True,
+                'no_check_certificate': True,   # Skip SSL overhead
+                'socket_timeout': 10,           # Don't wait forever
+                'extractor_args': {
+                    'youtube': {
+                        'skip': ['hls', 'dash', 'translated_subs']  # Skip unnecessary data
+                    }
+                }
+            }
             if self.specified_browser:
                 ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -231,9 +243,12 @@ class WhisperSubs:
         """Generator that yields tasks one at a time instead of resolving all upfront."""
         self.log(f"Resolving source (lazy): {source}")
         
-        # Clean YouTube URLs
-        if "youtu" in source and '&llst=' in source:
-            source = source[:source.find('&llst=')]
+        # Clean the source URL first (especially important for YouTube URLs)
+        if self.is_youtube(source):
+            clean_source = self.clean_youtube_url(source)
+            if clean_source != source:
+                self.log(f"Cleaned URL: {clean_source}")
+                source = clean_source
         
         # Local directory - yield files one by one
         if self.is_local_dir(source):
@@ -305,75 +320,117 @@ class WhisperSubs:
         # Single URL
         else:
             self.log("Source is a single URL.")
-            yield {
-                "source": source,
-                "status": "pending",
-                "title": os.path.basename(source)
-            }
+            try:
+                # Try to get the video title for better task naming
+                if self.is_youtube(source) or self.is_twitch(source):
+                    title, _ = self.get_video_info(source)
+                else:
+                    title = os.path.basename(source)
+                
+                # Clean up the title if it's a YouTube URL
+                if self.is_youtube(source):
+                    title = self.clean_filename(title)
+                
+                yield {
+                    "source": source,
+                    "status": "pending",
+                    "title": title
+                }
+            except Exception as e:
+                self.log(f"Error getting video info: {e}")
+                # Fallback to basic info if we can't get the title
+                yield {
+                    "source": source,
+                    "status": "pending",
+                    "title": os.path.basename(source)
+                }
+    
     def check_and_download_subs(self, url, output_dir, title):
-        if self.ignore_subs: 
+        """Check for subs with minimal overhead."""
+        if self.ignore_subs:
             return False
-        self.log(f"Checking for existing subtitles for '{title}'...")
+        
+        self.log(f"Checking for existing subtitles...")
+        
         try:
-            ydl_opts = {'quiet': True, 'no_warnings': True, 'listsubtitles': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl: 
+            # Ultra-minimal options for just checking subs
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'writesubtitles': False,  # Don't write yet
+                'listsubtitles': True,
+                'socket_timeout': 10,
+                'no_check_certificate': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             
             if info is None:
-                self.log(f"Failed to get video info for '{title}'")
                 return False
-                
+            
+            # Quick check for human-made subs
+            subtitles = info.get('subtitles', {})
+            if not subtitles:
+                self.log("No subtitles available.")
+                return False
+            
             video_lang = (info.get('language') or 'en').split('-')[0]
             target_langs = {video_lang, self.sub_lang} if self.sub_lang else {video_lang}
-            best_sub_lang = next((lang for lang in target_langs 
-                                if any(not s.get('is_automatic') 
-                                    for s in info.get('subtitles', {}).get(lang, []))), None)
+            
+            best_sub_lang = None
+            for lang in target_langs:
+                lang_subs = subtitles.get(lang, [])
+                if any(not s.get('is_automatic') for s in lang_subs):
+                    best_sub_lang = lang
+                    break
             
             if not best_sub_lang:
-                self.log("No suitable human-made subtitles found.")
+                self.log("No human-made subtitles found.")
                 return False
 
-            self.log(f"Found human-made '{best_sub_lang}' subtitles. Downloading...")
+            self.log(f"Found '{best_sub_lang}' subs. Downloading...")
             
-            # Get timestamp from video info if available
+            # Now actually download with minimal overhead
             timestamp = info.get('timestamp', '')
-            date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-            timeday = date_time.strftime('%Y-%m-%d_%H-%M')
+            if timestamp:
+                date_time = datetime.datetime.fromtimestamp(timestamp)
+                timeday = date_time.strftime('%Y-%m-%d_%H-%M')
+            else:
+                timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
             
-            # Create base filename with timestamp and cleaned title
             safe_title = f"{timeday}_{self.clean_filename(title)}"
-            
-            # Use proper template in output directory
             sub_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
+            
             ydl_opts_dl = {
-                'quiet': True, 
-                'no_warnings': True, 
-                'writesubtitles': True, 
-                'subtitleslangs': [best_sub_lang], 
-                'subtitlesformat': 'srt', 
-                'skip_download': True, 
-                'outtmpl': sub_template
+                'quiet': True,
+                'no_warnings': True,
+                'writesubtitles': True,
+                'subtitleslangs': [best_sub_lang],
+                'subtitlesformat': 'srt',
+                'skip_download': True,
+                'outtmpl': sub_template,
+                'socket_timeout': 10,
+                'no_check_certificate': True,
             }
             
-            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl: 
+            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
                 ydl.download([url])
             
-            # Look for the downloaded subtitle with language code
             expected_file = os.path.join(output_dir, f"{safe_title}.{best_sub_lang}.srt")
             final_file = os.path.join(output_dir, f"{safe_title}.srt")
             
             if os.path.exists(expected_file):
-                if os.path.exists(final_file): 
+                if os.path.exists(final_file):
                     os.remove(final_file)
                 os.rename(expected_file, final_file)
                 self.log(f"Subtitle saved to {final_file}")
                 transcribe.make_files(final_file, url=url)
                 return True
-            else:
-                self.log(f"Expected subtitle file not found: {expected_file}")
                 
-        except Exception as e: 
-            self.log(f"Error checking subtitles: {e}")
+        except Exception as e:
+            self.log(f"Subtitle check failed: {e}")
         
         return False
     def download_audio(self, url, output_path):
@@ -390,7 +447,14 @@ class WhisperSubs:
         # Quick check for existing files before attempting download
         if not self.force:
             try:
-                ydl_opts = {'quiet': True, 'no_warnings': True}
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'skip_download': True,
+                    'extract_flat': True,  # Super fast
+                    'socket_timeout': 5,
+                    'no_check_certificate': True,
+                }
                 if self.specified_browser:
                     ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
                 
@@ -443,10 +507,9 @@ class WhisperSubs:
                         clean_title = self.clean_filename(info.get('title', 'unknown'))
                         base_title = f"{timeday}_{clean_title}"
                         output_template = f"{base_title}.{self.model_name}.%(ext)s"
-                        
                         ydl_opts = {
-                            'outtmpl': output_template,
-                            'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
+                            'outtmpl': '%(upload_date)s_%(title)s.%(ext)s',  # Let yt-dlp format it
+                            'format': 'bestaudio[ext=m4a]/bestaudio/best',
                             'postprocessors': [{
                                 'key': 'FFmpegExtractAudio',
                                 'preferredcodec': 'm4a',
@@ -455,14 +518,14 @@ class WhisperSubs:
                             'writethumbnail': True,
                             'quiet': True,
                             'no_warnings': True,
-                        'ignoreerrors': True,
-                        'sleep_interval': 10,
-                        'max_sleep_interval': 30,
-                        'sleep_interval_requests': 5,
-                        'retries': 3,
-                        'fragment_retries': 3,
-                    }
-                    
+                            'ignoreerrors': True,
+                            'socket_timeout': 30,
+                            'no_check_certificate': True,
+                            'extractor_retries': 3,
+                            'fragment_retries': 3,
+                            'http_chunk_size': 10485760,  # 10MB chunks (faster for big files)
+                            'concurrent_fragment_downloads': 5,  # Parallel downloads
+                        }
                     if self.specified_browser:
                         ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
                         
@@ -514,10 +577,53 @@ class WhisperSubs:
             # Always restore original working directory
             os.chdir(original_cwd)
     def get_unique_id(self, source):
-        if self.is_youtube(source): return (re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', source) or [None, None])[1]
-        if self.is_twitch(source): return (re.search(r'/videos/(\d+)', source) or [None, None])[1]
-        if self.is_local_file(source): return os.path.basename(source)
-        return source
+        """Extract a unique identifier from various source types.
+        
+        For YouTube: Just the video ID (11 characters)
+        For Twitch: Just the VOD number
+        For local files: Basename
+        """
+        if not source:
+            return str(source)
+            
+        # Clean the source first (especially important for YouTube URLs)
+        clean_source = self.clean_youtube_url(source) if self.is_youtube(source) else source
+        
+        # Handle YouTube URLs
+        if self.is_youtube(clean_source):
+            # Try to extract from youtu.be/ID format first
+            if 'youtu.be/' in clean_source:
+                video_id = clean_source.split('youtu.be/')[-1].split('?')[0].split('&')[0].split('#')[0]
+                if len(video_id) == 11:  # Validate it's a proper YouTube ID
+                    return video_id
+            
+            # Try to extract from youtube.com/watch?v=ID format
+            if 'youtube.com/watch' in clean_source:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(clean_source)
+                if 'v' in parse_qs(parsed.query):
+                    video_id = parse_qs(parsed.query)['v'][0].split('&')[0]
+                    if len(video_id) == 11:  # Validate it's a proper YouTube ID
+                        return video_id
+            
+            # Try to extract from youtube.com/embed/ID format
+            if 'youtube.com/embed/' in clean_source:
+                parts = clean_source.split('youtube.com/embed/')[-1].split('/')
+                if parts and len(parts[0]) == 11:
+                    return parts[0]
+        
+        # Handle Twitch VODs
+        if self.is_twitch(clean_source):
+            match = re.search(r'(?:videos?|clip)/(\d+)', clean_source)
+            if match:
+                return f"twitch_{match.group(1)}"
+        
+        # Handle local files
+        if self.is_local_file(clean_source):
+            return f"file_{os.path.basename(clean_source)}"
+        
+        # Fallback: use a hash of the source string
+        return f"hash_{hash(clean_source) & 0xffffffff}"
 
 
     def is_processed(self, unique_id):
@@ -788,13 +894,31 @@ def main():
            whisper_subs.py -p [file.txt]
            whisper_subs.py -l | --list
            whisper_subs.py -c | --continue
-        """
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process a single video
+  whisper_subs.py large https://youtu.be/DfU6llvIMcM
+  
+  # Process multiple videos from clipboard (one per line)
+  whisper_subs.py large
+  
+  # Process from a file containing URLs (one per line)
+  whisper_subs.py large -p my_videos.txt
+  
+  # Continue the last unfinished job
+  whisper_subs.py --continue
+  
+  # List all jobs
+  whisper_subs.py --list
+"""
     )
     
     # Model and source arguments
     model_group = parser.add_argument_group('Source and Model')
     model_group.add_argument('model', nargs='?', 
-                           help="Whisper model name/index. Required unless using -l, -c, or -p.")
+                           help="Whisper model name/index (e.g., 'tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3')")
     model_group.add_argument('source', nargs='?', 
                            help="URL, local file/directory path, or multiple paths/URLs separated by newlines.")
     
@@ -811,17 +935,21 @@ def main():
     # Processing options
     process_group = parser.add_argument_group('Processing Options')
     process_group.add_argument('-g', '--gpu', action='store_true', 
-                             help="Use GPU (CUDA).")
+                             help="Use GPU (CUDA) if available.")
     process_group.add_argument('--device', default='cpu', 
-                             help="Device to use ('cpu', 'cuda').")
+                             help="Device to use ('cpu', 'cuda', 'mps'). Default: 'cpu'")
     process_group.add_argument('--compute', default='int8', 
-                             help="Compute type ('int8', 'float16').")
+                             help="Compute type ('int8', 'float16'). Default: 'int8'")
     process_group.add_argument('-f', '--force', action='store_true', 
                              help="Force transcription even if already processed.")
     process_group.add_argument('-i', '--ignore-subs', action='store_true', 
                              help="Ignore existing subtitles.")
     process_group.add_argument('-lang', '--language', 
                              help="Language code for subtitle priority.")
+    process_group.add_argument('--cross-tier', action='store_true',
+                             help="Allow comparison between multilingual and English-only models.")
+    process_group.add_argument('-r', '--run', action='store_true',
+                             help="Run mpv player after transcription.")
     process_group.add_argument('-r', '--run', action='store_true', 
                              help="Run mpv in background after transcription.")
     parser.add_argument('--cross-tier', action='store_true', dest='strict_language_tier',
@@ -836,21 +964,36 @@ def main():
 
     # Handle continue case first
     if args.continue_last:
-        job_or_source = get_last_unfinished_job()
-        if not job_or_source: 
+        job = get_last_unfinished_job()
+        if not job:
             print("No unfinished jobs to continue.")
-            return
-        print(f"Continuing job ID {job_or_source['id']}: {job_or_source['source']}")
-        model_to_use = job_or_source['model']
-    # Handle process file case
+            return 1  # Exit with error code
+        
+        tasks = job.get('tasks', [])
+        completed = len([t for t in tasks if t['status'] in ['completed', 'skipped', 'failed']])
+        total = len(tasks)
+        
+        print(f"Continuing job ID {job['id']}")
+        print(f"Source: {job['source']}")
+        print(f"Progress: {completed}/{total} tasks completed")
+        print(f"Model: {job['model']}")
+        
+        model_to_use = job['model']
+        job_or_source = job
     elif args.process_file is not None:
-        print(f"Reading sources from file: {args.process_file}")
-        sources = read_sources_from_file(args.process_file)
-        if not sources:
-            print(f"No valid sources found in {args.process_file}")
-            return
-        job_or_source = '\n'.join(sources)
-        model_to_use = args.model
+        try:
+            # Expand ~ in the file path
+            process_file = os.path.expanduser(args.process_file)
+            print(f"Reading sources from file: {process_file}")
+            sources = read_sources_from_file(process_file)
+            if not sources:
+                print(f"No valid sources found in {process_file}", file=sys.stderr)
+                return 1
+            job_or_source = '\n'.join(sources)
+            print(f"Found {len(sources)} sources to process")
+        except Exception as e:
+            print(f"Error reading process file: {e}", file=sys.stderr)
+            return 1
     else:
         # Handle normal source input
         job_or_source = args.source
@@ -859,11 +1002,24 @@ def main():
         # If no source provided, check clipboard
         if not job_or_source:
             try:
-                job_or_source = pyperclip.paste().strip()
-                if not job_or_source: 
+                clipboard_content = pyperclip.paste().strip()
+                if not clipboard_content:
                     parser.error("No source provided and clipboard is empty.")
-                print(f"Using source from clipboard: {job_or_source}")
-            except Exception as e: 
+                
+                # Process clipboard content
+                sources = [line.strip() for line in clipboard_content.split('\n') if line.strip()]
+                if len(sources) == 1:
+                    print(f"Using source from clipboard: {sources[0]}")
+                    job_or_source = sources[0]
+                else:
+                    print(f"Found {len(sources)} sources in clipboard:")
+                    for i, src in enumerate(sources[:5], 1):
+                        print(f"  {i}. {src[:80]}{'...' if len(src) > 80 else ''}")
+                    if len(sources) > 5:
+                        print(f"  ... and {len(sources) - 5} more"
+                              " (processing all in a single batch)")
+                    job_or_source = '\n'.join(sources)
+            except Exception as e:
                 parser.error(f"No source provided and could not read clipboard: {e}")
     
     if not model_to_use: 

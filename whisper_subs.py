@@ -198,41 +198,93 @@ class WhisperSubs:
         return filename.strip()
 
     def resolve_source_to_tasks(self, source):
-        self.log(f"Resolving source: {source}")
-        task_sources = []
+        """Resolve source to tasks (eager loading, kept for backward compatibility)."""
+        self.log(f"[DEPRECATED] Using eager loading for source: {source}")
+        return list(self.resolve_source_to_tasks_lazy(source))
+
+    def resolve_source_to_tasks_lazy(self, source):
+        """Generator that yields tasks one at a time instead of resolving all upfront."""
+        self.log(f"Resolving source (lazy): {source}")
+        
+        # Clean YouTube URLs
         if "youtu" in source and '&llst=' in source:
-            listeqPosition = source.find('&llst=')
-            if listeqPosition != -1:
-                source = source[:listeqPosition]
+            source = source[:source.find('&llst=')]
+        
+        # Local directory - yield files one by one
         if self.is_local_dir(source):
             self.log(f"Source is a local directory.")
             for root, _, files in os.walk(source):
                 for file in files:
                     if file.lower().endswith(('.mp3', '.wav', '.flac', '.m4a', '.ogg', '.mkv')):
-                        task_sources.append(os.path.join(root, file))
+                        file_path = os.path.join(root, file)
+                        yield {
+                            "source": file_path,
+                            "status": "pending",
+                            "title": os.path.basename(file_path)
+                        }
+        
+        # Single local file
         elif self.is_local_file(source):
             self.log("Source is a single local file.")
-            task_sources.append(source)
+            yield {
+                "source": source,
+                "status": "pending",
+                "title": os.path.basename(source)
+            }
+        
+        # Twitch channel - yield VODs one by one
         elif twitch_username := self.is_twitch_channel(source):
             self.log(f"Source is Twitch channel: {twitch_username}")
             downloader = twitch_vod.StreamlinkVODDownloader()
             user_id = downloader.get_user_id_by_login(twitch_username)
             if user_id:
                 vods = downloader.get_all_vods(user_id)
-                task_sources = [f"https://www.twitch.tv/videos/{vod['id']}" for vod in vods]
-        elif self.is_channel_or_playlist_url(source):
-            self.log(f"Source is YouTube channel/playlist.")
-            ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True, 'ignoreerrors': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(source, download=False)
-                if info and 'entries' in info:
-                    task_sources = [entry['url'] for entry in info.get('entries', []) if entry]
-        else: # Assumed single URL or file
-            self.log("Source is a single URL or file.")
-            task_sources.append(source)
+                for vod in vods:
+                    vod_url = f"https://www.twitch.tv/videos/{vod['id']}"
+                    yield {
+                        "source": vod_url,
+                        "status": "pending",
+                        "title": vod.get('title', f"VOD {vod['id']}")
+                    }
         
-        self.log(f"Resolved to {len(task_sources)} tasks.")
-        return task_sources
+        # YouTube channel/playlist - yield videos one by one using pagination
+        elif self.is_channel_or_playlist_url(source):
+            self.log(f"Source is YouTube channel/playlist (streaming entries).")
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,  # Don't download full metadata
+                'ignoreerrors': True,
+                'playlistend': None,  # Process all videos
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    # extract_info returns a generator if extract_flat is True
+                    info = ydl.extract_info(source, download=False)
+                    
+                    if info and 'entries' in info:
+                        for i, entry in enumerate(info['entries'], 1):
+                            if entry and entry.get('url'):
+                                self.log(f"Discovered video {i}: {entry.get('title', 'Unknown')}")
+                                yield {
+                                    "source": entry['url'],
+                                    "status": "pending",
+                                    "title": entry.get('title', 'Unknown')
+                                }
+                            else:
+                                self.log(f"Skipping invalid entry {i}")
+                except Exception as e:
+                    self.log(f"Error resolving playlist/channel: {e}")
+        
+        # Single URL
+        else:
+            self.log("Source is a single URL.")
+            yield {
+                "source": source,
+                "status": "pending",
+                "title": os.path.basename(source)
+            }
     def check_and_download_subs(self, url, output_dir, title):
         if self.ignore_subs: 
             return False
@@ -552,34 +604,79 @@ class WhisperSubs:
         except Exception as e:
             self.log(f"Error launching mpv: {e}")
     
-    def process(self, job_or_source):
-        job = job_or_source if isinstance(job_or_source, dict) else add_job(job_or_source, self.model_name)
-        if "\n" in job['source']:
-            job['source'] = job['source'].split('\n')
-        else:
-            job['source'] = [job['source']]
-        if job['status'] == 'initializing':
-            tasks = []
-            for src in job['source']:
-                tasks.extend([{"source": src, "status": "pending", "title": os.path.basename(src)} for src in self.resolve_source_to_tasks(src)])
-            update_job(job['id'], {"tasks": tasks, "status": "processing" if tasks else "completed"})
-            job['tasks'], job['status'] = tasks, "processing"
-
-        self.log(f"Starting job {job['id']} for source: {job['source']}")
-        for task in job['tasks']:
-            if task['status'] == 'pending':
+    def process_with_lazy_resolution(self, job):
+        """Process a job using lazy task resolution.
+        
+        Tasks are resolved and processed one at a time, with progress saved after each.
+        """
+        self.log(f"Starting job {job['id']} with lazy resolution")
+        
+        # Handle multiple sources
+        sources = job['source'] if isinstance(job['source'], list) else [job['source']]
+        
+        # Get existing tasks to know where to resume from
+        existing_tasks = job.get('tasks', [])
+        processed_sources = {task['source'] for task in existing_tasks 
+                           if task['status'] in ['completed', 'skipped', 'failed']}
+        
+        total_processed = len(processed_sources)
+        total_discovered = len(existing_tasks)
+        
+        update_job(job['id'], {"status": "processing"})
+        
+        # Process each source
+        for source in sources:
+            self.log(f"Processing source: {source}")
+            
+            # Use lazy generator to get tasks one by one
+            for task in self.resolve_source_to_tasks_lazy(source):
+                total_discovered += 1
+                
+                # Skip if already processed
+                if task['source'] in processed_sources:
+                    self.log(f"Skipping already processed: {task['title']}")
+                    continue
+                
+                # Add task to job
+                existing_tasks.append(task)
+                update_job(job['id'], {"tasks": existing_tasks})
+                
+                # Process the task
+                self.log(f"Processing [{total_processed + 1}/{total_discovered}]: {task['title']}")
                 self.process_task(job['id'], task)
-
-        # Get the updated job to get current task statuses
-        updated_jobs = get_jobs()
-        target_job = next((t for t in updated_jobs if t['id'] == job['id']), None)
-        if target_job:
-            final_statuses = [task['status'] for task in target_job['tasks']]
-        else:
-            final_statuses = []
-        final_status = "completed" if all(s in ['completed', 'skipped', 'failed'] for s in final_statuses) else "processing"
+                
+                # Update progress
+                total_processed += 1
+                processed_sources.add(task['source'])
+                
+                # Update job status after each task
+                updated_jobs = get_jobs()
+                current_job = next((j for j in updated_jobs if j['id'] == job['id']), None)
+                if current_job:
+                    self.log(f"Progress: {total_processed}/{total_discovered} tasks completed")
+        
+        # Mark job as completed
+        final_status = "completed"
         update_job(job['id'], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
+
+    def process(self, job_or_source):
+        """Main processing entry point."""
+        # Create or resume job
+        if isinstance(job_or_source, dict):
+            job = job_or_source
+        else:
+            job = add_job(job_or_source, self.model_name)
+        
+        # Normalize source to list
+        if isinstance(job['source'], str):
+            if "\n" in job['source']:
+                job['source'] = job['source'].split('\n')
+            else:
+                job['source'] = [job['source']]
+        
+        # Use lazy resolution for better performance and resume capability
+        self.process_with_lazy_resolution(job)
 def main():
     parser = argparse.ArgumentParser(description="Transcribe audio from various sources.", usage="whisper_subs.py <model> [source] [options]")
     parser.add_argument('model', nargs='?', help="Whisper model name/index. Required unless using -l or -c.")

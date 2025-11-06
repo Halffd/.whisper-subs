@@ -108,7 +108,7 @@ def list_jobs():
 
 # --- Core Class ---
 class WhisperSubs:
-    def __init__(self, model_name, device, compute_type, force, ignore_subs, sub_lang, run_mpv=False):
+    def __init__(self, model_name, device, compute_type, force, ignore_subs, sub_lang, run_mpv=False, strict_language_tier=True):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
@@ -116,6 +116,7 @@ class WhisperSubs:
         self.ignore_subs = ignore_subs
         self.sub_lang = sub_lang
         self.run_mpv = run_mpv
+        self.strict_language_tier = strict_language_tier
         self.log_file = None
         self.channel_name = "unknown_channel"
         self.delay = 30
@@ -160,32 +161,56 @@ class WhisperSubs:
             return os.path.basename(url), "unknown_channel"
 
     def clean_youtube_url(self, url):
-        """Remove playlist and other parameters from YouTube URLs."""
-        if not isinstance(url, str):
+        """Clean YouTube URLs by removing tracking parameters and extracting just the video ID.
+        
+        Handles:
+        - Full URLs (youtube.com/watch?v=ID)
+        - Short URLs (youtu.be/ID)
+        - URLs with timestamps, playlists, etc.
+        """
+        if not isinstance(url, str) or not url.strip():
             return url
             
-        # Handle YouTube URLs
-        if 'youtube.com/watch' in url or 'youtu.be/' in url:
+        url = url.strip()
+        
+        # Handle youtu.be short links
+        if 'youtu.be/' in url:
+            # Extract the video ID (the part after youtu.be/)
+            video_id = url.split('youtu.be/')[-1].split('?')[0].split('&')[0].split('#')[0]
+            if len(video_id) == 11:  # YouTube video IDs are always 11 characters
+                return f"https://youtu.be/{video_id}"
+            return url  # Return original if we can't extract a valid ID
+            
+        # Handle full YouTube URLs
+        if 'youtube.com/watch' in url or 'youtube.com/embed/' in url:
             from urllib.parse import urlparse, parse_qs, urlunparse
             
-            # Parse the URL
-            parsed = urlparse(url)
-            
-            # For youtu.be short links
-            if 'youtu.be' in parsed.netloc:
-                video_id = parsed.path.lstrip('/')
-                return f"https://youtu.be/{video_id.split('?')[0]}"
+            try:
+                # Parse the URL
+                parsed = urlparse(url)
                 
-            # For full YouTube URLs
-            if 'youtube.com' in parsed.netloc:
-                query = parse_qs(parsed.query)
-                if 'v' in query:
-                    # Keep only the video ID parameter
-                    clean_query = f"v={query['v'][0]}"
-                    # Rebuild the URL
-                    parsed = parsed._replace(query=clean_query, fragment='')
-                    return urlunparse(parsed)
+                # Extract video ID from the query parameters
+                if 'youtube.com/watch' in url:
+                    query = parse_qs(parsed.query)
+                    if 'v' in query:
+                        video_id = query['v'][0].split('&')[0]  # Get just the ID part
+                        if len(video_id) == 11:  # Validate it's a proper YouTube ID
+                            # Rebuild URL with just the video ID
+                            clean_query = f"v={video_id}"
+                            return urlunparse(parsed._replace(query=clean_query, fragment=''))
+                
+                # Handle embed URLs
+                elif 'youtube.com/embed/' in url:
+                    path_parts = parsed.path.split('/')
+                    if len(path_parts) >= 3:
+                        video_id = path_parts[2].split('?')[0]
+                        if len(video_id) == 11:
+                            return f"https://youtu.be/{video_id}"
+                            
+            except Exception as e:
+                self.log(f"Error cleaning URL {url}: {e}")
         
+        # Return original URL if we couldn't clean it
         return url
 
     def clean_filename(self, filename):
@@ -313,7 +338,7 @@ class WhisperSubs:
             # Get timestamp from video info if available
             timestamp = info.get('timestamp', '')
             date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-            timeday = date_time.strftime('%Y-%m-%d')
+            timeday = date_time.strftime('%Y-%m-%d_%H-%M')
             
             # Create base filename with timestamp and cleaned title
             safe_title = f"{timeday}_{self.clean_filename(title)}"
@@ -378,7 +403,7 @@ class WhisperSubs:
                     # Get timestamp and format it
                     timestamp = info.get('timestamp', '')
                     date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-                    timeday = date_time.strftime('%Y-%m-%d')
+                    timeday = date_time.strftime('%Y-%m-%d_%H-%M')
                     
                     # Clean and format the title
                     clean_title = self.clean_filename(info.get('title', 'unknown'))
@@ -412,7 +437,7 @@ class WhisperSubs:
                         # Get timestamp and format it
                         timestamp = info.get('timestamp', '')
                         date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-                        timeday = date_time.strftime('%Y-%m-%d')
+                        timeday = date_time.strftime('%Y-%m-%d_%H-%M')
                         
                         # Clean and format the title
                         clean_title = self.clean_filename(info.get('title', 'unknown'))
@@ -450,7 +475,7 @@ class WhisperSubs:
                                 return None
                             timestamp = info.get('timestamp', '')
                             date_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
-                            timeday = date_time.strftime('%Y-%m-%d')
+                            timeday = date_time.strftime('%Y-%m-%d_%H-%M')
                             title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
                             title = f"{title}.{self.model_name}"
                         
@@ -494,14 +519,80 @@ class WhisperSubs:
         if self.is_local_file(source): return os.path.basename(source)
         return source
 
+
     def is_processed(self, unique_id):
-        if not os.path.exists(HISTORY_FILE): return False
+        """
+        Check if a video has been processed with this model or a better one.
+        
+        Logic:
+        - If processed with exact same model → skip
+        - If processed with a larger/better model → skip
+        - If processed with smaller/worse model → re-process
+        
+        Model hierarchy:
+        - tiny < base < small < medium < large < large-v2 < large-v3
+        - English models (.en) are separate: tiny.en < base.en < small.en < medium.en
+        - Distil models are treated as their base equivalents
+        
+        Args:
+            unique_id: Video identifier to check
+            
+        Controlled by --cross-tier flag:
+        - False (default): Strict separation - only compare within same language tier
+        - True: Allow cross-tier comparison using normalized indices
+        (removes .en offset so large-v3 > medium.en works correctly)
+        """
+        if not os.path.exists(HISTORY_FILE):
+            return False
+        
+        # Get current model info
+        current_model_index = model.getIndex(self.model_name)
+        if current_model_index == -1:
+            return False
+        
+        current_is_english = '.en' in self.model_name
+        
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             for line in f:
-                parts = line.strip().split(); 
-                if len(parts) >= 2 and parts[0] == unique_id and parts[1] == self.model_name: return True
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                
+                history_id = parts[0]
+                history_model = parts[1]
+                
+                if history_id != unique_id:
+                    continue
+                
+                history_model_index = model.getIndex(history_model)
+                if history_model_index == -1:
+                    continue
+                
+                history_is_english = '.en' in history_model
+                
+                # === IMPROVED CROSS-TIER LOGIC ===
+                if self.strict_language_tier:
+                    # STRICT MODE: Can only compare models of same language type
+                    if current_is_english != history_is_english:
+                        continue
+                    
+                    # Same tier: Direct comparison
+                    if history_model_index >= current_model_index:
+                        return True
+                else:
+                    # PERMISSIVE MODE: Normalize indices for fair comparison
+                    # Remove the .en offset (indices 7-10 become 0-3)
+                    current_normalized = current_model_index - 7 if current_is_english else current_model_index
+                    history_normalized = history_model_index - 7 if history_is_english else history_model_index
+                    
+                    # Now compare normalized values
+                    # large-v3 (6) vs medium.en (10 -> 3): 6 >= 3 → large-v3 wins ✅
+                    # medium.en (10 -> 3) vs large-v3 (6): 3 >= 6 → re-process ✅
+                    if history_normalized >= current_normalized:
+                        return True
+                # ==================================
+        
         return False
-
     def mark_as_processed(self, unique_id):
         with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{unique_id} {self.model_name}\n")
@@ -677,19 +768,66 @@ class WhisperSubs:
         
         # Use lazy resolution for better performance and resume capability
         self.process_with_lazy_resolution(job)
+def read_sources_from_file(filename):
+    """Read sources from a file, one per line, ignoring empty lines and comments."""
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            return [line.strip() for line in f 
+                   if line.strip() and not line.strip().startswith('#')]
+    except FileNotFoundError:
+        print(f"Error: File not found: {filename}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading file {filename}: {e}", file=sys.stderr)
+        sys.exit(1)
+
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe audio from various sources.", usage="whisper_subs.py <model> [source] [options]")
-    parser.add_argument('model', nargs='?', help="Whisper model name/index. Required unless using -l or -c.")
-    parser.add_argument('source', nargs='?', help="URL, local file/directory path. If empty, checks clipboard.")
-    parser.add_argument('-l', '--list', action='store_true', help="List all jobs and exit.")
-    parser.add_argument('-c', '--continue', dest='continue_last', action='store_true', help="Continue the last unfinished job.")
-    parser.add_argument('-g', '--gpu', action='store_true', help="Use GPU (CUDA).")
-    parser.add_argument('--device', default='cpu', help="Device to use ('cpu', 'cuda').")
-    parser.add_argument('--compute', default='int8', help="Compute type ('int8', 'float16').")
-    parser.add_argument('-f', '--force', action='store_true', help="Force transcription even if already processed.")
-    parser.add_argument('-i', '--ignore-subs', action='store_true', help="Ignore existing subtitles.")
-    parser.add_argument('-lang', '--language', help="Language code for subtitle priority.")
-    parser.add_argument('-r', '--run', action='store_true', help="Run mpv in background after transcription.")
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio from various sources.",
+        usage="""whisper_subs.py <model> [source] [options]
+           whisper_subs.py -p [file.txt]
+           whisper_subs.py -l | --list
+           whisper_subs.py -c | --continue
+        """
+    )
+    
+    # Model and source arguments
+    model_group = parser.add_argument_group('Source and Model')
+    model_group.add_argument('model', nargs='?', 
+                           help="Whisper model name/index. Required unless using -l, -c, or -p.")
+    model_group.add_argument('source', nargs='?', 
+                           help="URL, local file/directory path, or multiple paths/URLs separated by newlines.")
+    
+    # Action arguments
+    action_group = parser.add_argument_group('Actions')
+    action_group.add_argument('-l', '--list', action='store_true', 
+                            help="List all jobs and exit.")
+    action_group.add_argument('-c', '--continue', dest='continue_last', 
+                            action='store_true', 
+                            help="Continue the last unfinished job.")
+    action_group.add_argument('-p', '--process-file', nargs='?', const='Youtube-Subs/process.txt',
+                            help="Read sources from a file (one per line). If no file is specified, uses 'Youtube-Subs/process.txt'.")
+    
+    # Processing options
+    process_group = parser.add_argument_group('Processing Options')
+    process_group.add_argument('-g', '--gpu', action='store_true', 
+                             help="Use GPU (CUDA).")
+    process_group.add_argument('--device', default='cpu', 
+                             help="Device to use ('cpu', 'cuda').")
+    process_group.add_argument('--compute', default='int8', 
+                             help="Compute type ('int8', 'float16').")
+    process_group.add_argument('-f', '--force', action='store_true', 
+                             help="Force transcription even if already processed.")
+    process_group.add_argument('-i', '--ignore-subs', action='store_true', 
+                             help="Ignore existing subtitles.")
+    process_group.add_argument('-lang', '--language', 
+                             help="Language code for subtitle priority.")
+    process_group.add_argument('-r', '--run', action='store_true', 
+                             help="Run mpv in background after transcription.")
+    parser.add_argument('--cross-tier', action='store_true', dest='strict_language_tier',
+                       help="Allow comparison between multilingual and English-only models. "
+                            "By default, large-v3 and medium.en are treated as incomparable. "
+                            "Use this flag to compare them by raw model index.")
     args = parser.parse_args()
 
     if args.list: 
@@ -704,6 +842,15 @@ def main():
             return
         print(f"Continuing job ID {job_or_source['id']}: {job_or_source['source']}")
         model_to_use = job_or_source['model']
+    # Handle process file case
+    elif args.process_file is not None:
+        print(f"Reading sources from file: {args.process_file}")
+        sources = read_sources_from_file(args.process_file)
+        if not sources:
+            print(f"No valid sources found in {args.process_file}")
+            return
+        job_or_source = '\n'.join(sources)
+        model_to_use = args.model
     else:
         # Handle normal source input
         job_or_source = args.source
@@ -716,8 +863,8 @@ def main():
                 if not job_or_source: 
                     parser.error("No source provided and clipboard is empty.")
                 print(f"Using source from clipboard: {job_or_source}")
-            except Exception: 
-                parser.error("No source provided and could not read clipboard.")
+            except Exception as e: 
+                parser.error(f"No source provided and could not read clipboard: {e}")
     
     if not model_to_use: 
         parser.error("Model argument is required unless using --list or --continue.")
@@ -729,7 +876,8 @@ def main():
         force=args.force, 
         ignore_subs=args.ignore_subs, 
         sub_lang=args.language,
-        run_mpv=args.run
+        run_mpv=args.run,
+        strict_language_tier=args.strict_language_tier
     )
     processor.process(job_or_source)
 

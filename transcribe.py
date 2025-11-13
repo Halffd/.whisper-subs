@@ -262,6 +262,9 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
         compute_type = best['compute_type']
         write(f"Selected model: {model_name} {compute_type}")
     compute_type = 'int8'
+    if not model_name in model_names:
+        model_name = model.getName(model_name)
+    write(f"Transcribe Model name: {model_name}")
     if model_name in model_names:
         i = model_names.index(model_name)
         
@@ -596,7 +599,7 @@ def create_helper_files(dir_path, subtitle_file, url):
         #if subtitle_file is not a full path, add Documents/Youtube-Subs to the path
         if not any(x in subtitle_file for x in ['/', '\\']):
             subtitle_file = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs", subtitle_file)
-        base_name = os.path.splitext(os.path.basename(subtitle_file))[0]
+        base_name = os.path.splitext(os.path.basename(subtitle_file))[0].replace('.unfinished','')
         print(f"Base name: {base_name}")
         print(f"Dir path: {dir_path}")
         print(f"URL: {url}")

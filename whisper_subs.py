@@ -27,7 +27,7 @@ CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", APP_NAME)
 OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
 JOBS_FILE = os.path.join(CONFIG_DIR, "jobs.json")
 HISTORY_FILE = os.path.join(OUTPUT_DIR, "history.txt")
-
+PROCESS_FILE = os.path.join(OUTPUT_DIR, "process.txt")
 # Ensure config directories exist
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -372,7 +372,7 @@ class WhisperSubs:
         if self.ignore_subs:
             return False
         
-        self.log(f"Checking for existing subtitles...")
+        self.log("Checking for existing subtitles...")
         
         try:
             # Ultra-minimal options for just checking subs
@@ -381,7 +381,7 @@ class WhisperSubs:
                 'no_warnings': True,
                 'skip_download': True,
                 'writesubtitles': False,  # Don't write yet
-                'listsubtitles': True,
+                'listsubtitles': False,   # Don't list all available subtitles
                 'socket_timeout': 10,
                 'no_check_certificate': True,
             }
@@ -505,11 +505,11 @@ class WhisperSubs:
                                     return existing_file
             except Exception as e:
                 self.log(f"Quick check failed: {e}")
-        
+
         # === STEP 2: Download the file ===
         original_cwd = os.getcwd()
         os.chdir(output_path)
-        
+
         # Define progress hook once outside the loop
         def progress_hook(d):
             """Show clean progress updates."""
@@ -532,9 +532,9 @@ class WhisperSubs:
             elif d['status'] == 'finished':
                 filename = os.path.basename(d.get('filename', 'unknown'))
                 self.log(f"Download complete: {filename}")
-        
+
         progress_hook.last_percent = -1
-        
+
         try:
             attempt = 0
             max_attempts = 3
@@ -551,17 +551,17 @@ class WhisperSubs:
                         'socket_timeout': 10,
                         'no_check_certificate': True,
                     }
-                    
+
                     if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
                         info_opts['cookiesfrombrowser'] = (self.specified_browser,)
-                    
+
                     with yt_dlp.YoutubeDL(info_opts) as ydl:
                         info = ydl.extract_info(clean_url, download=False)
-                        
+
                         if info is None:
                             self.log(f"Failed to get video info for {clean_url}")
                             return None
-                    
+
                     # Build filename
                     timestamp = info.get('timestamp', '')
                     if timestamp:
@@ -569,10 +569,10 @@ class WhisperSubs:
                         timeday = date_time.strftime('%Y-%m-%d_%H-%M')
                     else:
                         timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
-                    
+
                     clean_title = self.clean_filename(info.get('title', 'unknown'))
                     expected_base = f"{timeday}_{clean_title}.{self.model_name}"
-                    
+
                     # Download with proper template
                     download_opts = {
                         'outtmpl': f'{expected_base}.%(ext)s',  # Use our format
@@ -595,45 +595,45 @@ class WhisperSubs:
                         'http_chunk_size': 10485760,
                         'concurrent_fragment_downloads': 5,
                     }
-                    
+
                     if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
                         download_opts['cookiesfrombrowser'] = (self.specified_browser,)
-                    
+
                     self.log(f"Starting download (attempt {attempt}/{max_attempts})...")
-                    
+
                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                         ydl.download([clean_url])
-                    
+
                     # Find the downloaded file
                     for ext in ['.m4a', '.mp3', '.webm', '.ogg']:
                         predicted_path = f"{expected_base}{ext}"
                         full_path = os.path.join(output_path, predicted_path)
-                        
+
                         if os.path.exists(full_path):
                             self.log(f"Successfully downloaded: {full_path}")
                             return full_path
-                    
+
                     # Fallback: find most recent audio file
                     audio_files = [
                         f for f in os.listdir('.')
                         if f.endswith(('.mp3', '.m4a', '.webm', '.ogg'))
                     ]
-                    
+
                     if audio_files:
                         # Get most recent file
                         latest_file = max(audio_files, key=lambda f: os.path.getmtime(f))
                         full_path = os.path.join(output_path, latest_file)
                         self.log(f"Found audio file: {full_path}")
                         return full_path
-                    
+
                     self.log(f"Download completed but file not found: {expected_base}")
                     return None
-                    
+
                 except Exception as e:
                     error_str = str(e).lower()
                     
                     # Handle rate limiting with exponential backoff
-                    if 'rate' in error_str or 'unavailable' in error_str or '429' in error_str:
+                    if ('rate' in error_str or 'unavailable' in error_str or '429' in error_str) and attempt < max_attempts:
                         if attempt < max_attempts:
                             delay = min(30 * (2 ** attempt), 3600)  # 30s, 60s, 120s...
                             self.log(f"Rate limited. Retrying in {delay}s... (attempt {attempt}/{max_attempts})")
@@ -788,7 +788,7 @@ class WhisperSubs:
             if is_local: 
                 self.channel_name = "local_files"
             update_task_status(job_id, task_source, 'processing', title)
-
+            self.model_name = model.getName(self.model_name)
             channel_dir = os.path.join(OUTPUT_DIR, self.clean_filename(self.channel_name))
             os.makedirs(channel_dir, exist_ok=True)
 
@@ -929,9 +929,8 @@ class WhisperSubs:
         update_job(job['id'], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
 
-    def process(self, job_or_source):
+    def process(self, job_or_source, source_model=None):
         """Main processing entry point."""
-        # Create or resume job
         if isinstance(job_or_source, dict):
             job = job_or_source
         else:
@@ -943,15 +942,56 @@ class WhisperSubs:
                 job['source'] = job['source'].split('\n')
             else:
                 job['source'] = [job['source']]
-        
+
         # Use lazy resolution for better performance and resume capability
         self.process_with_lazy_resolution(job)
+
 def read_sources_from_file(filename):
-    """Read sources from a file, one per line, ignoring empty lines and comments."""
+    """
+    Read sources from a file, one per line, with optional model specifications.
+    
+    Format:
+    <url> [model_name_or_index]
+    
+    Example:
+    https://www.youtube.com/watch?v=example1 large-v3
+    https://www.youtube.com/watch?v=example2 10
+    https://www.youtube.com/watch?v=example3
+    """
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f 
-                   if line.strip() and not line.strip().startswith('#')]
+            sources = []
+            for i, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                    
+                # Split on whitespace, but keep URLs with spaces together
+                parts = line.split()
+                if not parts:
+                    continue
+                    
+                # The first part is the URL, the rest is optional model name
+                url = parts[0]
+                model = parts[1] if len(parts) > 1 else None
+                
+                # Basic URL validation
+                if not (url.startswith('http') or url.startswith('www.')):
+                    print(f"Warning: Line {i} doesn't appear to be a valid URL: {url}", file=sys.stderr)
+                    continue
+                    
+                sources.append({
+                    'url': url,
+                    'model': model
+                })
+            
+            if not sources:
+                print(f"Error: No valid sources found in {filename}", file=sys.stderr)
+                sys.exit(1)
+                
+            print(f"Found {len(sources)} valid sources to process")
+            return sources
+            
     except FileNotFoundError:
         print(f"Error: File not found: {filename}", file=sys.stderr)
         sys.exit(1)
@@ -1001,7 +1041,7 @@ Examples:
     action_group.add_argument('-c', '--continue', dest='continue_last', 
                             action='store_true', 
                             help="Continue the last unfinished job.")
-    action_group.add_argument('-p', '--process-file', nargs='?', const='Youtube-Subs/process.txt',
+    action_group.add_argument('-p', '--process-file', nargs='?', const=PROCESS_FILE,
                             help="Read sources from a file (one per line). If no file is specified, uses 'Youtube-Subs/process.txt'.")
     
     # Processing options
@@ -1054,8 +1094,28 @@ Examples:
             if not sources:
                 print(f"No valid sources found in {process_file}", file=sys.stderr)
                 return 1
-            job_or_source = '\n'.join(sources)
-            print(f"Found {len(sources)} sources to process")
+
+            # For process files, handle each source individually with its model
+            for source_info in sources:
+                # Use the model from source_info if present, otherwise use the default args.model
+                source_model = source_info['model'] or args.model
+                if source_model is None:
+                    print("Error: No model specified for source and no default model provided. Either specify a model in your process file or provide a model argument (e.g., 'wsub large -p').", file=sys.stderr)
+                    return 1
+                model_for_this_source = model.getName(source_model)
+                processor = WhisperSubs(
+                    model_name=model_for_this_source,
+                    device='cuda' if args.gpu else args.device,
+                    compute_type=args.compute,
+                    force=args.force,
+                    ignore_subs=args.ignore_subs,
+                    sub_lang=args.language,
+                    run_mpv=args.run,
+                    strict_language_tier=args.cross_tier
+                )
+                processor.process(source_info['url'])
+                
+            return 0  # Exit early since we processed all files
         except Exception as e:
             print(f"Error reading process file: {e}", file=sys.stderr)
             return 1
@@ -1063,7 +1123,8 @@ Examples:
         # Handle normal source input
         job_or_source = args.source
         model_to_use = args.model
-        
+        print(f"Model: {model_to_use} {model.getName(model_to_use)}")
+        model_to_use = model.getName(model_to_use)
         # If no source provided, check clipboard
         if not job_or_source:
             try:
@@ -1087,11 +1148,21 @@ Examples:
             except Exception as e:
                 parser.error(f"No source provided and could not read clipboard: {e}")
     
-    if not model_to_use: 
+    # Handle model selection
+    if args.continue_last:
+        model_to_use = model.getName(job['model'])
+    elif args.process_file:
+        # For process file, we'll get the model from the file or use default
+        # This will be handled in the process file loop
+        pass
+    elif not args.model and not any([args.list, args.continue_last]):
         parser.error("Model argument is required unless using --list or --continue.")
+    else:
+        model_to_use = model.getName(args.model)
     
+    # If we're processing a file, the model will be set per source in read_sources_from_file
     processor = WhisperSubs(
-        model_name=model.getName(model_to_use), 
+        model_name=model_to_use if not args.process_file else 'large',  # Default model for process file
         device='cuda' if args.gpu else args.device, 
         compute_type=args.compute, 
         force=args.force, 

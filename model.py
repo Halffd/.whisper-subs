@@ -42,6 +42,8 @@ def getName(value: str):
     into a valid model name string.
     """
     try:
+        if value in MODEL_NAMES:
+            return value
         # Check if the value is an integer index
         model_index = int(value)
         if 0 <= model_index < len(MODEL_NAMES):

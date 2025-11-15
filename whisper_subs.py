@@ -20,6 +20,7 @@ import transcribe
 import twitch_vod
 import model
 import yt_dlp
+import livestream_transcriber
 
 # --- Configuration ---
 APP_NAME = "WhisperSubs"
@@ -142,6 +143,17 @@ class WhisperSubs:
     def is_twitch(self, url): return url and 'twitch.tv' in urlparse(url).netloc
     def is_local_file(self, path): return path and os.path.exists(path)
     def is_local_dir(self, path): return path and os.path.isdir(path)
+    
+    def _strip_model_from_filename(self, filename):
+        """Strip any existing model name from filename to prevent duplicate model suffixes."""
+        # Import model module to access MODEL_NAMES
+        import model
+        title = filename
+        # Go through all model names and remove them if they appear in the filename
+        for model_name in model.MODEL_NAMES:
+            # Remove model name if it appears at the end (after the last dot) or with a dot before
+            title = re.sub(rf'\.{re.escape(model_name)}(?=\.\w+$|$)', '', title)
+        return title
 
     def is_channel_or_playlist_url(self, url):
         if not self.is_youtube(url) or ('v=' in url and 'list=' in url): return False
@@ -346,7 +358,50 @@ class WhisperSubs:
                                     }
             except Exception as e:
                 self.log(f"Error processing playlist: {e}")
-                
+
+        # Check for Twitch channel videos page specifically
+        elif self.is_twitch(source) and '/videos' in source and '/videos/' not in source:
+            # This is a Twitch channel videos page (e.g., twitch.tv/channel/videos)
+            self.log(f"Detected Twitch channel VOD page: {source}")
+
+            # Extract channel name from URL
+            import re
+            channel_match = re.search(r'twitch\.tv/([^/]+)/videos', source)
+            if channel_match:
+                channel_name = channel_match.group(1)
+                self.log(f"Fetching all VODs for channel: {channel_name}")
+
+                try:
+                    downloader = twitch_vod.StreamlinkVODDownloader()
+                    user_id = downloader.get_user_id_by_login(channel_name)
+
+                    if not user_id:
+                        self.log(f"Could not find Twitch user: {channel_name}")
+                        # Fallback to single source if API fails
+                        title, _ = self.get_video_info_cached(source)
+                        title = self.clean_filename(title)
+                        yield {"source": source, "status": "pending", "title": title}
+                        return
+
+                    vods = downloader.get_all_vods(user_id)
+                    self.log(f"Found {len(vods)} VODs")
+
+                    # Yield each VOD as a task
+                    for vod in vods:
+                        vod_url = f"https://www.twitch.tv/videos/{vod['id']}"
+                        title = self.clean_filename(vod['title'])
+                        yield {"source": vod_url, "status": "pending", "title": title}
+
+                    return  # Early exit after yielding all VODs
+
+                except Exception as e:
+                    self.log(f"Error fetching Twitch VODs: {e}")
+                    # Fallback to single source if API fails
+                    title, _ = self.get_video_info_cached(source)
+                    title = self.clean_filename(title)
+                    yield {"source": source, "status": "pending", "title": title}
+                    return
+
         else:
             self.log("Source is a single URL or file.")
             try:
@@ -360,12 +415,6 @@ class WhisperSubs:
             except Exception as e:
                 self.log(f"Error getting video info: {e}")
                 yield {"source": source, "status": "pending", "title": os.path.basename(source)}
-
-                yield {
-                    "source": source,
-                    "status": "pending",
-                    "title": os.path.basename(source)
-                }
     
     def check_and_download_subs(self, url, output_dir, title):
         """Check for subs with minimal overhead."""
@@ -464,6 +513,41 @@ class WhisperSubs:
         # Clean the URL first
         clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
         
+        # Special handling for Twitch VODs (individual videos) using twitch_vod module
+        if self.is_twitch(url) and '/videos/' in url:
+            self.log(f"Detected Twitch VOD: {url}, using twitch_vod module")
+            
+            # Extract VOD ID from URL
+            import re
+            vod_match = re.search(r'twitch\.tv/videos/(\d+)', url)
+            if vod_match:
+                vod_id = vod_match.group(1)
+                self.log(f"Extracted VOD ID: {vod_id}")
+                
+                try:
+                    downloader = twitch_vod.StreamlinkVODDownloader()
+                    # Get VOD info for the title
+                    vod_info = downloader.get_vod_info(vod_id)
+                    if not vod_info:
+                        self.log(f"Could not get info for VOD ID: {vod_id}")
+                        # Fall back to yt-dlp
+                        pass
+                    else:
+                        title = vod_info.get('title', f'vod_{vod_id}')
+                        # Use the twitch_vod module to download the VOD audio
+                        output_file = downloader.download_vod_audio(vod_id, title, vod_info.get('duration', 0))
+                        if output_file and os.path.exists(output_file):
+                            self.log(f"Successfully downloaded Twitch VOD: {output_file}")
+                            return output_file
+                        else:
+                            self.log(f"Twitch VOD download failed for ID: {vod_id}")
+                            # Fall back to yt-dlp
+                            pass
+                except Exception as e:
+                    self.log(f"Error downloading Twitch VOD with twitch_vod module: {e}")
+                    # Fall back to yt-dlp
+                    pass  # Continue with regular yt-dlp flow below
+        
         # === STEP 1: Check for existing files (fast) ===
         if not self.force:
             try:
@@ -491,18 +575,17 @@ class WhisperSubs:
                             timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
                         
                         clean_title = self.clean_filename(info.get('title', 'unknown'))
-                        base_title = f"{timeday}_{clean_title}"
+                        # Strip any existing model suffix to avoid duplicate model names
+                        title_without_model = self._strip_model_from_filename(clean_title)
+                        base_title = f"{timeday}_{title_without_model}"
                         
-                        # Check for existing files
+                        # Check for existing files with current model name only
                         for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
-                            for pattern in [
-                                f"{base_title}.{self.model_name}{ext}",
-                                f"{base_title}{ext}"
-                            ]:
-                                existing_file = os.path.join(output_path, pattern)
-                                if os.path.exists(existing_file):
-                                    self.log(f"File already exists: {existing_file}")
-                                    return existing_file
+                            pattern = f"{base_title}.{self.model_name}{ext}"
+                            existing_file = os.path.join(output_path, pattern)
+                            if os.path.exists(existing_file):
+                                self.log(f"File already exists: {existing_file}")
+                                return existing_file
             except Exception as e:
                 self.log(f"Quick check failed: {e}")
 
@@ -571,7 +654,9 @@ class WhisperSubs:
                         timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
 
                     clean_title = self.clean_filename(info.get('title', 'unknown'))
-                    expected_base = f"{timeday}_{clean_title}.{self.model_name}"
+                    # Strip any existing model suffix to avoid duplicate model names
+                    title_without_model = self._strip_model_from_filename(clean_title)
+                    expected_base = f"{timeday}_{title_without_model}.{self.model_name}"
 
                     # Download with proper template
                     download_opts = {
@@ -604,7 +689,7 @@ class WhisperSubs:
                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                         ydl.download([clean_url])
 
-                    # Find the downloaded file
+                    # Find the downloaded file based on expected name
                     for ext in ['.m4a', '.mp3', '.webm', '.ogg']:
                         predicted_path = f"{expected_base}{ext}"
                         full_path = os.path.join(output_path, predicted_path)
@@ -613,20 +698,7 @@ class WhisperSubs:
                             self.log(f"Successfully downloaded: {full_path}")
                             return full_path
 
-                    # Fallback: find most recent audio file
-                    audio_files = [
-                        f for f in os.listdir('.')
-                        if f.endswith(('.mp3', '.m4a', '.webm', '.ogg'))
-                    ]
-
-                    if audio_files:
-                        # Get most recent file
-                        latest_file = max(audio_files, key=lambda f: os.path.getmtime(f))
-                        full_path = os.path.join(output_path, latest_file)
-                        self.log(f"Found audio file: {full_path}")
-                        return full_path
-
-                    self.log(f"Download completed but file not found: {expected_base}")
+                    self.log(f"Download completed but expected file not found: {expected_base}")
                     return None
 
                 except Exception as e:
@@ -634,14 +706,10 @@ class WhisperSubs:
                     
                     # Handle rate limiting with exponential backoff
                     if ('rate' in error_str or 'unavailable' in error_str or '429' in error_str) and attempt < max_attempts:
-                        if attempt < max_attempts:
-                            delay = min(30 * (2 ** attempt), 3600)  # 30s, 60s, 120s...
-                            self.log(f"Rate limited. Retrying in {delay}s... (attempt {attempt}/{max_attempts})")
-                            time.sleep(delay)
-                            continue
-                        else:
-                            self.log(f"Max retry attempts reached. Giving up.")
-                            return None
+                        delay = min(30 * (2 ** attempt), 3600)  # 30s, 60s, 120s...
+                        self.log(f"Rate limited. Retrying in {delay}s... (attempt {attempt}/{max_attempts})")
+                        time.sleep(delay)
+                        continue
                     else:
                         self.log(f"Download failed: {e}")
                         return None
@@ -929,7 +997,7 @@ class WhisperSubs:
         update_job(job['id'], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
 
-    def process(self, job_or_source, source_model=None):
+    def process(self, job_or_source):
         """Main processing entry point."""
         if isinstance(job_or_source, dict):
             job = job_or_source
@@ -1061,6 +1129,7 @@ Examples:
     process_group.add_argument('--cross-tier', action='store_true',
                              help="Allow comparison between multilingual and English-only models.")
     process_group.add_argument('-r', '--run', action='store_true', help="Run player in background.")
+    process_group.add_argument('--live', action='store_true', help="Transcribe live streams in real-time (for Twitch/YouTube live streams).")
     args = parser.parse_args()
 
     if args.list: 
@@ -1160,18 +1229,62 @@ Examples:
     else:
         model_to_use = model.getName(args.model)
     
-    # If we're processing a file, the model will be set per source in read_sources_from_file
-    processor = WhisperSubs(
-        model_name=model_to_use if not args.process_file else 'large',  # Default model for process file
-        device='cuda' if args.gpu else args.device, 
-        compute_type=args.compute, 
-        force=args.force, 
-        ignore_subs=args.ignore_subs, 
-        sub_lang=args.language,
-        run_mpv=args.run,
-        strict_language_tier=args.cross_tier
-    )
-    processor.process(job_or_source)
+    # Handle live stream transcription separately
+    if args.live:
+        if not job_or_source or (isinstance(job_or_source, str) and not job_or_source.strip()):
+            print("Error: Live stream mode requires a URL", file=sys.stderr)
+            return 1
+        
+        # Extract URL if it's a string (might be a list if multiple sources)
+        source_url = job_or_source
+        if isinstance(job_or_source, list):
+            if len(job_or_source) != 1:
+                print("Error: Live stream mode requires exactly one URL", file=sys.stderr)
+                return 1
+            source_url = job_or_source[0]
+        elif "\n" in job_or_source:
+            # Handle multi-line input
+            sources = [line.strip() for line in job_or_source.split('\n') if line.strip()]
+            if len(sources) != 1:
+                print("Error: Live stream mode requires exactly one URL", file=sys.stderr)
+                return 1
+            source_url = sources[0]
+        
+        # Create live stream transcriber and start transcription
+        live_transcriber = livestream_transcriber.LiveStreamTranscriber(
+            model_name=model_to_use,
+            device='cuda' if args.gpu else args.device,
+            compute_type=args.compute,
+            output_dir=OUTPUT_DIR,
+            log_func=lambda msg: print(f"[LIVE] {msg}")
+        )
+        
+        try:
+            live_transcriber.start_transcription(source_url)
+            print("Live stream transcription completed")
+        except KeyboardInterrupt:
+            print("\nStopping live stream transcription...")
+            live_transcriber.stop()
+        except Exception as e:
+            print(f"Error during live stream transcription: {e}")
+            live_transcriber.stop()
+            return 1
+        
+        return 0  # Exit successfully after live transcription
+    
+    # Only create processor for non-process-file cases (file processing handled in loop above)
+    if not args.process_file:
+        processor = WhisperSubs(
+            model_name=model_to_use,
+            device='cuda' if args.gpu else args.device, 
+            compute_type=args.compute, 
+            force=args.force, 
+            ignore_subs=args.ignore_subs, 
+            sub_lang=args.language,
+            run_mpv=args.run,
+            strict_language_tier=args.cross_tier
+        )
+        processor.process(job_or_source)
 
 if __name__ == "__main__":
     main()

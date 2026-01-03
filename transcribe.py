@@ -150,9 +150,9 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
             device=device, 
             compute_type=compute_type,  # Use the compute_type parameter
             device_index=0,
-            cpu_threads=4
+            cpu_threads=os.cpu_count()
         )
-        
+
         # Process in smaller chunks
         result_segments, _ = whisper_model.transcribe(
             audio_file, 
@@ -160,7 +160,7 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
             vad_filter=True,
             chunk_size=20
         )
-        
+
         # Write to temporary file first
         with open(temp_srt, "w", encoding="utf-8") as srt:
             for i, segment in enumerate(result_segments, start=1):
@@ -314,7 +314,7 @@ def try_transcribe(file, current_model, srt_file, language, device, compute_type
             
             try:
                 ss_time = str(datetime.timedelta(seconds=resume_offset_seconds))
-                ffmpeg_command = ['ffmpeg', '-y', '-ss', ss_time, '-i', file, '-c:a', 'libmp3lame', resume_audio_path]
+                ffmpeg_command = ['/bin/ffmpeg', '-y', '-ss', ss_time, '-i', file, '-c:a', 'libmp3lame', resume_audio_path]
                 write(f"Creating partial audio file for resume...")
                 
                 result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)

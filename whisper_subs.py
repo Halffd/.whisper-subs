@@ -114,11 +114,12 @@ def list_jobs():
 
 # --- Core Class ---
 class WhisperSubs:
-    def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser=None, strict_language_tier=False):
+    def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser=None, strict_language_tier=False, force_retry=False):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
         self.force = force
+        self.force_retry = force_retry
         self.ignore_subs = ignore_subs
         self.sub_lang = sub_lang
         self.run_mpv = run_mpv
@@ -845,7 +846,7 @@ class WhisperSubs:
     def process_task(self, job_id, task):
         task_source = task['source']
         unique_id = self.get_unique_id(task_source)
-        if not self.force and self.is_processed(unique_id):
+        if not self.force_retry and self.is_processed(unique_id):
             self.log(f"Skipping task '{task_source}' - already processed.")
             update_task_status(job_id, task_source, 'skipped', task['title'])
             return
@@ -860,7 +861,7 @@ class WhisperSubs:
             channel_dir = os.path.join(OUTPUT_DIR, self.clean_filename(self.channel_name))
             os.makedirs(channel_dir, exist_ok=True)
 
-            if not is_local and self.check_and_download_subs(task_source, channel_dir, title):
+            if not is_local and self.check_and_download_subs(task_source, channel_dir, title) and not self.force:
                 self.log(f"Downloaded existing subtitle for '{title}'.")
                 self.mark_as_processed(unique_id)
                 update_task_status(job_id, task_source, 'skipped')
@@ -1122,13 +1123,14 @@ Examples:
                              help="Compute type ('int8', 'float16'). Default: 'int8'")
     process_group.add_argument('-f', '--force', action='store_true', 
                              help="Force transcription even if already processed.")
+    process_group.add_argument('-r', '--force-retry', action='store_true', help="Force retry transcription even if already completed (ignores existing subtitles).")
     process_group.add_argument('-i', '--ignore-subs', action='store_true', 
                              help="Ignore existing subtitles.")
     process_group.add_argument('-lang', '--language', 
                              help="Language code for subtitle priority.")
     process_group.add_argument('--cross-tier', action='store_true',
                              help="Allow comparison between multilingual and English-only models.")
-    process_group.add_argument('-r', '--run', action='store_true', help="Run player in background.")
+    process_group.add_argument('-m', '--run', action='store_true', help="Run player in background.")
     process_group.add_argument('--live', action='store_true', help="Transcribe live streams in real-time (for Twitch/YouTube live streams).")
     args = parser.parse_args()
 
@@ -1180,7 +1182,8 @@ Examples:
                     ignore_subs=args.ignore_subs,
                     sub_lang=args.language,
                     run_mpv=args.run,
-                    strict_language_tier=args.cross_tier
+                    strict_language_tier=args.cross_tier,
+                    force_retry=args.force_retry
                 )
                 processor.process(source_info['url'])
                 

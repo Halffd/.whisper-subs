@@ -155,15 +155,32 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
 
         # Process in smaller chunks
         result_segments, _ = whisper_model.transcribe(
-            audio_file, 
+            audio_file,
             language=language,
             vad_filter=True,
+            vad_parameters=dict(
+                threshold=0.5,  # stricter threshold
+                min_silence_duration_ms=800,  # longer silence minimum
+                speech_pad_ms=400,  # more speech padding
+            ),
+            repetition_penalty=1.2,
+            no_repeat_ngram_size=3,
+            temperature=0.0,
+            suppress_tokens=[-1],  # suppress non-speech tokens
+            no_speech_threshold=0.6,  # raise threshold to filter more non-speech
             chunk_size=20
         )
 
+        # Convert segments generator to list for post-processing
+        segments_list = list(result_segments)
+
+        # Apply post-processing to remove garbage segments
+        segments_list = filter_garbage_segments(segments_list)
+        segments_list = merge_adjacent_identical_segments(segments_list)
+
         # Write to temporary file first
         with open(temp_srt, "w", encoding="utf-8") as srt:
-            for i, segment in enumerate(result_segments, start=1):
+            for i, segment in enumerate(segments_list, start=1):
                 start_time = format_timestamp(segment.start)
                 end_time = format_timestamp(segment.end)
                 srt.write(f"{i}\n")
@@ -413,8 +430,23 @@ try:
     print(f"Full log will be written to: {{log_file}}")
     
     model = faster_whisper.WhisperModel("{current_model}", device=device, compute_type=compute_type)
-    
-    segments, info = model.transcribe(r"{audio_to_transcribe}")
+
+    segments, info = model.transcribe(
+        r"{audio_to_transcribe}",
+        language={language_param},
+        vad_filter=True,
+        vad_parameters=dict(
+            threshold=0.5,  # stricter threshold
+            min_silence_duration_ms=800,  # longer silence minimum
+            speech_pad_ms=400,  # more speech padding
+        ),
+        repetition_penalty=1.2,
+        no_repeat_ngram_size=3,
+        temperature=0.0,
+        suppress_tokens=[-1],  # suppress non-speech tokens
+        no_speech_threshold=0.6,  # raise threshold to filter more non-speech
+        word_timestamps=False
+    )
     
     resume_offset = {resume_offset_seconds}
     
@@ -590,6 +622,76 @@ def write_srt_from_segments(segments, srt):
         srt.write(f"{start_time} --> {end_time}\n")
         srt.write(f"{segment.text}\n\n")
 
+HALLUCINATION_NAMES = {
+    "Sônia Ruberti",
+    "Tiago Anderson",
+    "Quintena Coelho",
+    "Anderson",
+    "Ruberti",
+}
+
+def is_whisper_entity(seg):
+    """Check if a segment contains hallucinated entities."""
+    t = seg.text.strip()
+
+    if t in HALLUCINATION_NAMES:
+        return True
+
+    # Access the segment's properties if available
+    # The attributes might not be available in all contexts, so handle safely
+    try:
+        if hasattr(seg, 'no_speech_prob') and seg.no_speech_prob > 0.5:
+            return True
+        if hasattr(seg, 'avg_logprob') and seg.avg_logprob < -1.2:
+            return True
+    except:
+        pass  # If properties aren't available, continue with other checks
+
+    if seg.end - seg.start < 0.6:
+        return True
+
+    return False
+
+def is_garbage(seg):
+    """Check if a segment contains garbage text that should be filtered out."""
+    # First check if it's a hallucinated entity
+    if is_whisper_entity(seg):
+        return True
+
+    text = seg.text.strip()
+    dur = seg.end - seg.start
+
+    if dur < 0.4:
+        return True
+    if len(text) <= 1:
+        return True
+    if text in {"え", "…", "...", "「", "」", "『", "』", "【", "】", "・"}:
+        return True
+    # Check for repeated characters like "えええ" or "あああ"
+    if len(set(text)) == 1 and len(text) > 2:  # All characters are the same
+        return True
+    # Check for repeated tokens like "次回予告" * n
+    if len(text) > 2 and text.count(text[0:2]) > len(text) // 2:
+        return True
+    return False
+
+def filter_garbage_segments(segments):
+    """Remove segments that are likely to be garbage."""
+    return [s for s in segments if not is_garbage(s)]
+
+def merge_adjacent_identical_segments(segments):
+    """Merge adjacent segments that have identical text."""
+    if not segments:
+        return segments
+
+    merged = []
+    for s in segments:
+        if merged and s.text.strip() == merged[-1].text.strip():
+            merged[-1].end = s.end
+        else:
+            merged.append(s)
+    return merged
+
 def create_helper_files(dir_path, subtitle_file, url):
     """Create helper files (HTML redirect, batch file, shell script)"""
     print(f"Creating helper files for {subtitle_file}")
@@ -659,6 +761,7 @@ if __name__ == "__main__":
         with open(srt_file, mode='w', encoding='utf-8') as srt:
             write_srt(json_file, srt)
         sys.exit(0)
+
     elif len(sys.argv) < 5:
         print("Usage: python script.py <audio_file> <model_name> <language> <device> <compute>")
         sys.exit(1)

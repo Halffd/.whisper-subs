@@ -8,7 +8,7 @@ Welcome to the .whisper-subs project! This repository contains various scripts a
 - **MKV File Selector**: Select and transcribe MKV files with a variety of models.
 - **Live Captioner**: A real-time captioning tool built with PyQt for easy viewing of transcriptions.
 - **Transcription Logs**: Maintain a detailed log of each transcription performed.
-- **Web Server Option**: Access transcription services through a web interface.
+- **API Server**: Access transcription services through a FastAPI web interface.
 - **AI Tools**: Ongoing development in the AI folder, including OCR transformers, LORA testing, and Torch tests.
 
 ## Installation
@@ -25,6 +25,24 @@ Welcome to the .whisper-subs project! This repository contains various scripts a
    ```bash
    pip install -r requirements.txt
    ```
+
+## API Server
+
+The project includes a FastAPI server for API-based transcription services.
+
+### Installation
+
+```bash
+pip install fastapi uvicorn[standard] pydantic
+```
+
+### Running the API Server
+
+```bash
+python start_api.py --host 0.0.0.0 --port 8000
+```
+
+API documentation will be available at http://localhost:8000/docs
 
 ## Usage
 

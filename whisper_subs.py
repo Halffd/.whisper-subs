@@ -1285,7 +1285,8 @@ Examples:
             ignore_subs=args.ignore_subs, 
             sub_lang=args.language,
             run_mpv=args.run,
-            strict_language_tier=args.cross_tier
+            strict_language_tier=args.cross_tier,
+            force_retry=args.force_retry
         )
         processor.process(job_or_source)
 

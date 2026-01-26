@@ -168,7 +168,7 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
             temperature=0.0,
             suppress_tokens=[-1],  # suppress non-speech tokens
             no_speech_threshold=0.6,  # raise threshold to filter more non-speech
-            chunk_size=20
+            chunk_size=80
         )
 
         # Convert segments generator to list for post-processing

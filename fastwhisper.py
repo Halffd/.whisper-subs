@@ -4,8 +4,9 @@ import datetime
 import subprocess
 from pathlib import Path
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel, 
-    QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout
+    QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
+    QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout,
+    QSystemTrayIcon, QMenu, QAction
 )
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5 import QtGui, QtCore
@@ -281,16 +282,19 @@ class TranscriptionApp(QWidget):
         screen_geometry = screen.availableGeometry()
         self.setGeometry(screen_geometry)
         self.setWindowState(QtCore.Qt.WindowMaximized)
-        
+
         self.initUI()
-        
+
         # Load saved settings
         self.load_settings()
-        
+
         # Setup clipboard monitoring
         self.clipboard_timer = QTimer()
         self.clipboard_timer.timeout.connect(self.check_clipboard)
         self.clipboard_timer.start(1000)  # Check every second
+
+        # Setup system tray icon
+        self.setup_system_tray()
 
     def initUI(self):
         # Apply dark theme
@@ -332,7 +336,7 @@ class TranscriptionApp(QWidget):
 
         # Add clipboard monitoring and options
         clipboard_layout = QHBoxLayout()
-        
+
         # Left side - clipboard controls
         clipboard_left = QVBoxLayout()
         self.clipboard_toggle = QPushButton('Clipboard Monitoring: ON', self)
@@ -340,29 +344,34 @@ class TranscriptionApp(QWidget):
         self.clipboard_toggle.setChecked(True)
         self.clipboard_toggle.clicked.connect(self.toggle_clipboard_monitoring)
         clipboard_left.addWidget(self.clipboard_toggle)
-        
+
         self.clear_urls_button = QPushButton('Clear URLs', self)
         self.clear_urls_button.clicked.connect(self.clear_youtube_urls)
         clipboard_left.addWidget(self.clear_urls_button)
         clipboard_layout.addLayout(clipboard_left)
-        
+
         # Right side - options
         options_right = QVBoxLayout()
-        
+
         # Sort and order options
         sort_layout = QHBoxLayout()
-        
+
         # Sort by oldest checkbox
         sort_group = QVBoxLayout()
         self.sort_oldest_check = QCheckBox('Sort by Oldest', self)
         self.sort_oldest_check.stateChanged.connect(self.resort_urls)
         sort_group.addWidget(self.sort_oldest_check)
-        
+
         # Reverse order checkbox
         self.reverse_order_check = QCheckBox('Reverse Order', self)
         self.reverse_order_check.stateChanged.connect(self.resort_urls)
         sort_group.addWidget(self.reverse_order_check)
-        
+
+        # Sort files option
+        self.sort_files_check = QCheckBox('Sort Files Alphabetically', self)
+        self.sort_files_check.setChecked(True)  # Default to checked
+        sort_group.addWidget(self.sort_files_check)
+
         sort_layout.addLayout(sort_group)
         options_right.addLayout(sort_layout)
         
@@ -415,7 +424,17 @@ class TranscriptionApp(QWidget):
         self.enable_logging_check = QCheckBox('Enable File Logging', self)
         self.enable_logging_check.setChecked(True)
         options_right.addWidget(self.enable_logging_check)
-        
+
+        # Minimize to tray checkbox
+        self.enable_tray_check = QCheckBox('Minimize to Tray (Keep Running)', self)
+        self.enable_tray_check.setChecked(True)
+        options_right.addWidget(self.enable_tray_check)
+
+        # Auto-hide on start checkbox
+        self.auto_hide_check = QCheckBox('Auto-Hide on Start', self)
+        self.auto_hide_check.setChecked(False)  # Default to unchecked
+        options_right.addWidget(self.auto_hide_check)
+
         clipboard_layout.addLayout(options_right)
         layout.addLayout(clipboard_layout)
 
@@ -636,6 +655,105 @@ class TranscriptionApp(QWidget):
         self.setLayout(layout)
         self.setWindowTitle('Transcription App')
 
+    def setup_system_tray(self):
+        """Setup system tray icon with options to hide/show the window"""
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            # Create a system tray icon
+            self.tray_icon = QSystemTrayIcon(self)
+
+            # Set an icon (using the default application icon if available)
+            app_icon = QtGui.QIcon.fromTheme("audio-x-generic")  # Generic audio icon
+            if app_icon.isNull():  # If system theme doesn't have the icon
+                # Create a simple pixmap as fallback
+                pixmap = QtGui.QPixmap(32, 32)
+                pixmap.fill(QtGui.QColor(59, 66, 82))  # Dark background color
+                app_icon = QtGui.QIcon(pixmap)
+            self.tray_icon.setIcon(app_icon)
+
+            # Create context menu
+            tray_menu = QMenu()
+
+            # Show window action
+            show_action = QAction("Show Window", self)
+            show_action.triggered.connect(self.show_normal)
+            tray_menu.addAction(show_action)
+
+            # Hide window action
+            hide_action = QAction("Hide Window", self)
+            hide_action.triggered.connect(self.hide_window)
+            tray_menu.addAction(hide_action)
+
+            # Separator
+            tray_menu.addSeparator()
+
+            # Quit action
+            quit_action = QAction("Quit", self)
+            quit_action.triggered.connect(self.quit_app)
+            tray_menu.addAction(quit_action)
+
+            # Set the context menu for the tray icon
+            self.tray_icon.setContextMenu(tray_menu)
+
+            # Connect double-click to show window
+            self.tray_icon.activated.connect(self.tray_icon_activated)
+
+            # Show the tray icon
+            self.tray_icon.show()
+
+    def tray_icon_activated(self, reason):
+        """Handle tray icon activation"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show_normal()
+
+    def show_normal(self):
+        """Show the window normally"""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def hide_window(self):
+        """Hide the window to system tray"""
+        self.hide()
+
+    def quit_app(self):
+        """Quit the application"""
+        # Save settings before quitting
+        self.save_settings()
+        QApplication.quit()
+
+    def closeEvent(self, event):
+        """Override close event to minimize to tray instead of quitting"""
+        # Check if the minimize to tray option is enabled
+        if hasattr(self, 'enable_tray_check') and self.enable_tray_check.isChecked():
+            # Check if a transcription is running
+            transcription_running = hasattr(self, 'transcription_thread') and self.transcription_thread and self.transcription_thread.isRunning()
+
+            if transcription_running:
+                # If transcription is running, always minimize to tray
+                self.hide()
+                event.ignore()  # Ignore the close event
+            else:
+                # If no transcription is running, ask for confirmation
+                reply = QMessageBox.question(
+                    self,
+                    'Minimize to Tray',
+                    'No transcription is currently running. Would you like to minimize to tray instead of closing?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+
+                if reply == QMessageBox.Yes:
+                    self.hide()
+                    event.ignore()  # Ignore the close event
+                else:
+                    # Save settings before quitting
+                    self.save_settings()
+                    event.accept()  # Accept the close event and quit
+        else:
+            # Save settings before quitting
+            self.save_settings()
+            event.accept()  # Accept the close event and quit
+
     def selectFiles(self):
         files, _ = QFileDialog.getOpenFileNames(
             self,
@@ -643,18 +761,23 @@ class TranscriptionApp(QWidget):
             "",
             "Media Files (*.mkv *.mp3 *.wav *.flac *.ogg)"
         )
-        
+
         if files:
-            # Sort files naturally (e.g., "Episode 1" before "Episode 10")
-            try:
-                from natsort import natsorted  # For natural sorting
-                self.selected_files = natsorted(files, key=lambda x: x.lower())
-            except ImportError:
-                # Fallback to alphabetical sorting if natsort isn't available
-                self.selected_files = sorted(files, key=lambda x: x.lower())
-            
+            # Sort files based on user preference
+            if hasattr(self, 'sort_files_check') and self.sort_files_check.isChecked():
+                # Sort files naturally (e.g., "Episode 1" before "Episode 10")
+                try:
+                    from natsort import natsorted  # For natural sorting
+                    self.selected_files = natsorted(files, key=lambda x: x.lower())
+                except ImportError:
+                    # Fallback to alphabetical sorting if natsort isn't available
+                    self.selected_files = sorted(files, key=lambda x: x.lower())
+            else:
+                # Keep the original order as selected by the user
+                self.selected_files = files
+
             self.file_label.setText(f"Selected files: {len(self.selected_files)} files")
-            
+
             if not self.log_file:
                 self.log_file = os.path.splitext(self.selected_files[0])[0] + '.log'
     def selectDirectory(self):
@@ -750,8 +873,15 @@ class TranscriptionApp(QWidget):
                 if f.lower().endswith(('.mkv', '.mp3', '.wav', '.flac', '.ogg')):
                     all_files.append(os.path.join(self.selected_directory, f))
 
-        # Sort all files alphabetically first
-        all_files.sort(key=lambda x: os.path.basename(x).lower())
+        # Sort all files based on user preference
+        if hasattr(self, 'sort_files_check') and self.sort_files_check.isChecked():
+            # Sort files naturally (e.g., "Episode 1" before "Episode 10")
+            try:
+                from natsort import natsorted  # For natural sorting
+                all_files = natsorted(all_files, key=lambda x: os.path.basename(x).lower())
+            except ImportError:
+                # Fallback to alphabetical sorting if natsort isn't available
+                all_files.sort(key=lambda x: os.path.basename(x).lower())
 
         # Process files in alphabetical order, applying priority rules
         for file_path in all_files:
@@ -779,10 +909,15 @@ class TranscriptionApp(QWidget):
             browser=self.browser_combo.currentText() if not self.cookie_file_path.text() else None,
             cookie_file=self.cookie_file_path.text() if self.cookie_file_path.text() else None
         )
-        
+
         self.transcription_thread.progress.connect(self.log)
         self.transcription_thread.finished.connect(self.on_transcription_finished)
         self.transcription_thread.error.connect(self.on_transcription_error)
+
+        # Auto-hide the window if the option is enabled
+        if hasattr(self, 'auto_hide_check') and self.auto_hide_check.isChecked():
+            self.hide()
+
         self.transcription_thread.start(QThread.LowPriority)
 
     def on_transcription_finished(self):
@@ -915,9 +1050,11 @@ class TranscriptionApp(QWidget):
             'selected_files': self.selected_files,
             'use_cookies': self.use_cookies_check.isChecked(),
             'browser': self.browser_combo.currentText(),
-            'cookie_file': self.cookie_file_path.text()
+            'cookie_file': self.cookie_file_path.text(),
+            'enable_tray': self.enable_tray_check.isChecked(),
+            'auto_hide': self.auto_hide_check.isChecked()
         }
-        
+
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=4)
@@ -1016,7 +1153,13 @@ class TranscriptionApp(QWidget):
                 
                 if 'cookie_file' in settings:
                     self.cookie_file_path.setText(settings['cookie_file'])
-                
+
+                if 'enable_tray' in settings:
+                    self.enable_tray_check.setChecked(settings['enable_tray'])
+
+                if 'auto_hide' in settings:
+                    self.auto_hide_check.setChecked(settings['auto_hide'])
+
         except Exception as e:
             self.log(f"Error loading settings: {str(e)}")
 

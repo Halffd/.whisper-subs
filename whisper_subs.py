@@ -1075,22 +1075,29 @@ def main():
            whisper_subs.py -p [file.txt]
            whisper_subs.py -l | --list
            whisper_subs.py -c | --continue
+           whisper_subs.py --file/-d [file_or_directory]
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Process a single video
   whisper_subs.py large https://youtu.be/DfU6llvIMcM
-  
+
   # Process multiple videos from clipboard (one per line)
   whisper_subs.py large
-  
+
   # Process from a file containing URLs (one per line)
   whisper_subs.py large -p my_videos.txt
-  
+
   # Continue the last unfinished job
   whisper_subs.py --continue
-  
+
+  # Process a local file
+  whisper_subs.py large --file /path/to/audio.mp3
+
+  # Process a local directory
+  whisper_subs.py large -d /path/to/directory/
+
   # List all jobs
   whisper_subs.py --list
 """
@@ -1098,10 +1105,14 @@ Examples:
     
     # Model and source arguments
     model_group = parser.add_argument_group('Source and Model')
-    model_group.add_argument('model', nargs='?', 
+    model_group.add_argument('model', nargs='?',
                            help="Whisper model name/index (e.g., 'tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3')")
-    model_group.add_argument('source', nargs='?', 
+    model_group.add_argument('source', nargs='?',
                            help="URL, local file/directory path, or multiple paths/URLs separated by newlines.")
+
+    # File/Directory argument
+    model_group.add_argument('--file', '-d', dest='file_or_dir',
+                           help="Local file or directory path to transcribe.")
     
     # Action arguments
     action_group = parser.add_argument_group('Actions')
@@ -1227,17 +1238,17 @@ Examples:
         # For process file, we'll get the model from the file or use default
         # This will be handled in the process file loop
         pass
-    elif not args.model and not any([args.list, args.continue_last]):
-        parser.error("Model argument is required unless using --list or --continue.")
+    elif not args.model and not any([args.list, args.continue_last, args.file_or_dir]):
+        parser.error("Model argument is required unless using --list, --continue, or --file/-d.")
     else:
         model_to_use = model.getName(args.model)
-    
+
     # Handle live stream transcription separately
     if args.live:
         if not job_or_source or (isinstance(job_or_source, str) and not job_or_source.strip()):
             print("Error: Live stream mode requires a URL", file=sys.stderr)
             return 1
-        
+
         # Extract URL if it's a string (might be a list if multiple sources)
         source_url = job_or_source
         if isinstance(job_or_source, list):
@@ -1252,7 +1263,7 @@ Examples:
                 print("Error: Live stream mode requires exactly one URL", file=sys.stderr)
                 return 1
             source_url = sources[0]
-        
+
         # Create live stream transcriber and start transcription
         live_transcriber = livestream_transcriber.LiveStreamTranscriber(
             model_name=model_to_use,
@@ -1261,7 +1272,7 @@ Examples:
             output_dir=OUTPUT_DIR,
             log_func=lambda msg: print(f"[LIVE] {msg}")
         )
-        
+
         try:
             live_transcriber.start_transcription(source_url)
             print("Live stream transcription completed")
@@ -1272,17 +1283,55 @@ Examples:
             print(f"Error during live stream transcription: {e}")
             live_transcriber.stop()
             return 1
-        
+
         return 0  # Exit successfully after live transcription
-    
+
+    # Handle file/directory argument
+    if args.file_or_dir:
+        # Validate the file or directory exists
+        if not os.path.exists(args.file_or_dir):
+            print(f"Error: File or directory does not exist: {args.file_or_dir}", file=sys.stderr)
+            return 1
+
+        # Use the file_or_dir as the source
+        job_or_source = args.file_or_dir
+        # Ensure model is set if not already set
+        if not args.model and not args.process_file and not args.continue_last:
+            parser.error("Model argument is required when using --file/-d.")
+    elif not args.process_file and not args.continue_last:
+        # If no file_or_dir and not continuing, handle the normal source input
+        job_or_source = args.source
+        # If no source provided, check clipboard
+        if not job_or_source:
+            try:
+                clipboard_content = pyperclip.paste().strip()
+                if not clipboard_content:
+                    parser.error("No source provided and clipboard is empty.")
+
+                # Process clipboard content
+                sources = [line.strip() for line in clipboard_content.split('\n') if line.strip()]
+                if len(sources) == 1:
+                    print(f"Using source from clipboard: {sources[0]}")
+                    job_or_source = sources[0]
+                else:
+                    print(f"Found {len(sources)} sources in clipboard:")
+                    for i, src in enumerate(sources[:5], 1):
+                        print(f"  {i}. {src[:80]}{'...' if len(src) > 80 else ''}")
+                    if len(sources) > 5:
+                        print(f"  ... and {len(sources) - 5} more"
+                              " (processing all in a single batch)")
+                    job_or_source = '\n'.join(sources)
+            except Exception as e:
+                parser.error(f"No source provided and could not read clipboard: {e}")
+
     # Only create processor for non-process-file cases (file processing handled in loop above)
     if not args.process_file:
         processor = WhisperSubs(
             model_name=model_to_use,
-            device='cuda' if args.gpu else args.device, 
-            compute_type=args.compute, 
-            force=args.force, 
-            ignore_subs=args.ignore_subs, 
+            device='cuda' if args.gpu else args.device,
+            compute_type=args.compute,
+            force=args.force,
+            ignore_subs=args.ignore_subs,
             sub_lang=args.language,
             run_mpv=args.run,
             strict_language_tier=args.cross_tier,

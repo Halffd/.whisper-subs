@@ -347,7 +347,10 @@ def try_transcribe(file, current_model, srt_file, language, device, compute_type
         else:
             with open(unfinished_srt, 'w', encoding='utf-8') as f: f.write('')
         # --- END RESUME LOGIC ---
-        
+
+        # Create helper files for the unfinished SRT file
+        make_files(unfinished_srt)
+
         is_english_only = '.en' in current_model
         language_param = '\'en\'' if is_english_only else ('None' if language == 'none' else f"'{language}'")
         whisper_log = srt_file.replace('.srt', '.whisper.log')
@@ -471,6 +474,11 @@ try:
     if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
         if os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
         os.rename(r"{unfinished_srt}", r"{srt_file}")
+
+        # Recreate helper files for the final SRT file
+        import transcribe
+        transcribe.make_files(r"{srt_file}")
+
         print("Transcription completed successfully")
     else:
         print("Output file is empty or too small")
@@ -590,7 +598,7 @@ def make_files(srt_file, url=None):
                 
             url = f"https://youtube.com/watch?v={video_id}"
             print(f"Using generated URL for unfinished transcription: {url}")
-            create_helper_files(dir_path, base_name, url)
+            create_helper_files(dir_path, srt_file, url)
         else:
             # For finished files, try to get URL from HTML file
             html_file = os.path.join(dir_path, f"{clean_base}.htm")
@@ -605,7 +613,7 @@ def make_files(srt_file, url=None):
                         if match:
                             url = match.group(1)
                             print(f"URL from HTML: {url}")
-                            create_helper_files(dir_path, base_name, url)
+                            create_helper_files(dir_path, srt_file, url)
                 except Exception as e:
                     print(f"Error reading HTML file {html_file}: {e}")
             
@@ -696,11 +704,8 @@ def create_helper_files(dir_path, subtitle_file, url):
     """Create helper files (HTML redirect, batch file, shell script)"""
     print(f"Creating helper files for {subtitle_file}")
     try:
-        if not subtitle_file.endswith('.srt'):
-            subtitle_file += '.srt'
-        #if subtitle_file is not a full path, add Documents/Youtube-Subs to the path
-        if not any(x in subtitle_file for x in ['/', '\\']):
-            subtitle_file = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs", subtitle_file)
+        # Convert to absolute path
+        subtitle_file = os.path.abspath(subtitle_file)
         base_name = os.path.splitext(os.path.basename(subtitle_file))[0].replace('.unfinished','')
         print(f"Base name: {base_name}")
         print(f"Dir path: {dir_path}")

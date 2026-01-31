@@ -293,36 +293,7 @@ class YoutubeSubs:
             else:
                 self.write(f"Error: {str(e)}")
                 return []
-    def create_helper_files(self, folder_name, name, url):
-        """Create helper files (HTML redirect, batch file)"""
-        # Create HTML redirect
-        html_file = os.path.join(folder_name, f"{name}.htm")
-        with open(html_file, "w", encoding='utf-8') as f:
-            f.write(f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <meta http-equiv="refresh" content="0; URL='{url}'" />
-            </head>
-            <body>
-            </body>
-            </html>
-            """)
 
-        # Create MPV batch file
-        sub_file = os.path.join(folder_name, f"{name}.srt").replace("\\", "/")
-        mpv_command = f'mpv "{url}" --pause --sub-file="{sub_file}"'
-        bat_file = os.path.join(folder_name, f"{name}.bat")
-        
-        with open(bat_file, 'w', encoding="utf-8") as f:
-            try:
-                f.write(mpv_command)
-            except UnicodeEncodeError:
-                self.write("Warning: Could not write all characters to batch file")
-                f.write(mpv_command.encode('ascii', 'ignore').decode('ascii'))
-
-        # Copy MPV command to clipboard
-        pyperclip.copy(mpv_command)
 
     def update_history(self, video_id):
         """Update history file with processed video"""

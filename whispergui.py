@@ -242,7 +242,7 @@ try:
                 pass
                 
         if url:
-            create_helper_files(dir_path, base_name, url)
+            create_helper_files(dir_path, os.path.join(dir_path, f"{base_name}.srt"), url)
             
         return True
     else:

@@ -107,7 +107,8 @@ class YoutubeSubs:
         self.progress_file = os.path.join(self.ytsubs, f'{self.progress_name}.log')
         self.history_file = os.path.join(self.ytsubs, 'history.txt')
         self.urls_file = os.path.join(self.ytsubs, 'urls.txt')
-        
+        self.channel_progress_file = os.path.join(self.ytsubs, 'channel_progress.json')
+
         self.clean_dirs()
     def write(self, *text, mpv='err'):
         """Log messages to file and through callback"""
@@ -162,6 +163,104 @@ class YoutubeSubs:
             cleaned = cleaned[:-1]
         return cleaned
 
+    def get_channel_id(self, url):
+        """Extract channel ID from URL"""
+        # Handle different channel URL formats
+        if '/channel/' in url:
+            # Format: https://www.youtube.com/channel/UC...
+            match = re.search(r'/channel/([a-zA-Z0-9_-]+)', url)
+            if match:
+                return match.group(1)
+        elif '/c/' in url:
+            # Format: https://www.youtube.com/c/ChannelName
+            match = re.search(r'/c/([a-zA-Z0-9_-]+)', url)
+            if match:
+                return f"c_{match.group(1)}"
+        elif '@' in url:
+            # Format: https://www.youtube.com/@Username
+            match = re.search(r'/@([a-zA-Z0-9_-]+)', url)
+            if match:
+                return f"@{match.group(1)}"
+        elif '/user/' in url:
+            # Format: https://www.youtube.com/user/Username
+            match = re.search(r'/user/([a-zA-Z0-9_-]+)', url)
+            if match:
+                return f"user_{match.group(1)}"
+        # For playlist URLs
+        elif 'list=' in url:
+            match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
+            if match:
+                return f"playlist_{match.group(1)}"
+
+        # If none of the above, return a hash of the URL
+        return f"url_hash_{hash(url) % 1000000}"
+
+    def load_channel_progress(self):
+        """Load channel progress from file"""
+        import json
+        try:
+            if os.path.exists(self.channel_progress_file):
+                with open(self.channel_progress_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            self.write(f"Error loading channel progress: {str(e)}")
+        return {}
+
+    def save_channel_progress(self, progress_data):
+        """Save channel progress to file"""
+        import json
+        try:
+            with open(self.channel_progress_file, 'w', encoding='utf-8') as f:
+                json.dump(progress_data, f, indent=2)
+        except Exception as e:
+            self.write(f"Error saving channel progress: {str(e)}")
+
+    def get_channel_progress(self, channel_id):
+        """Get progress for a specific channel"""
+        progress_data = self.load_channel_progress()
+        return progress_data.get(channel_id, {
+            'total_videos': 0,
+            'completed_videos': [],
+            'last_check_count': 0
+        })
+
+    def update_channel_progress(self, channel_id, total_videos, completed_video_ids):
+        """Update progress for a specific channel"""
+        progress_data = self.load_channel_progress()
+        channel_info = progress_data.get(channel_id, {})
+
+        # Update the channel info
+        channel_info['total_videos'] = total_videos
+        channel_info['completed_videos'] = list(set(completed_video_ids))  # Ensure uniqueness
+        channel_info['last_check_count'] = total_videos
+
+        progress_data[channel_id] = channel_info
+        self.save_channel_progress(progress_data)
+
+    def should_process_channel(self, channel_id, current_video_count):
+        """Determine if channel should be processed based on progress"""
+        channel_progress = self.get_channel_progress(channel_id)
+
+        # If no previous record, process the channel
+        if not channel_progress or channel_progress['total_videos'] == 0:
+            return True
+
+        # If the video count has increased, process the channel
+        if current_video_count > channel_progress['last_check_count']:
+            self.write(f"Channel {channel_id} has new videos ({current_video_count} > {channel_progress['last_check_count']})")
+            return True
+
+        # If all previously known videos are completed, but count is the same,
+        # check if there are new videos we didn't know about
+        completed_count = len(channel_progress['completed_videos'])
+        if completed_count >= channel_progress['total_videos'] and current_video_count == channel_progress['total_videos']:
+            # All known videos are done and no new videos added
+            self.write(f"Channel {channel_id} already fully processed with {current_video_count} videos")
+            return False
+
+        # Otherwise, process the channel
+        return True
+
     def download_audio(self, url, rec=False):
         """Download audio from YouTube URL"""
         oldest = '--oldest' in sys.argv or reverse == 1 or '-o' in sys.argv
@@ -170,14 +269,29 @@ class YoutubeSubs:
         if not rec or self.delay > 3600:
             self.delay = self.start_delay
         os.chdir(self.ytsubs)
+
+        # Initialize the list to capture downloaded files
+        downloaded_files = []
+
+        def progress_hook(d):
+            if d['status'] == 'finished':
+                if 'filename' in d:
+                    downloaded_files.append(d['filename'])
+
         try:
             ydl_opts = {
                 'outtmpl': '%(title)s.%(ext)s',
                 # More flexible format selection
                 'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'm4a',
+                    'preferredquality': '192',
+                }],
                 'quiet': True,
                 'no_warnings': True,
-                'ignoreerrors': True,
+                'ignoreerrors': False,
+                'progress_hooks': [progress_hook],
                 # Add these for rate limiting
                 'sleep_interval': 10,
                 'max_sleep_interval': 30,
@@ -187,13 +301,13 @@ class YoutubeSubs:
                 'retries': 3,
                 'fragment_retries': 3,
             }
-        
+
             # Add cookies if available
             if self.use_cookies and self.specified_browser:
                  ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                
+
                 # Check for existing subtitles
                 try:
                     if info['subtitles'] != {} and not force:
@@ -210,30 +324,31 @@ class YoutubeSubs:
                 date_time = datetime.datetime.fromtimestamp(timestamp)
                 timeday = date_time.strftime('%Y-%m-%d')
                 self.video_title = timeday + '_' + self.clean_filename(info.get('title', 'unknown'))
-                audio_file = os.path.join(os.getcwd(), f"{self.video_title}.{self.model_name}.mp3")
 
-                self.write(' '.join([str(self.delay), self.channel_name, str(timestamp), 
-                                   str(date_time), self.video_title, audio_file]))
+                # Update outtmpl to include model name and use proper format
+                ydl_opts['outtmpl'] = f"{self.video_title}.{self.model_name}.%(ext)s"
 
-            # Add time range and cookies to command
-            command = ["yt-dlp", "--extract-audio", "--audio-format", "m4a"]
-            
-            if self.use_cookies and self.specified_browser:
-                command.extend(["--cookies-from-browser", self.specified_browser])
-            
+                self.write(' '.join([str(self.delay), self.channel_name, str(timestamp),
+                                   str(date_time), self.video_title]))
+
+            # Add time range options if needed
             if self.start_time or self.end_time:
-                time_args = []
+                ydl_opts['postprocessor_args'] = {
+                    'ffmpeg': []
+                }
                 if self.start_time:
-                    time_args.extend(["-ss", self.start_time])
+                    ydl_opts['postprocessor_args']['ffmpeg'].extend(['-ss', self.start_time])
                 if self.end_time:
-                    time_args.extend(["-to", self.end_time])
-                command.extend(["--postprocessor-args", f"ffmpeg: {' '.join(time_args)}"])
-            
-            command.extend(["-o", audio_file, url])
-            
-            # Download audio
-            subprocess.run(command, check=True)
-            return audio_file
+                    ydl_opts['postprocessor_args']['ffmpeg'].extend(['-to', self.end_time])
+
+            # Download using yt_dlp directly with updated options
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            # Return the actual downloaded file
+            if downloaded_files:
+                return downloaded_files[0]
+            return None
 
         except Exception as e:
             self.delay *= 2
@@ -243,7 +358,7 @@ class YoutubeSubs:
             time.sleep(self.delay)
             return self.download_audio(url, True)
 
-    def get_youtube_videos(self, url, rec=False):
+    def get_youtube_videos(self, url, rec=False, sort_order='newest'):
         """Get list of video URLs from channel/playlist"""
         oldest = '--oldest' in sys.argv or reverse == 1 or '-o' in sys.argv
         if not rec:
@@ -251,16 +366,17 @@ class YoutubeSubs:
         else:
             # Exponential backoff that actually works
             self.delay = min(self.delay * 1.5, 7200)  # Cap at 2 hours
-        
+
         self.write(f"Waiting {self.delay}s before request...")
         time.sleep(self.delay) if self.use_cookies else 0
+
         try:
             ydl_opts = {
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'outtmpl': '%(title)s.%(ext)s',
                 'quiet': True,
                 'no_warnings': True,
-                'ignoreerrors': True,
+                'ignoreerrors': False,
                 'sleep_interval': 3,  # Built-in delay between requests
                 'max_sleep_interval': 10,
             }
@@ -269,27 +385,62 @@ class YoutubeSubs:
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+
+                # Get channel ID for progress tracking
+                channel_id = self.get_channel_id(url)
+
                 if 'entries' in info:
-                    video_urls = []
+                    video_entries = []
                     for entry in info['entries']:
                         try:
                             if entry and entry.get('subtitles') == {}:
-                                video_urls.append(entry['webpage_url'])
+                                video_entries.append(entry)
                         except (KeyError, TypeError):
                             continue
-                            
-                    if oldest:
+
+                    # Get video URLs
+                    video_urls = [entry['webpage_url'] for entry in video_entries]
+
+                    # Apply sorting based on sort_order parameter
+                    if sort_order == 'oldest':
+                        # Reverse to get oldest first
                         video_urls.reverse()
+                    elif sort_order == 'popular':
+                        # For popular sorting, we need to get additional info about each video
+                        # This requires a more complex approach to get view counts
+                        try:
+                            # Create a mapping of URL to view count
+                            video_info_map = {}
+                            for entry in video_entries:
+                                video_url = entry.get('webpage_url')
+                                view_count = entry.get('view_count', 0) or 0
+                                video_info_map[video_url] = view_count
+
+                            # Sort URLs by view count (descending for most popular first)
+                            video_urls.sort(key=lambda url: video_info_map.get(url, 0), reverse=True)
+                        except:
+                            # If we can't sort by popularity, fall back to default order
+                            pass
+
+                    # Check if we should process this channel based on progress
+                    if not self.should_process_channel(channel_id, len(video_urls)):
+                        self.write(f"Skipping channel {channel_id} - already processed")
+                        return []
+
+                    # Update channel progress with current state
+                    video_ids = [self.get_video_id(url) for url in video_urls]
+                    self.update_channel_progress(channel_id, len(video_urls), video_ids)
+
                     return video_urls
                 else:
                     return [info['webpage_url']]
-                    
+
         except Exception as e:
             error_msg = str(e).lower()
             if 'rate' in error_msg or 'limit' in error_msg or 'unavailable' in error_msg:
                 self.delay = min(self.delay * 2, 3600)  # Cap at 1 hour
                 self.write(f"Rate limited. Next retry in {self.delay}s")
-                return self.get_youtube_videos(url, True)
+                return self.get_youtube_videos(url, True, sort_order)
             else:
                 self.write(f"Error: {str(e)}")
                 return []
@@ -417,7 +568,7 @@ class YoutubeSubs:
         self.process_urls('\n'.join(urls), callback)
     def process_twitch_channel(self, channel, callback=print):
         downloader = twitch_vod.StreamlinkVODDownloader()
-    def process_urls(self, urls_text, callback=print):
+    def process_urls(self, urls_text, callback=print, sort_order='newest', shuffle_tasks=False):
         """Process multiple URLs from text input"""
         callback(f"Processing URLs: {urls_text}")
         # Fix the urls_file issue
@@ -427,7 +578,7 @@ class YoutubeSubs:
         urls = urls_text.replace('\r', '').split('\n')
         urls = [url.strip() for url in urls if url and 'youtu' in url]
         file_path = self.file(urls_text)
-            
+
         if file_path:
             if self.is_dir(urls_text):
                 files = os.listdir(urls_text)
@@ -436,17 +587,23 @@ class YoutubeSubs:
                     callback(f"Processing file: {file}")
                     if file.endswith('.mp3') or file.endswith('.wav') or file.endswith('.flac') or file.endswith('.m4a') or file.endswith('.ogg'):
                         self.process_file(file, callback)
-                return  
+                return
             callback(f"File path: {file_path}")
             self.process_file(file_path, callback)
             return
-        
+
         if not urls:
             callback("⚠️ No YouTube URLs found!")
             return
-        
+
         callback(f"📋 Found {len(urls)} YouTube URLs to process")
-        
+
+        # Shuffle tasks if requested
+        if shuffle_tasks:
+            import random
+            random.shuffle(urls)
+            callback(f"🔀 Tasks shuffled")
+
         processed_videos = []  # Track what we actually process
         # lambda writer, no duplicates
         duplicates = set()
@@ -463,11 +620,11 @@ class YoutubeSubs:
         for i, url in enumerate(urls, 1):
             try:
                 callback(f"🔄 Processing {i}/{len(urls)}: {url}")
-                
+
                 # Better channel/playlist detection
                 if self.is_channel_or_playlist_url(url):
                     callback(f"📺 Detected channel/playlist URL")
-                    video_urls = self.get_youtube_videos(url)
+                    video_urls = self.get_youtube_videos(url, sort_order=sort_order)
                     if video_urls:
                         callback(f"📹 Found {len(video_urls)} videos in channel/playlist")
                         with open(self.urls_file + '.tmp', 'a', encoding='utf-8') as f:
@@ -483,15 +640,15 @@ class YoutubeSubs:
                         self.remove_from_urls(url)
                     else:
                         callback(f"⚠️ No videos found in channel/playlist")
-                        
+
                 else:
                     # Single video URL
                     self.process_single_url(url, callback)
                     processed_videos.append(url)
-                    self.remove_from_urls(url)                    
+                    self.remove_from_urls(url)
             except Exception as e:
                 callback(f"❌ Error processing {url}: {str(e)}")
-        
+
         callback(f"✅ Finished! Processed {len(processed_videos)} videos total")
     def is_channel_or_playlist_url(self, url):
         """only TRUE playlists/channels, not videos in playlists"""
@@ -643,18 +800,46 @@ def get_video_url() -> str:
 
 def main():
     try:
-        reverse = True
-        if '--reverse' in sys.argv or '-r' in sys.argv:
-            reverse = False
-        urls = get_video_url()
+        # Check for new command line arguments manually to avoid interfering with existing logic
+        oldest = '--oldest' in sys.argv or '-o' in sys.argv
+        popular = '--popular' in sys.argv
+        shuffle = '--shuffle' in sys.argv
+        reverse = '--reverse' in sys.argv or '-r' in sys.argv
+
+        # Get browser from command line (default to brave)
+        browser = 'brave'  # default
+        for i, arg in enumerate(sys.argv):
+            if arg == '--browser' and i + 1 < len(sys.argv):
+                browser = sys.argv[i + 1]
+                break
+
+        # Determine sort order based on arguments
+        sort_order = 'newest'  # default
+        if oldest:
+            sort_order = 'oldest'
+        elif popular:
+            sort_order = 'popular'
+
+        # Get URLs from clipboard or command line
+        reverse_flag = True
         if reverse:
+            reverse_flag = False
+        urls = get_video_url()
+        if reverse_flag:
             temp = urls.copy()
             for i in range(len(urls)):
                 urls[i] = temp[len(urls) - 1 - i]
-        yt = YoutubeSubs(model_name, device=device)
+
+        # Create YouTube subs instance with specified browser
+        yt = YoutubeSubs(model_name, device=device, browser=browser)
         print(f"Model: {model_name}")
         print(f"Device: {device}")
-        yt.process_urls('\n'.join(urls))
+        print(f"Browser: {browser}")
+        print(f"Sort order: {sort_order}")
+        if shuffle:
+            print("Tasks will be shuffled")
+
+        yt.process_urls('\n'.join(urls), sort_order=sort_order, shuffle_tasks=shuffle)
     except Exception as e:
         write(f"Error in main: {e}")
 

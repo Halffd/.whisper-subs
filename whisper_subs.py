@@ -673,7 +673,7 @@ class WhisperSubs:
                         'no_warnings': True,
                         'noprogress': False,
                         'progress_hooks': [progress_hook],
-                        'ignoreerrors': True,
+                        'ignoreerrors': False,
                         'socket_timeout': 30,
                         'no_check_certificate': True,
                         'extractor_retries': 3,

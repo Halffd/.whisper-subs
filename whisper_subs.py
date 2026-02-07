@@ -124,6 +124,7 @@ class WhisperSubs:
         self.sub_lang = sub_lang
         self.run_mpv = run_mpv
         self.specified_browser = browser
+        self.force_cookies = True if browser else False
         self.strict_language_tier = strict_language_tier
         self.model = None
         self.log_file = os.path.join(os.path.expanduser("~/.config/WhisperSubs"), 'whisper_subs.log')
@@ -168,27 +169,29 @@ class WhisperSubs:
             elif len(path_parts) == 2 and path_parts[1] == 'videos':
                 return path_parts[0]
         return None
-
     def get_video_info(self, url):
         try:
             ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': 'in_playlist',  # Fast extraction
-                'skip_download': True,
-                'no_check_certificate': True,   # Skip SSL overhead
-                'socket_timeout': 10,           # Don't wait forever
-                'extractor_args': {
-                    'youtube': {
-                        'skip': ['hls', 'dash', 'translated_subs']  # Skip unnecessary data
-                    }
-                }
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "socket_timeout": 10,
+                "no_check_certificate": True,
             }
+
             if self.specified_browser:
-                ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                ydl_opts["cookiesfrombrowser"] = (self.specified_browser,)
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                return info.get('title', 'unknown_title'), info.get('channel') or info.get('uploader') or "unknown_channel"
+
+            if not info:
+                return "unknown_title", "unknown_channel"
+
+            title = info.get("title", "unknown_title")
+            channel = info.get("channel") or info.get("uploader") or "unknown_channel"
+            return title, channel
+
         except Exception:
             return os.path.basename(url), "unknown_channel"
 
@@ -308,58 +311,53 @@ class WhisperSubs:
                         }
                             
         elif self.is_channel_or_playlist_url(source):
-            self.log(f"Source is YouTube channel/playlist (streaming entries).")
-            
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': 'in_playlist',  # Fast flat extraction
-                'socket_timeout': 10,
-                'no_check_certificate': True,
-            }
-            
-            if self.specified_browser:
-                ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
-                
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(source, download=False)
-                    
-                    if info and 'entries' in info:
-                        # Get all URLs first (fast)
-                        urls = [entry['url'] for entry in info['entries'] 
-                               if entry and entry.get('url')]
-                        
-                        # Fetch metadata in parallel (5 at a time)
-                        with ThreadPoolExecutor(max_workers=5) as executor:
-                            # Submit all tasks
-                            future_to_url = {
-                                executor.submit(self.get_video_info_cached, url): url 
-                                for url in urls
-                            }
-                            
-                            # Yield results as they complete
-                            for future in as_completed(future_to_url):
-                                url = future_to_url[future]
-                                try:
-                                    title, _ = future.result()
-                                    if self.is_youtube(url):
-                                        title = self.clean_filename(title)
-                                    yield {
-                                        "source": url,
-                                        "status": "pending",
-                                        "title": title
-                                    }
-                                except Exception as e:
-                                    self.log(f"Failed to get info for {url}: {e}")
-                                    yield {
-                                        "source": url,
-                                        "status": "pending",
-                                        "title": os.path.basename(url)
-                                    }
-            except Exception as e:
-                self.log(f"Error processing playlist: {e}")
+            self.log("Source is YouTube channel/playlist (flat extract).")
 
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": True,
+                "skip_download": True,
+                "socket_timeout": 10,
+                "no_check_certificate": True,
+            }
+
+            if self.specified_browser:
+                ydl_opts["cookiesfrombrowser"] = (self.specified_browser,)
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(source, download=False)
+
+            if not info or "entries" not in info:
+                return
+
+            urls = [
+                entry.get("url")
+                for entry in info["entries"]
+                if entry and entry.get("url")
+            ]
+
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(self.get_video_info_cached, url): url
+                    for url in urls
+                }
+
+                for future in as_completed(futures):
+                    url = futures[future]
+                    try:
+                        title, _ = future.result()
+                        yield {
+                            "source": url,
+                            "status": "pending",
+                            "title": self.clean_filename(title),
+                        }
+                    except Exception:
+                        yield {
+                            "source": url,
+                            "status": "pending",
+                            "title": os.path.basename(url),
+                        }
         # Check for Twitch channel videos page specifically
         elif self.is_twitch(source) and '/videos' in source and '/videos/' not in source:
             # This is a Twitch channel videos page (e.g., twitch.tv/channel/videos)
@@ -556,7 +554,6 @@ class WhisperSubs:
                     'quiet': True,
                     'no_warnings': True,
                     'skip_download': True,
-                    'extract_flat': True,
                     'socket_timeout': 5,
                     'no_check_certificate': True,
                 }
@@ -646,6 +643,10 @@ class WhisperSubs:
                             self.log(f"Failed to get video info for {clean_url}")
                             return None
 
+                        # Check if the requested format is available
+                        # If not, update the format to a more flexible one
+                        # Note: formats may not be available in extract_flat mode, so we'll rely on error handling primarily
+
                     # Build filename
                     timestamp = info.get('timestamp', '')
                     if timestamp:
@@ -662,7 +663,7 @@ class WhisperSubs:
                     # Download with proper template
                     download_opts = {
                         'outtmpl': f'{expected_base}.%(ext)s',  # Use our format
-                        'format': 'bestaudio[ext=m4a]/bestaudio/best[height<=720]/best',
+                        'format': 'bestaudio[ext=m4a]/bestaudio/best',
                         'postprocessors': [{
                             'key': 'FFmpegExtractAudio',
                             'preferredcodec': 'm4a',
@@ -672,12 +673,19 @@ class WhisperSubs:
                         'quiet': True,
                         'no_warnings': True,
                         'noprogress': False,
+                        'retries': 5,
+                        'continuedl': True,
                         'progress_hooks': [progress_hook],
                         'ignoreerrors': False,
                         'socket_timeout': 30,
                         'no_check_certificate': True,
                         'extractor_retries': 3,
                         'fragment_retries': 3,
+                        'extractor_args': {
+                            'youtube': {
+                                'player_client': ['android', 'web']
+                            }
+                        },
                         'http_chunk_size': 10485760,
                         'concurrent_fragment_downloads': 5,
                     }
@@ -686,7 +694,7 @@ class WhisperSubs:
                         download_opts['cookiesfrombrowser'] = (self.specified_browser,)
 
                     self.log(f"Starting download (attempt {attempt}/{max_attempts})...")
-
+                    print(download_opts)
                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                         ydl.download([clean_url])
 
@@ -704,12 +712,23 @@ class WhisperSubs:
 
                 except Exception as e:
                     error_str = str(e).lower()
-                    
+
                     # Handle rate limiting with exponential backoff
                     if ('rate' in error_str or 'unavailable' in error_str or '429' in error_str) and attempt < max_attempts:
                         delay = min(30 * (2 ** attempt), 3600)  # 30s, 60s, 120s...
                         self.log(f"Rate limited. Retrying in {delay}s... (attempt {attempt}/{max_attempts})")
                         time.sleep(delay)
+                        continue
+                    # Handle format not available errors
+                    elif ('requested format is not available' in error_str or 'format not available' in error_str) and attempt < max_attempts:
+                        self.log(f"Format not available. Trying fallback format... (attempt {attempt}/{max_attempts})")
+                        # Use a more flexible format for the next attempt
+                        if attempt == 1:
+                            download_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                        elif attempt == 2:
+                            download_opts['format'] = 'bestaudio/best'
+                        else:
+                            download_opts['format'] = 'best'
                         continue
                     else:
                         self.log(f"Download failed: {e}")
@@ -870,9 +889,7 @@ class WhisperSubs:
             # FIX: Just pass the directory, not a template path
             audio_file = task_source if is_local else self.download_audio(task_source, channel_dir)
             if not audio_file or not os.path.exists(audio_file):
-                # Log what files exist in the directory to debug
                 self.log(f"Audio file not found: {audio_file}")
-                self.log(f"Files in {channel_dir}: {os.listdir(channel_dir) if os.path.exists(channel_dir) else 'Directory does not exist'}")
                 return
 
             update_task_status(job_id, task_source, 'transcribing')

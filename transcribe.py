@@ -119,6 +119,46 @@ def check_memory_usage():
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
         memory_percent = psutil.Process().memory_percent()
+def standalone(seg):
+    dur = seg["end"] - seg["start"]
+    words = len(seg["text"].split())
+    return dur >= 2.5 or words >= 12
+
+def merge_segments(
+    segments,
+    max_gap=0.5,
+    max_duration=4.0,
+    max_words=20,
+    max_chars=120,
+):
+    if not segments:
+        return segments
+
+    merged = [segments[0]]
+
+    for s in segments[1:]:
+        prev = merged[-1]
+
+        gap = s.start - prev.end
+        new_duration = s.end - prev.start
+
+        merged_text = (prev.text.rstrip() + " " + s.text.lstrip()).strip()
+        word_count = len(merged_text.split())
+        char_count = len(merged_text)
+
+        if (
+            gap <= max_gap
+            and new_duration <= max_duration
+            and word_count <= max_words
+            and char_count <= max_chars
+            and not(standalone(prev) or standalone(s)) 
+        ):
+            prev.text = merged_text
+            prev.end = s.end
+        else:
+            merged.append(s)
+
+    return merged
 
 def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cpu', compute_type='int8'):
     """  
@@ -157,18 +197,19 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
         result_segments, _ = whisper_model.transcribe(
             audio_file,
             language=language,
-            vad_filter=True,
-            vad_parameters=dict(
-                threshold=0.5,  # stricter threshold
-                min_silence_duration_ms=800,  # longer silence minimum
-                speech_pad_ms=400,  # more speech padding
-            ),
+            vad_filter=False, #True,
+            #vad_parameters=dict(
+            #    threshold=0.3,                 # lower = less chopping
+            #    min_silence_duration_ms=1200,  # stop micro-cuts
+            #    speech_pad_ms=600,             # smoother joins
+            #),
+            chunk_size=70,                     # 80 is overkill
+#            no_speech_threshold=0.4,           # stricter silence rejection
             repetition_penalty=1.2,
             no_repeat_ngram_size=3,
-            temperature=0.0,
+            temperature=0.1,
             suppress_tokens=[-1],  # suppress non-speech tokens
-            no_speech_threshold=0.6,  # raise threshold to filter more non-speech
-            chunk_size=80
+            word_timestamps=False
         )
 
         # Convert segments generator to list for post-processing
@@ -177,6 +218,7 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
         # Apply post-processing to remove garbage segments
         segments_list = filter_garbage_segments(segments_list)
         segments_list = merge_adjacent_identical_segments(segments_list)
+        #segments_list = merge_segments(segments_list)
 
         # Write to temporary file first
         with open(temp_srt, "w", encoding="utf-8") as srt:
@@ -437,17 +479,11 @@ try:
     segments, info = model.transcribe(
         r"{audio_to_transcribe}",
         language={language_param},
-        vad_filter=True,
-        vad_parameters=dict(
-            threshold=0.5,  # stricter threshold
-            min_silence_duration_ms=800,  # longer silence minimum
-            speech_pad_ms=400,  # more speech padding
-        ),
-        repetition_penalty=1.2,
+        vad_filter=False,        repetition_penalty=1.2,
         no_repeat_ngram_size=3,
-        temperature=0.0,
+        temperature=0.1,
+        chunk_size=70,
         suppress_tokens=[-1],  # suppress non-speech tokens
-        no_speech_threshold=0.6,  # raise threshold to filter more non-speech
         word_timestamps=False
     )
     
@@ -595,10 +631,6 @@ def make_files(srt_file, url=None):
                         video_id = 'video_id_placeholder'
             except:
                 pass
-                
-            url = f"https://youtube.com/watch?v={video_id}"
-            print(f"Using generated URL for unfinished transcription: {url}")
-            create_helper_files(dir_path, srt_file, url)
         else:
             # For finished files, try to get URL from HTML file
             html_file = os.path.join(dir_path, f"{clean_base}.htm")
@@ -728,7 +760,7 @@ def create_helper_files(dir_path, subtitle_file, url):
             sh_file = os.path.join(dir_path, f"{base_name}.sh")
             linux_path = subtitle_file.replace("\\", "/")
             with open(sh_file, "w", encoding='utf-8') as f:
-                f.write(f'#!/bin/bash\nmpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{linux_path}" $@\n')
+                f.write(f'#!/bin/bash\nmpv \'{url}\' --pause --input-ipc-server=/tmp/mpvsocket --sub-file=\'{linux_path}\' $@\n')
             os.chmod(sh_file, 0o755)
         except OSError as e:
             print(f"OS error creating shell script: {e}")
@@ -744,8 +776,11 @@ def create_helper_files(dir_path, subtitle_file, url):
                 win_path = f"C:\\Users{win_path[5:]}"
             win_path = win_path.replace("/", "\\")
             print(f"Win path after replacement: {win_path}")
-            with open(bat_file, "w", encoding='utf-8') as f:
-                f.write(f'mpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{win_path}"\n')
+            with open(bat_file, "w", encoding="utf-8") as f:
+                f.write('@echo off\n'
+                    'setlocal DisableDelayedExpansion\n'
+                    f'mpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{win_path}"\n'
+                )
         except OSError as e:
             print(f"OS error creating batch file: {e}")
         except Exception as e:

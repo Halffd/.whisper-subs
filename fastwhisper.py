@@ -13,7 +13,7 @@ from PyQt5 import QtGui, QtCore
 import pymkv
 import transcribe
 import time
-from youtubesubs import YoutubeSubs
+from whisper_subs import WhisperSubs
 import pyperclip
 import json
 

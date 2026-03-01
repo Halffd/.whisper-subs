@@ -299,12 +299,12 @@ def write_srt(segments_file, srt):
             # Write the segment to the SRT file
             srt.write(f"{i}\n")
             srt.write(f"{start_time} --> {end_time}\n")
-            srt.write(f"{text}\n\n")                                        
-def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print):
+            srt.write(f"{text}\n\n")
+def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print, cpu_threads=None):
     """Creates a new process to retry the transcription."""
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
-    
+
     # Only switch to CPU if not forcing device
     if not force_device and device == 'cpu':
         device = 'cpu'
@@ -324,29 +324,29 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
     write(f"Transcribe Model name: {model_name}")
     if model_name in model_names:
         i = model_names.index(model_name)
-        
+
         # Try with original settings first
-        success = try_transcribe(file, model_name, srt_file, language, device, compute_type, force_device, write)
+        success = try_transcribe(file, model_name, srt_file, language, device, compute_type, force_device, write, cpu_threads)
         if success:
             return True
-            
+
         # If not forcing device and original settings fail, try smaller models
         if not force_device:
             write("Trying smaller models...")
             for j in range(i-1, -1, -1):
                 current_model = model_names[j]
-                success = try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write)
+                success = try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads)
                 if success:
                     write(f"Successfully transcribed with {current_model}")
                     return True
             if device == 'cuda':
                 write("All GPU models failed, falling back to CPU...")
-                return try_transcribe(file, 'medium.en' if 'en' in model_name else 'large-v3', srt_file, language, 'cpu', 'int8', False, write)
+                return try_transcribe(file, 'medium.en' if 'en' in model_name else 'large-v3', srt_file, language, 'cpu', 'int8', False, write, cpu_threads)
     else:
         write('No model')
     return False
 
-def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write):
+def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads=None):
     """Try transcription with given parameters, supporting resume."""
     script_path = None
     resume_audio_path = None
@@ -436,6 +436,7 @@ write_event = threading.Event()
 stop_event = threading.Event()
 device = "{device}"
 compute_type = "{compute_type}"
+cpu_threads = {cpu_threads if cpu_threads else 'None'}
 
 def write_segments():
     current_index = {start_index} + 1
@@ -472,7 +473,7 @@ try:
     print(f"Starting transcription with model {current_model} on device {{device}}")
     print(f"Full log will be written to: {{log_file}}")
     
-    model = faster_whisper.WhisperModel("{current_model}", device=device, compute_type=compute_type)
+    model = faster_whisper.WhisperModel("{current_model}", device=device, compute_type=compute_type, cpu_threads=cpu_threads if cpu_threads else os.cpu_count())
 
     segments, info = model.transcribe(
         r"{audio_to_transcribe}",

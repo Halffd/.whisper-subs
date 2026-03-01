@@ -203,13 +203,11 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
             #    min_silence_duration_ms=1200,  # stop micro-cuts
             #    speech_pad_ms=600,             # smoother joins
             #),
-            chunk_size=70,                     # 80 is overkill
 #            no_speech_threshold=0.4,           # stricter silence rejection
             repetition_penalty=1.2,
             no_repeat_ngram_size=3,
-            temperature=0.1,
-            suppress_tokens=[-1],  # suppress non-speech tokens
-            word_timestamps=False
+            temperature=0.3,
+            suppress_tokens=[-1]
         )
 
         # Convert segments generator to list for post-processing
@@ -479,12 +477,11 @@ try:
     segments, info = model.transcribe(
         r"{audio_to_transcribe}",
         language={language_param},
-        vad_filter=False,        repetition_penalty=1.2,
+        vad_filter=False,
+        repetition_penalty=1.2,
         no_repeat_ngram_size=3,
-        temperature=0.1,
-        chunk_size=70,
-        suppress_tokens=[-1],  # suppress non-speech tokens
-        word_timestamps=False
+        temperature=0.3,
+        suppress_tokens=[-1]
     )
     
     resume_offset = {resume_offset_seconds}

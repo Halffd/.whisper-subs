@@ -114,7 +114,10 @@ def list_jobs():
 
 # --- Core Class ---
 class WhisperSubs:
-    def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser="brave", strict_language_tier=False, force_retry=False):
+    def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser="brave", strict_language_tier=False, force_retry=False,
+                 vad_filter=False, vad_min_silence_duration=500,
+                 diarization=False, min_speakers=1, max_speakers=2,
+                 temperature=0.3, merge_lines=False):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
@@ -132,6 +135,16 @@ class WhisperSubs:
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         self.delay = 30
         self.start_delay = 30
+        # VAD settings
+        self.vad_filter = vad_filter
+        self.vad_min_silence_duration = vad_min_silence_duration
+        # Diarization settings
+        self.diarization = diarization
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+        # Transcription settings
+        self.temperature = temperature
+        self.merge_lines = merge_lines
 
     def log(self, message):
         message_str = str(message)
@@ -1160,6 +1173,23 @@ Examples:
                              help="Allow comparison between multilingual and English-only models.")
     process_group.add_argument('-m', '--run', action='store_true', help="Run player in background.")
     process_group.add_argument('--live', action='store_true', help="Transcribe live streams in real-time (for Twitch/YouTube live streams).")
+    
+    # Advanced transcription options
+    advanced_group = parser.add_argument_group('Advanced Transcription Options')
+    advanced_group.add_argument('--vad', action='store_true',
+                              help="Enable Voice Activity Detection (VAD) filter.")
+    advanced_group.add_argument('--vad-silence', type=int, default=500,
+                              help="VAD minimum silence duration in ms (default: 500).")
+    advanced_group.add_argument('--diarization', action='store_true',
+                              help="Enable speaker diarization.")
+    advanced_group.add_argument('--min-speakers', type=int, default=1,
+                              help="Minimum number of speakers for diarization (default: 1).")
+    advanced_group.add_argument('--max-speakers', type=int, default=2,
+                              help="Maximum number of speakers for diarization (default: 2).")
+    advanced_group.add_argument('--temperature', type=float, default=0.3,
+                              help="Sampling temperature for transcription (default: 0.3).")
+    advanced_group.add_argument('--merge-lines', action='store_true',
+                              help="Merge adjacent subtitle lines.")
     args = parser.parse_args()
 
     if args.list: 
@@ -1211,7 +1241,14 @@ Examples:
                     sub_lang=args.language,
                     run_mpv=args.run,
                     strict_language_tier=args.cross_tier,
-                    force_retry=args.force_retry
+                    force_retry=args.force_retry,
+                    vad_filter=args.vad,
+                    vad_min_silence_duration=args.vad_silence,
+                    diarization=args.diarization,
+                    min_speakers=args.min_speakers,
+                    max_speakers=args.max_speakers,
+                    temperature=args.temperature,
+                    merge_lines=args.merge_lines
                 )
                 processor.process(source_info['url'])
                 
@@ -1352,7 +1389,14 @@ Examples:
             sub_lang=args.language,
             run_mpv=args.run,
             strict_language_tier=args.cross_tier,
-            force_retry=args.force_retry
+            force_retry=args.force_retry,
+            vad_filter=args.vad,
+            vad_min_silence_duration=args.vad_silence,
+            diarization=args.diarization,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+            temperature=args.temperature,
+            merge_lines=args.merge_lines
         )
         processor.process(job_or_source)
 

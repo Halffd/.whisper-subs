@@ -114,6 +114,10 @@ class TranscriptionThread(QThread):
             priority_text = main_window.priority_combo.currentText()
             self.process_priority = priority_text.split()[0]  # Get first word (e.g., "Normal", "Low")
 
+            # Get advanced transcription settings
+            self.temperature = float(main_window.temperature_spinbox.currentText())
+            self.merge_lines = main_window.merge_lines_check.isChecked()
+
         else:
             # Default values if window not found
             self.device = 'cuda'
@@ -128,6 +132,8 @@ class TranscriptionThread(QThread):
             self.use_faster_whisper = False
             self.cpu_threads = None
             self.process_priority = "Normal"
+            self.temperature = 0.3
+            self.merge_lines = False
         
         # Setup WebSocket
         import socketio
@@ -220,7 +226,12 @@ class TranscriptionThread(QThread):
             if self.vad_enabled:
                 vad_params = dict(min_silence_duration_ms=self.vad_silence_duration)
 
-            # Use unified transcription module
+            # Get diarization settings
+            diarization_params = None
+            if self.diarization_enabled:
+                diarization_params = dict(min_speakers=self.min_speakers, max_speakers=self.max_speakers)
+
+            # Use unified transcription module with all settings
             success = transcribe.process_create(
                 file=file_path,
                 model_name=self.model_name,
@@ -230,6 +241,12 @@ class TranscriptionThread(QThread):
                 compute_type=self.compute_type,
                 force_device=self.force_device,
                 cpu_threads=self.cpu_threads,
+                vad_filter=self.vad_enabled,
+                vad_params=vad_params,
+                diarization=self.diarization_enabled,
+                diarization_params=diarization_params,
+                temperature=self.temperature,
+                merge_lines=self.merge_lines,
                 write=lambda msg: self.progress.emit(str(msg))
             )
 
@@ -642,8 +659,42 @@ class TranscriptionApp(QWidget):
         diar_layout.addLayout(diar_params)
         diar_group.setLayout(diar_layout)
         vad_diar_layout.addWidget(diar_group)
-        
+
         device_group.addLayout(vad_diar_layout)
+
+        # Advanced transcription options
+        advanced_transcribe_group = QGroupBox("Advanced Transcription")
+        advanced_transcribe_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #5E81AC;
+                margin-top: 0.5em;
+                padding-top: 0.5em;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px 0 3px;
+            }
+        """)
+        advanced_transcribe_layout = QVBoxLayout()
+
+        # Temperature setting
+        temp_layout = QHBoxLayout()
+        temp_layout.addWidget(QLabel("Temperature:"))
+        self.temperature_spinbox = QComboBox()
+        self.temperature_spinbox.addItems(["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"])
+        self.temperature_spinbox.setCurrentText("0.3")
+        temp_layout.addWidget(self.temperature_spinbox)
+        temp_layout.addWidget(QLabel("(Higher = more creative, Lower = more deterministic)"))
+        advanced_transcribe_layout.addLayout(temp_layout)
+
+        # Merge lines checkbox
+        self.merge_lines_check = QCheckBox("Merge Adjacent Lines (combine short segments)")
+        self.merge_lines_check.setChecked(False)
+        advanced_transcribe_layout.addWidget(self.merge_lines_check)
+
+        advanced_transcribe_group.setLayout(advanced_transcribe_layout)
+        device_group.addWidget(advanced_transcribe_group)
 
         # YouTube Cookies Settings
         youtube_settings_layout = QVBoxLayout()

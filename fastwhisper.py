@@ -117,6 +117,7 @@ class TranscriptionThread(QThread):
             # Get advanced transcription settings
             self.temperature = float(main_window.temperature_spinbox.currentText())
             self.merge_lines = main_window.merge_lines_check.isChecked()
+            self.mpv_ipc = main_window.mpv_ipc_check.isChecked()
 
         else:
             # Default values if window not found
@@ -134,6 +135,7 @@ class TranscriptionThread(QThread):
             self.process_priority = "Normal"
             self.temperature = 0.3
             self.merge_lines = False
+            self.mpv_ipc = False
         
         # Setup WebSocket
         import socketio
@@ -231,6 +233,26 @@ class TranscriptionThread(QThread):
             if self.diarization_enabled:
                 diarization_params = dict(min_speakers=self.min_speakers, max_speakers=self.max_speakers)
 
+            # Create MPV IPC reload callback if enabled
+            mpv_reload_callback = None
+            if self.mpv_ipc:
+                import socket
+                import json
+                mpv_socket_path = '/tmp/mpvsocket'
+                
+                def reload_subtitles():
+                    try:
+                        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        sock.connect(mpv_socket_path)
+                        command = {"command": ["sub-reload"]}
+                        sock.sendall(json.dumps(command).encode() + b'\n')
+                        response = sock.recv(4096).decode()
+                        sock.close()
+                    except Exception as e:
+                        self.progress.emit(f"MPV IPC reload failed: {e}")
+                
+                mpv_reload_callback = reload_subtitles
+
             # Use unified transcription module with all settings
             success = transcribe.process_create(
                 file=file_path,
@@ -249,6 +271,7 @@ class TranscriptionThread(QThread):
                 merge_lines=self.merge_lines,
                 start_time=self.start_time,
                 end_time=self.end_time,
+                mpv_ipc_reload=mpv_reload_callback,
                 write=lambda msg: self.progress.emit(str(msg))
             )
 
@@ -694,6 +717,11 @@ class TranscriptionApp(QWidget):
         self.merge_lines_check = QCheckBox("Merge Adjacent Lines (combine short segments)")
         self.merge_lines_check.setChecked(False)
         advanced_transcribe_layout.addWidget(self.merge_lines_check)
+
+        # MPV IPC reload checkbox
+        self.mpv_ipc_check = QCheckBox("MPV IPC Subtitle Reload (update subtitles in real-time while transcribing)")
+        self.mpv_ipc_check.setChecked(False)
+        advanced_transcribe_layout.addWidget(self.mpv_ipc_check)
 
         advanced_transcribe_group.setLayout(advanced_transcribe_layout)
         device_group.addWidget(advanced_transcribe_group)

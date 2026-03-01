@@ -302,7 +302,7 @@ def write_srt(segments_file, srt):
             srt.write(f"{text}\n\n")
 def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print, cpu_threads=None,
                    vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False,
-                   start_time=None, end_time=None):
+                   start_time=None, end_time=None, mpv_ipc_reload=None):
     """Creates a new process to retry the transcription."""
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
@@ -356,7 +356,7 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
 
 def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads=None,
                    vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False,
-                   start_time=None, end_time=None):
+                   start_time=None, end_time=None, mpv_ipc_reload=None):
     """Try transcription with given parameters, supporting resume."""
     script_path = None
     resume_audio_path = None
@@ -498,8 +498,11 @@ vad_filter = {str(vad_filter).lower()}
 vad_params = {vad_params if vad_params else 'None'}
 temperature = {temperature}
 merge_lines = {str(merge_lines).lower()}
+mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
+segments_written = 0
 
 def write_segments():
+    global segments_written
     current_index = {start_index} + 1
     with open(r"{unfinished_srt}", "{open_mode}", encoding="utf-8") as f:
         if "{open_mode}" == "a" and os.path.getsize(r"{unfinished_srt}") > 0:
@@ -510,16 +513,24 @@ def write_segments():
                 segment = segment_queue.get(timeout=0.5)
                 start_time = format_timestamp(segment.start)
                 end_time = format_timestamp(segment.end)
-                
+
                 f.write(f"{{current_index}}\\n")
                 f.write(f"{{start_time}} --> {{end_time}}\\n")
                 f.write(f"{{segment.text.strip()}}\\n\\n")
                 f.flush()
-                
+
                 current_index += 1
+                segments_written += 1
                 segment_queue.task_done()
                 write_event.set()
-                
+
+                # Reload subtitles in MPV via IPC every 10 segments
+                if segments_written % 10 == 0 and mpv_ipc_reload is not None:
+                    try:
+                        mpv_ipc_reload()
+                    except Exception as ipc_err:
+                        print(f"MPV IPC reload failed: {{ipc_err}}")
+
                 if current_index % 10 == 0:
                     print(f"Written {{current_index - {start_index} - 1}} new segments (total {{current_index-1}})")
             except queue.Empty:

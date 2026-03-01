@@ -118,7 +118,8 @@ class WhisperSubs:
                  vad_filter=False, vad_min_silence_duration=500,
                  diarization=False, min_speakers=1, max_speakers=2,
                  temperature=0.3, merge_lines=False,
-                 start_time=None, end_time=None):
+                 start_time=None, end_time=None,
+                 mpv_ipc=False, mpv_socket=None):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
@@ -149,6 +150,9 @@ class WhisperSubs:
         # Time range settings
         self.start_time = start_time
         self.end_time = end_time
+        # MPV IPC settings
+        self.mpv_ipc = mpv_ipc
+        self.mpv_socket = mpv_socket or '/tmp/mpvsocket'
 
     def log(self, message):
         message_str = str(message)
@@ -957,24 +961,57 @@ class WhisperSubs:
             # If it's a local file, use the audio file directly
             is_local = self.is_local_file(task_source)
             media_source = audio_file if is_local else task_source
-            
+
             # Create the mpv command with --pause and input-ipc-server
+            mpv_socket = self.mpv_socket if self.mpv_socket else '/tmp/mpvsocket'
             cmd = [
                 'mpv',
                 media_source,
                 '--pause',
-                '--input-ipc-server=/tmp/mpvsocket',
+                f'--input-ipc-server={mpv_socket}',
                 f'--sub-file={srt_file}'
             ]
-            
+
             self.log(f"Launching mpv: {' '.join(cmd)}")
-            
+
             # Run mpv in the background
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.log("mpv launched in background with --pause and mpvsocket")
-            
+
         except Exception as e:
             self.log(f"Error launching mpv: {e}")
+
+    def mpv_reload_subtitles(self, srt_file):
+        """Send IPC command to MPV to reload subtitle file."""
+        if not self.mpv_ipc:
+            return False
+        
+        try:
+            import socket
+            import json
+            
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self.mpv_socket)
+            
+            # Command to reload subtitle file
+            command = {
+                "command": ["sub-reload"]
+            }
+            sock.sendall(json.dumps(command).encode() + b'\n')
+            
+            # Read response
+            response = sock.recv(4096).decode()
+            sock.close()
+            
+            self.log(f"MPV IPC response: {response.strip()}")
+            return True
+            
+        except FileNotFoundError:
+            self.log("MPV socket not found - is MPV running with IPC?")
+            return False
+        except Exception as e:
+            self.log(f"Error sending MPV IPC command: {e}")
+            return False
     
     def process_with_lazy_resolution(self, job):
         """Process a job using lazy task resolution.
@@ -1198,6 +1235,10 @@ Examples:
                               help="Start time to transcribe (format: HH:MM:SS or seconds).")
     advanced_group.add_argument('--end-time', type=str, default=None,
                               help="End time to transcribe (format: HH:MM:SS or seconds).")
+    advanced_group.add_argument('--mpv-ipc', action='store_true',
+                              help="Enable MPV IPC subtitle reload during transcription (updates subtitles in real-time).")
+    advanced_group.add_argument('--mpv-socket', type=str, default='/tmp/mpvsocket',
+                              help="MPV IPC socket path (default: /tmp/mpvsocket).")
     args = parser.parse_args()
 
     if args.list: 
@@ -1258,7 +1299,9 @@ Examples:
                     temperature=args.temperature,
                     merge_lines=args.merge_lines,
                     start_time=args.start_time,
-                    end_time=args.end_time
+                    end_time=args.end_time,
+                    mpv_ipc=args.mpv_ipc,
+                    mpv_socket=args.mpv_socket
                 )
                 processor.process(source_info['url'])
                 
@@ -1408,7 +1451,9 @@ Examples:
             temperature=args.temperature,
             merge_lines=args.merge_lines,
             start_time=args.start_time,
-            end_time=args.end_time
+            end_time=args.end_time,
+            mpv_ipc=args.mpv_ipc,
+            mpv_socket=args.mpv_socket
         )
         processor.process(job_or_source)
 

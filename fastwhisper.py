@@ -6,7 +6,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout,
-    QSystemTrayIcon, QMenu, QAction
+    QSystemTrayIcon, QMenu, QAction, QListWidget, QAbstractItemView
 )
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5 import QtGui, QtCore
@@ -102,6 +102,18 @@ class TranscriptionThread(QThread):
             except ValueError:
                 self.min_speakers = 1
                 self.max_speakers = 2
+
+            # Get thread count setting
+            thread_text = main_window.thread_combo.currentText()
+            if thread_text == "Auto (All Cores)":
+                self.cpu_threads = None  # Will use os.cpu_count()
+            else:
+                self.cpu_threads = int(thread_text.split()[0])
+
+            # Get process priority setting
+            priority_text = main_window.priority_combo.currentText()
+            self.process_priority = priority_text.split()[0]  # Get first word (e.g., "Normal", "Low")
+
         else:
             # Default values if window not found
             self.device = 'cuda'
@@ -114,6 +126,8 @@ class TranscriptionThread(QThread):
             self.min_speakers = 1
             self.max_speakers = 2
             self.use_faster_whisper = False
+            self.cpu_threads = None
+            self.process_priority = "Normal"
         
         # Setup WebSocket
         import socketio
@@ -131,25 +145,28 @@ class TranscriptionThread(QThread):
 
     def run(self):
         try:
+            # Set process priority
+            self.set_process_priority(self.process_priority)
+
             # Process YouTube URLs if any
             if self.youtube_urls:
                 urls = self.youtube_urls.strip().split('\n')
                 for url in urls:
                     self.process_url(url.strip())
-                
+
             # Process local files if any
             for i, file_path in enumerate(self.files_to_process, 1):
                 self.progress.emit(f"Processing file {i}/{len(self.files_to_process)}: {file_path}")
-                
+
                 if file_path.lower().endswith('.mkv'):
-                    file_path = self.convertMKVtoMP3(file_path)
+                    file_path = self.convertMKVtoM4A(file_path)
                     if not file_path:
                         self.progress.emit(f"Failed to convert {file_path}")
                         continue
-                    
+
                 if file_path:
                     self.process_local_file(file_path)
-            
+
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -159,48 +176,70 @@ class TranscriptionThread(QThread):
             except:
                 pass
 
+    def set_process_priority(self, priority):
+        """Set the process priority level"""
+        try:
+            import psutil
+            p = psutil.Process(os.getpid())
+            priority_map = {
+                'Low': psutil.IDLE_PRIORITY_CLASS if hasattr(psutil, 'IDLE_PRIORITY_CLASS') else 0,
+                'Below': psutil.BELOW_NORMAL_PRIORITY_CLASS if hasattr(psutil, 'BELOW_NORMAL_PRIORITY_CLASS') else 1,
+                'Normal': psutil.NORMAL_PRIORITY_CLASS if hasattr(psutil, 'NORMAL_PRIORITY_CLASS') else 2,
+                'Above': psutil.ABOVE_NORMAL_PRIORITY_CLASS if hasattr(psutil, 'ABOVE_NORMAL_PRIORITY_CLASS') else 3,
+                'High': psutil.HIGH_PRIORITY_CLASS if hasattr(psutil, 'HIGH_PRIORITY_CLASS') else 4,
+                'Realtime': psutil.REALTIME_PRIORITY_CLASS if hasattr(psutil, 'REALTIME_PRIORITY_CLASS') else 5,
+            }
+            # Linux uses niceness values (0-19, higher = lower priority)
+            if hasattr(p, 'nice'):
+                niceness_map = {
+                    'Low': 19,
+                    'Below': 10,
+                    'Normal': 0,
+                    'Above': -5,
+                    'High': -10,
+                    'Realtime': -20,
+                }
+                try:
+                    p.nice(niceness_map.get(priority, 0))
+                    self.progress.emit(f"Set process priority: {priority}")
+                except (psutil.AccessDenied, OSError) as e:
+                    self.progress.emit(f"Could not set priority (may need root): {priority}")
+        except Exception as e:
+            self.progress.emit(f"Priority setting error: {str(e)}")
+
     def process_local_file(self, file_path):
-        """Process a local file using the transcribe module with multi-language support"""
+        """Process a local file using unified transcription module"""
         try:
             # Create output srt file path
             dir_path = os.path.dirname(file_path)
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
-            temp_srt = os.path.join(dir_path, f"{base_name}.{self.model_name}.temp.srt")
-            
-            # Get VAD and diarization settings
+
+            # Get VAD settings
             vad_params = None
             if self.vad_enabled:
                 vad_params = dict(min_silence_duration_ms=self.vad_silence_duration)
 
-            diarization_params = None
-            if self.diarization_enabled:
-                diarization_params = dict(min_speakers=self.min_speakers, max_speakers=self.max_speakers)
-            
-            # Use transcribe module with proper settings
+            # Use unified transcription module
             success = transcribe.process_create(
                 file=file_path,
                 model_name=self.model_name,
                 srt_file=srt_file,
-                language=self.force_lang,  # Use the language from UI selection
+                language=self.force_lang,
                 device=self.device,
                 compute_type=self.compute_type,
                 force_device=self.force_device,
+                cpu_threads=self.cpu_threads,
                 write=lambda msg: self.progress.emit(str(msg))
             )
-            
+
             if success:
                 self.progress.emit(f"Successfully transcribed {file_path}")
             else:
                 self.error.emit(f"Failed to transcribe {file_path}")
-            
+
         except Exception as e:
             self.error.emit(f"Error processing {file_path}: {str(e)}")
-            if os.path.exists(temp_srt):
-                try:
-                    os.remove(temp_srt)
-                except:
-                    pass
 
     def format_timestamp(self, seconds):
         """Convert seconds to SRT timestamp format"""
@@ -230,14 +269,14 @@ class TranscriptionThread(QThread):
         except Exception as e:
             self.error.emit(f"Error processing {url}: {str(e)}")
 
-    def convertMKVtoMP3(self, mkv_path):
-        output_mp3 = os.path.splitext(mkv_path)[0] + ".mp3"
+    def convertMKVtoM4A(self, mkv_path):
+        output_m4a = os.path.splitext(mkv_path)[0] + ".m4a"
         try:
             mkv = pymkv.MKVFile(mkv_path)
-            
+
             # Try to find Japanese audio track first, then undefined, then any audio track
             audio_track_id = next(
-                (track.track_id for track in mkv.tracks 
+                (track.track_id for track in mkv.tracks
                  if track.track_type == 'audio' and track.language in ['jpn', 'und']),
                 next(
                     (track.track_id for track in mkv.tracks if track.track_type == 'audio'),
@@ -251,14 +290,14 @@ class TranscriptionThread(QThread):
             command = [
                 "ffmpeg", "-y", "-i", mkv_path,
                 "-map", f"0:{audio_track_id}",
-                "-c:a", "libmp3lame",
-                output_mp3
+                "-c:a", "aac", "-b:a", "192k",
+                output_m4a
             ]
-            
+
             subprocess.run(command, check=True)
-            self.progress.emit(f"Converted {mkv_path} to {output_mp3}")
-            return output_mp3
-            
+            self.progress.emit(f"Converted {mkv_path} to {output_m4a}")
+            return output_m4a
+
         except Exception as e:
             self.progress.emit(f"Error converting {mkv_path}: {str(e)}")
             return None
@@ -487,6 +526,46 @@ class TranscriptionApp(QWidget):
         compute_layout.addWidget(self.compute_combo)
         device_group.addLayout(compute_layout)
 
+        # Thread count and process priority
+        advanced_layout = QVBoxLayout()
+
+        # Thread count
+        thread_layout = QHBoxLayout()
+        thread_layout.addWidget(QLabel("CPU Threads:"))
+        self.thread_combo = QComboBox()
+        thread_options = [
+            "Auto (All Cores)",
+            "1 Thread",
+            "2 Threads",
+            "4 Threads",
+            "8 Threads",
+            "16 Threads",
+            "32 Threads"
+        ]
+        self.thread_combo.addItems(thread_options)
+        self.thread_combo.setCurrentText("Auto (All Cores)")
+        thread_layout.addWidget(self.thread_combo)
+        advanced_layout.addLayout(thread_layout)
+
+        # Process priority
+        priority_layout = QHBoxLayout()
+        priority_layout.addWidget(QLabel("Process Priority:"))
+        self.priority_combo = QComboBox()
+        priority_options = [
+            "Normal",
+            "Low (Idle)",
+            "Below Normal",
+            "Above Normal",
+            "High",
+            "Realtime (Not Recommended)"
+        ]
+        self.priority_combo.addItems(priority_options)
+        self.priority_combo.setCurrentText("Normal")
+        priority_layout.addWidget(self.priority_combo)
+        advanced_layout.addLayout(priority_layout)
+
+        device_group.addLayout(advanced_layout)
+
         # Add VAD and diarization options
         vad_diar_layout = QVBoxLayout()
         
@@ -629,7 +708,46 @@ class TranscriptionApp(QWidget):
         self.file_button = QPushButton('Select Audio Files', self)
         self.file_button.clicked.connect(self.selectFiles)
         layout.addWidget(self.file_button)
+
+        # File list with reordering controls
+        file_list_layout = QHBoxLayout()
         
+        # File list widget
+        self.file_list_widget = QListWidget()
+        self.file_list_widget.setDragDropMode(QAbstractItemView.InternalMove)
+        self.file_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list_widget.setMinimumHeight(150)
+        self.file_list_widget.itemSelectionChanged.connect(self.update_file_buttons_state)
+        file_list_layout.addWidget(self.file_list_widget, stretch=1)
+        
+        # Move buttons
+        move_buttons_layout = QVBoxLayout()
+        self.move_up_button = QPushButton('↑ Up')
+        self.move_up_button.clicked.connect(self.move_file_up)
+        self.move_up_button.setEnabled(False)
+        move_buttons_layout.addWidget(self.move_up_button)
+        
+        self.move_down_button = QPushButton('↓ Down')
+        self.move_down_button.clicked.connect(self.move_file_down)
+        self.move_down_button.setEnabled(False)
+        move_buttons_layout.addWidget(self.move_down_button)
+        
+        self.remove_button = QPushButton('Remove')
+        self.remove_button.clicked.connect(self.remove_selected_files)
+        self.remove_button.setEnabled(False)
+        move_buttons_layout.addWidget(self.remove_button)
+        
+        self.clear_all_button = QPushButton('Clear All')
+        self.clear_all_button.clicked.connect(self.clear_all_files)
+        self.clear_all_button.setEnabled(False)
+        move_buttons_layout.addWidget(self.clear_all_button)
+        
+        move_buttons_layout.addStretch()
+        file_list_layout.addLayout(move_buttons_layout)
+        
+        layout.addLayout(file_list_layout)
+        
+        # File count label
         self.file_label = QLabel("Selected files: None", self)
         layout.addWidget(self.file_label)
 
@@ -759,7 +877,7 @@ class TranscriptionApp(QWidget):
             self,
             "Select files",
             "",
-            "Media Files (*.mkv *.mp3 *.wav *.flac *.ogg)"
+            "Media Files (*.mkv *.mp3 *.wav *.flac *.ogg *.m4a *.aac)"
         )
 
         if files:
@@ -768,23 +886,128 @@ class TranscriptionApp(QWidget):
                 # Sort files naturally (e.g., "Episode 1" before "Episode 10")
                 try:
                     from natsort import natsorted  # For natural sorting
-                    self.selected_files = natsorted(files, key=lambda x: x.lower())
+                    new_files = natsorted(files, key=lambda x: x.lower())
                 except ImportError:
                     # Fallback to alphabetical sorting if natsort isn't available
-                    self.selected_files = sorted(files, key=lambda x: x.lower())
+                    new_files = sorted(files, key=lambda x: x.lower())
             else:
                 # Keep the original order as selected by the user
-                self.selected_files = files
+                new_files = files
+            
+            # Add new files to the list (avoid duplicates)
+            existing_files = set(self.selected_files)
+            for file in new_files:
+                if file not in existing_files:
+                    self.selected_files.append(file)
+                    self.file_list_widget.addItem(file)
+            
+            self.update_file_label()
+            self.update_file_buttons_state()
 
-            self.file_label.setText(f"Selected files: {len(self.selected_files)} files")
-
-            if not self.log_file:
+            if not self.log_file and self.selected_files:
                 self.log_file = os.path.splitext(self.selected_files[0])[0] + '.log'
+    
+    def update_file_label(self):
+        """Update the file count label"""
+        count = len(self.selected_files)
+        if count == 0:
+            self.file_label.setText("Selected files: None")
+        elif count == 1:
+            self.file_label.setText("Selected files: 1 file")
+        else:
+            self.file_label.setText(f"Selected files: {count} files")
+    
+    def update_file_buttons_state(self):
+        """Update the state of move/remove buttons based on selection"""
+        selected_items = self.file_list_widget.selectedItems()
+        selected_count = len(selected_items)
+        current_row = self.file_list_widget.currentRow()
+        total_count = self.file_list_widget.count()
+        
+        # Enable/disable remove button
+        self.remove_button.setEnabled(selected_count > 0)
+        
+        # Enable/disable clear all button
+        self.clear_all_button.setEnabled(total_count > 0)
+        
+        # Enable/disable move buttons based on selection
+        if selected_count == 1:
+            self.move_up_button.setEnabled(current_row > 0)
+            self.move_down_button.setEnabled(current_row < self.file_list_widget.count() - 1)
+        else:
+            self.move_up_button.setEnabled(False)
+            self.move_down_button.setEnabled(False)
+    
+    def move_file_up(self):
+        """Move selected file up in the list"""
+        current_row = self.file_list_widget.currentRow()
+        if current_row > 0:
+            # Swap in list
+            self.selected_files[current_row], self.selected_files[current_row - 1] = \
+                self.selected_files[current_row - 1], self.selected_files[current_row]
+            
+            # Swap in widget
+            current_item = self.file_list_widget.takeItem(current_row)
+            self.file_list_widget.insertItem(current_row - 1, current_item)
+            self.file_list_widget.setCurrentRow(current_row - 1)
+            self.update_file_label()
+    
+    def move_file_down(self):
+        """Move selected file down in the list"""
+        current_row = self.file_list_widget.currentRow()
+        if 0 <= current_row < self.file_list_widget.count() - 1:
+            # Swap in list
+            self.selected_files[current_row], self.selected_files[current_row + 1] = \
+                self.selected_files[current_row + 1], self.selected_files[current_row]
+            
+            # Swap in widget
+            current_item = self.file_list_widget.takeItem(current_row)
+            self.file_list_widget.insertItem(current_row + 1, current_item)
+            self.file_list_widget.setCurrentRow(current_row + 1)
+            self.update_file_label()
+    
+    def remove_selected_files(self):
+        """Remove selected files from the list"""
+        selected_items = self.file_list_widget.selectedItems()
+        for item in selected_items:
+            row = self.file_list_widget.row(item)
+            self.file_list_widget.takeItem(row)
+            if 0 <= row < len(self.selected_files):
+                self.selected_files.pop(row)
+        
+        self.update_file_label()
+        self.update_file_buttons_state()
+    
+    def clear_all_files(self):
+        """Clear all files from the list"""
+        self.file_list_widget.clear()
+        self.selected_files = []
+        self.update_file_label()
+        self.update_file_buttons_state()
+    
     def selectDirectory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Directory")
         if directory:
             self.selected_directory = directory
             self.dir_label.setText(f"Selected directory: {directory}")
+            
+            # Get all media files from directory
+            media_extensions = {'.mkv', '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
+            dir_files = []
+            for file in sorted(os.listdir(directory)):
+                if os.path.splitext(file)[1].lower() in media_extensions:
+                    full_path = os.path.join(directory, file)
+                    if full_path not in self.selected_files:
+                        dir_files.append(full_path)
+            
+            # Add files to list
+            for file in dir_files:
+                self.selected_files.append(file)
+                self.file_list_widget.addItem(file)
+            
+            self.update_file_label()
+            self.update_file_buttons_state()
+            
             if not self.log_file:
                 self.log_file = os.path.join(directory, 'transcription.log')
 
@@ -819,73 +1042,25 @@ class TranscriptionApp(QWidget):
         start_time = self.start_time.text().strip() or None
         end_time = self.end_time.text().strip() or None
 
-        # Process local files first
-        files_to_process = []
-        seen_base_names = set()  # Track files by their base name without extension
+        # Process local files - use selected_files directly
+        files_to_process = list(self.selected_files)
 
-        # Helper function to add file with priority
-        def add_file_with_priority(file_path):
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            if base_name in seen_base_names:
-                return False
-            
-            # Check if we should add this file
-            is_audio = file_path.lower().endswith(('.mp3', '.wav', '.flac', '.ogg'))
-            is_mkv = file_path.lower().endswith('.mkv')
-            
-            # Get all possible related files
-            dir_path = os.path.dirname(file_path)
-            related_files = []
-            for ext in ['.mp3', '.wav', '.flac', '.ogg', '.mkv']:
-                related_path = os.path.join(dir_path, base_name + ext)
-                if os.path.exists(related_path):
-                    related_files.append(related_path)
-            
-            # If we have both audio and mkv files, prefer audio
-            if related_files:
-                has_audio = any(f.lower().endswith(('.mp3', '.wav', '.flac', '.ogg')) for f in related_files)
-                if has_audio:
-                    # Only add if this is the first audio file we've found
-                    if is_audio and file_path == min(f for f in related_files if f.lower().endswith(('.mp3', '.wav', '.flac', '.ogg'))):
-                        seen_base_names.add(base_name)
-                        files_to_process.append(file_path)
-                        return True
-                    return False
-                elif is_mkv:
-                    # No audio exists, add the mkv
-                    seen_base_names.add(base_name)
-                    files_to_process.append(file_path)
-                    return True
-            else:
-                # No related files exist, add this one
-                seen_base_names.add(base_name)
-                files_to_process.append(file_path)
-                return True
-            return False
-
-        # Collect all potential files first
-        all_files = []
-        if self.selected_files:
-            all_files.extend(self.selected_files)
-
+        # Add files from directory if selected
         if self.selected_directory:
             for f in os.listdir(self.selected_directory):
-                if f.lower().endswith(('.mkv', '.mp3', '.wav', '.flac', '.ogg')):
-                    all_files.append(os.path.join(self.selected_directory, f))
+                if f.lower().endswith(('.mkv', '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac')):
+                    full_path = os.path.join(self.selected_directory, f)
+                    if full_path not in files_to_process:
+                        files_to_process.append(full_path)
 
-        # Sort all files based on user preference
+        # Sort files based on user preference
         if hasattr(self, 'sort_files_check') and self.sort_files_check.isChecked():
             # Sort files naturally (e.g., "Episode 1" before "Episode 10")
             try:
-                from natsort import natsorted  # For natural sorting
-                all_files = natsorted(all_files, key=lambda x: os.path.basename(x).lower())
+                from natsort import natsorted
+                files_to_process = natsorted(files_to_process, key=lambda x: os.path.basename(x).lower())
             except ImportError:
-                # Fallback to alphabetical sorting if natsort isn't available
-                all_files.sort(key=lambda x: os.path.basename(x).lower())
-
-        # Process files in alphabetical order, applying priority rules
-        for file_path in all_files:
-            add_file_with_priority(file_path)
+                files_to_process.sort(key=lambda x: os.path.basename(x).lower())
 
         # Get YouTube URLs if any
         youtube_urls = self.youtube_input.toPlainText().strip()
@@ -1052,7 +1227,9 @@ class TranscriptionApp(QWidget):
             'browser': self.browser_combo.currentText(),
             'cookie_file': self.cookie_file_path.text(),
             'enable_tray': self.enable_tray_check.isChecked(),
-            'auto_hide': self.auto_hide_check.isChecked()
+            'auto_hide': self.auto_hide_check.isChecked(),
+            'cpu_threads': self.thread_combo.currentText(),
+            'process_priority': self.priority_combo.currentText()
         }
 
         try:
@@ -1136,11 +1313,15 @@ class TranscriptionApp(QWidget):
                 if 'selected_directory' in settings and settings['selected_directory']:
                     self.selected_directory = settings['selected_directory']
                     self.dir_label.setText(f"Selected directory: {self.selected_directory}")
-                
+
                 if 'selected_files' in settings:
                     self.selected_files = settings['selected_files']
-                    if self.selected_files:
-                        self.file_label.setText(f"Selected files: {len(self.selected_files)} files")
+                    # Populate the file list widget
+                    self.file_list_widget.clear()
+                    for file in self.selected_files:
+                        self.file_list_widget.addItem(file)
+                    self.update_file_label()
+                    self.update_file_buttons_state()
                 
                 # Load YouTube cookie settings
                 if 'use_cookies' in settings:
@@ -1159,6 +1340,17 @@ class TranscriptionApp(QWidget):
 
                 if 'auto_hide' in settings:
                     self.auto_hide_check.setChecked(settings['auto_hide'])
+
+                # Load thread count and process priority settings
+                if 'cpu_threads' in settings:
+                    index = self.thread_combo.findText(settings['cpu_threads'])
+                    if index >= 0:
+                        self.thread_combo.setCurrentIndex(index)
+
+                if 'process_priority' in settings:
+                    index = self.priority_combo.findText(settings['process_priority'])
+                    if index >= 0:
+                        self.priority_combo.setCurrentIndex(index)
 
         except Exception as e:
             self.log(f"Error loading settings: {str(e)}")

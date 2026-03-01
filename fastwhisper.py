@@ -247,6 +247,8 @@ class TranscriptionThread(QThread):
                 diarization_params=diarization_params,
                 temperature=self.temperature,
                 merge_lines=self.merge_lines,
+                start_time=self.start_time,
+                end_time=self.end_time,
                 write=lambda msg: self.progress.emit(str(msg))
             )
 

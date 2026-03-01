@@ -117,7 +117,8 @@ class WhisperSubs:
     def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser="brave", strict_language_tier=False, force_retry=False,
                  vad_filter=False, vad_min_silence_duration=500,
                  diarization=False, min_speakers=1, max_speakers=2,
-                 temperature=0.3, merge_lines=False):
+                 temperature=0.3, merge_lines=False,
+                 start_time=None, end_time=None):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
@@ -145,6 +146,9 @@ class WhisperSubs:
         # Transcription settings
         self.temperature = temperature
         self.merge_lines = merge_lines
+        # Time range settings
+        self.start_time = start_time
+        self.end_time = end_time
 
     def log(self, message):
         message_str = str(message)
@@ -1190,6 +1194,10 @@ Examples:
                               help="Sampling temperature for transcription (default: 0.3).")
     advanced_group.add_argument('--merge-lines', action='store_true',
                               help="Merge adjacent subtitle lines.")
+    advanced_group.add_argument('--start-time', type=str, default=None,
+                              help="Start time to transcribe (format: HH:MM:SS or seconds).")
+    advanced_group.add_argument('--end-time', type=str, default=None,
+                              help="End time to transcribe (format: HH:MM:SS or seconds).")
     args = parser.parse_args()
 
     if args.list: 
@@ -1248,7 +1256,9 @@ Examples:
                     min_speakers=args.min_speakers,
                     max_speakers=args.max_speakers,
                     temperature=args.temperature,
-                    merge_lines=args.merge_lines
+                    merge_lines=args.merge_lines,
+                    start_time=args.start_time,
+                    end_time=args.end_time
                 )
                 processor.process(source_info['url'])
                 
@@ -1396,7 +1406,9 @@ Examples:
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
             temperature=args.temperature,
-            merge_lines=args.merge_lines
+            merge_lines=args.merge_lines,
+            start_time=args.start_time,
+            end_time=args.end_time
         )
         processor.process(job_or_source)
 

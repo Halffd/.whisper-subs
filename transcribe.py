@@ -301,7 +301,8 @@ def write_srt(segments_file, srt):
             srt.write(f"{start_time} --> {end_time}\n")
             srt.write(f"{text}\n\n")
 def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print, cpu_threads=None,
-                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False):
+                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False,
+                   start_time=None, end_time=None):
     """Creates a new process to retry the transcription."""
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
@@ -328,7 +329,8 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
 
         # Try with original settings first
         success = try_transcribe(file, model_name, srt_file, language, device, compute_type, force_device, write, cpu_threads,
-                                 vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines)
+                                 vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines,
+                                 start_time, end_time)
         if success:
             return True
 
@@ -338,31 +340,81 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
             for j in range(i-1, -1, -1):
                 current_model = model_names[j]
                 success = try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads,
-                                         vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines)
+                                         vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines,
+                                         start_time, end_time)
                 if success:
                     write(f"Successfully transcribed with {current_model}")
                     return True
             if device == 'cuda':
                 write("All GPU models failed, falling back to CPU...")
                 return try_transcribe(file, 'medium.en' if 'en' in model_name else 'large-v3', srt_file, language, 'cpu', 'int8', False, write, cpu_threads,
-                                      vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines)
+                                      vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines,
+                                      start_time, end_time)
     else:
         write('No model')
     return False
 
 def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads=None,
-                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False):
+                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False,
+                   start_time=None, end_time=None):
     """Try transcription with given parameters, supporting resume."""
     script_path = None
     resume_audio_path = None
+    trimmed_audio_path = None
     try:
         unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
         os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
-        
+
+        # --- TIME RANGE CUTTING ---
+        audio_to_transcribe = file
+        if start_time or end_time:
+            trimmed_audio_path = os.path.splitext(file)[0] + ".trimmed.m4a"
+            ffmpeg_cmd = ['ffmpeg', '-y', '-i', file]
+            
+            if start_time:
+                # Parse start time (support HH:MM:SS or seconds)
+                if ':' in str(start_time):
+                    ffmpeg_cmd.extend(['-ss', str(start_time)])
+                else:
+                    ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=float(start_time)))])
+            
+            if end_time:
+                # Parse end time and calculate duration
+                if ':' in str(end_time):
+                    # Convert HH:MM:SS to seconds
+                    parts = str(end_time).split(':')
+                    end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                else:
+                    end_seconds = float(end_time)
+                
+                # Calculate duration
+                if start_time:
+                    if ':' in str(start_time):
+                        parts = str(start_time).split(':')
+                        start_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    else:
+                        start_seconds = float(start_time)
+                    duration = end_seconds - start_seconds
+                else:
+                    duration = end_seconds
+                
+                ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
+            
+            ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', '192k', trimmed_audio_path])
+            
+            write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                audio_to_transcribe = trimmed_audio_path
+                write(f"Created trimmed audio: {trimmed_audio_path}")
+            else:
+                write(f"Warning: FFmpeg trimming failed: {result.stderr}, using original file")
+                trimmed_audio_path = None
+        # --- END TIME RANGE CUTTING ---
+
         # --- RESUME LOGIC ---
         resume_offset_seconds = 0.0
         start_index = 0
-        audio_to_transcribe = file
         open_mode = 'w'
 
         last_end_time, last_segment_number = get_srt_resume_info(unfinished_srt)
@@ -372,17 +424,17 @@ def try_transcribe(file, current_model, srt_file, language, device, compute_type
             resume_offset_seconds = last_end_time
             start_index = last_segment_number
             open_mode = 'a'
-            resume_audio_path = os.path.splitext(file)[0] + ".resume.mp3"
-            
+            resume_audio_path = os.path.splitext(audio_to_transcribe)[0] + ".resume.m4a"
+
             try:
                 ss_time = str(datetime.timedelta(seconds=resume_offset_seconds))
-                ffmpeg_command = ['/bin/ffmpeg', '-y', '-ss', ss_time, '-i', file, '-c:a', 'libmp3lame', resume_audio_path]
+                ffmpeg_command = ['/bin/ffmpeg', '-y', '-ss', ss_time, '-i', audio_to_transcribe, '-c:a', 'aac', '-b:a', '192k', resume_audio_path]
                 write(f"Creating partial audio file for resume...")
-                
+
                 result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
                 if result.returncode != 0:
                     raise Exception(f"FFmpeg failed to create resume audio file: {result.stderr}")
-                
+
                 audio_to_transcribe = resume_audio_path
             except Exception as e:
                 write(f"Could not create resume audio file: {e}. Starting from beginning.")
@@ -582,6 +634,9 @@ finally:
             if resume_audio_path and os.path.exists(resume_audio_path):
                 os.unlink(resume_audio_path)
                 write("Removed temporary resume audio file.")
+            if trimmed_audio_path and os.path.exists(trimmed_audio_path):
+                os.unlink(trimmed_audio_path)
+                write("Removed temporary trimmed audio file.")
         except Exception as e:
             write(f"Warning: Could not remove temporary file: {e}")
 

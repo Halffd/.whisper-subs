@@ -117,7 +117,7 @@ class WhisperSubs:
     def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser="brave", strict_language_tier=False, force_retry=False,
                  vad_filter=False, vad_min_silence_duration=500,
                  diarization=False, min_speakers=1, max_speakers=2,
-                 temperature=0.3, merge_lines=False,
+                 temperature=0, merge_lines=False,
                  start_time=None, end_time=None,
                  mpv_ipc=False, mpv_socket=None):
         self.model_name = model_name
@@ -1227,8 +1227,8 @@ Examples:
                               help="Minimum number of speakers for diarization (default: 1).")
     advanced_group.add_argument('--max-speakers', type=int, default=2,
                               help="Maximum number of speakers for diarization (default: 2).")
-    advanced_group.add_argument('--temperature', type=float, default=0.3,
-                              help="Sampling temperature for transcription (default: 0.3).")
+    advanced_group.add_argument('--temperature', type=float, default=0,
+                              help="Sampling temperature for transcription (default: 0).")
     advanced_group.add_argument('--merge-lines', action='store_true',
                               help="Merge adjacent subtitle lines.")
     advanced_group.add_argument('--start-time', type=str, default=None,

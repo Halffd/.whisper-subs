@@ -206,7 +206,6 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
 #            no_speech_threshold=0.4,           # stricter silence rejection
             repetition_penalty=1.2,
             no_repeat_ngram_size=3,
-            temperature=0.3,
             suppress_tokens=[-1]
         )
 
@@ -301,7 +300,7 @@ def write_srt(segments_file, srt):
             srt.write(f"{start_time} --> {end_time}\n")
             srt.write(f"{text}\n\n")
 def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print, cpu_threads=None,
-                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False,
+                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0, merge_lines=False,
                    start_time=None, end_time=None, mpv_ipc_reload=None):
     """Creates a new process to retry the transcription."""
     if file is None:
@@ -355,7 +354,7 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
     return False
 
 def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads=None,
-                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0.3, merge_lines=False,
+                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0, merge_lines=False,
                    start_time=None, end_time=None, mpv_ipc_reload=None):
     """Try transcription with given parameters, supporting resume."""
     script_path = None
@@ -494,10 +493,10 @@ stop_event = threading.Event()
 device = "{device}"
 compute_type = "{compute_type}"
 cpu_threads = {cpu_threads if cpu_threads else 'None'}
-vad_filter = {str(vad_filter).lower()}
+vad_filter = {str(vad_filter).capitalize()}
 vad_params = {vad_params if vad_params else 'None'}
 temperature = {temperature}
-merge_lines = {str(merge_lines).lower()}
+merge_lines = {str(merge_lines).capitalize()}
 mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
 segments_written = 0
 
@@ -552,9 +551,9 @@ try:
         language={language_param},
         vad_filter=vad_filter,
         vad_parameters=vad_params if vad_params else None,
+        temperature=temperature,
         repetition_penalty=1.2,
         no_repeat_ngram_size=3,
-        temperature=temperature,
         suppress_tokens=[-1]
     )
     

@@ -115,11 +115,10 @@ class TranscriptionThread(QThread):
             self.process_priority = priority_text.split()[0]  # Get first word (e.g., "Normal", "Low")
 
             # Get advanced transcription settings
-            temp_text = main_window.temperature_spinbox.currentText()
-            if temp_text == "None (Model Default)":
+            if self.temperature_auto_check.isChecked():
                 self.temperature = None  # Use model default
             else:
-                self.temperature = float(temp_text)
+                self.temperature = self.temperature_slider.value() / 10.0
             self.merge_lines = main_window.merge_lines_check.isChecked()
             self.mpv_ipc = main_window.mpv_ipc_check.isChecked()
 
@@ -725,15 +724,38 @@ class TranscriptionApp(QWidget):
         """)
         advanced_transcribe_layout = QVBoxLayout()
 
-        # Temperature setting
-        temp_layout = QHBoxLayout()
-        temp_layout.addWidget(QLabel("Temperature:"))
-        self.temperature_spinbox = QComboBox()
-        self.temperature_spinbox.addItems(["None (Model Default)", "0.0", "0.1", "0.2", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"])
-        self.temperature_spinbox.setCurrentText("None (Model Default)")
-        temp_layout.addWidget(self.temperature_spinbox)
-        temp_layout.addWidget(QLabel("(Higher = more creative, Lower = more deterministic)"))
-        advanced_transcribe_layout.addLayout(temp_layout)
+        # Temperature setting with checkbox and slider
+        temp_checkbox_layout = QHBoxLayout()
+        self.temperature_auto_check = QCheckBox("Auto (Model Default)")
+        self.temperature_auto_check.setChecked(True)  # Default to None/auto
+        temp_checkbox_layout.addWidget(self.temperature_auto_check)
+        temp_checkbox_layout.addStretch()
+        advanced_transcribe_layout.addLayout(temp_checkbox_layout)
+
+        # Temperature slider row
+        temp_slider_layout = QHBoxLayout()
+        temp_slider_layout.addWidget(QLabel("Temperature:"))
+        
+        self.temperature_slider = QSlider(QtCore.Qt.Horizontal)
+        self.temperature_slider.setMinimum(0)
+        self.temperature_slider.setMaximum(10)
+        self.temperature_slider.setValue(3)  # Default 0.3
+        self.temperature_slider.setTickPosition(QSlider.TicksBelow)
+        self.temperature_slider.setTickInterval(1)
+        self.temperature_slider.setEnabled(False)  # Disabled when auto is checked
+        temp_slider_layout.addWidget(self.temperature_slider)
+        
+        self.temperature_value_label = QLabel("0.3")
+        self.temperature_value_label.setMinimumWidth(30)
+        temp_slider_layout.addWidget(self.temperature_value_label)
+        
+        advanced_transcribe_layout.addLayout(temp_slider_layout)
+        
+        # Connect checkbox to slider enable/disable
+        self.temperature_auto_check.stateChanged.connect(self.toggle_temperature_slider)
+        self.temperature_slider.valueChanged.connect(self.update_temperature_label)
+        
+        advanced_transcribe_layout.addWidget(QLabel("(Higher = more creative, Lower = more deterministic)"))
 
         # Merge lines checkbox
         self.merge_lines_check = QCheckBox("Merge Adjacent Lines (combine short segments)")
@@ -1019,6 +1041,18 @@ class TranscriptionApp(QWidget):
             self.file_label.setText("Selected files: 1 file")
         else:
             self.file_label.setText(f"Selected files: {count} files")
+    
+    def toggle_temperature_slider(self, state):
+        """Enable/disable temperature slider based on auto checkbox"""
+        is_auto = self.temperature_auto_check.isChecked()
+        self.temperature_slider.setEnabled(not is_auto)
+        if is_auto:
+            self.temperature_value_label.setText("None")
+    
+    def update_temperature_label(self, value):
+        """Update temperature value label when slider changes"""
+        temp = value / 10.0
+        self.temperature_value_label.setText(f"{temp:.1f}")
     
     def update_file_buttons_state(self):
         """Update the state of move/remove buttons based on selection"""
@@ -1332,7 +1366,9 @@ class TranscriptionApp(QWidget):
             'enable_tray': self.enable_tray_check.isChecked(),
             'auto_hide': self.auto_hide_check.isChecked(),
             'cpu_threads': self.thread_combo.currentText(),
-            'process_priority': self.priority_combo.currentText()
+            'process_priority': self.priority_combo.currentText(),
+            'temperature_auto': self.temperature_auto_check.isChecked(),
+            'temperature_value': self.temperature_slider.value()
         }
 
         try:
@@ -1454,6 +1490,17 @@ class TranscriptionApp(QWidget):
                     index = self.priority_combo.findText(settings['process_priority'])
                     if index >= 0:
                         self.priority_combo.setCurrentIndex(index)
+
+                # Load temperature settings
+                if 'temperature_auto' in settings:
+                    self.temperature_auto_check.setChecked(settings['temperature_auto'])
+                if 'temperature_value' in settings:
+                    self.temperature_slider.setValue(settings['temperature_value'])
+                    # Update label to match
+                    temp = settings['temperature_value'] / 10.0
+                    self.temperature_value_label.setText(f"{temp:.1f}")
+                # Toggle slider state based on auto checkbox
+                self.toggle_temperature_slider(None)
 
         except Exception as e:
             self.log(f"Error loading settings: {str(e)}")

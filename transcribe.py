@@ -366,17 +366,23 @@ def try_transcribe(file, current_model, srt_file, language, device, compute_type
 
         # --- TIME RANGE CUTTING ---
         audio_to_transcribe = file
+        start_offset_seconds = 0.0
+        
         if start_time or end_time:
             trimmed_audio_path = os.path.splitext(file)[0] + ".trimmed.m4a"
             ffmpeg_cmd = ['ffmpeg', '-y', '-i', file]
-            
+
             if start_time:
                 # Parse start time (support HH:MM:SS or seconds)
                 if ':' in str(start_time):
                     ffmpeg_cmd.extend(['-ss', str(start_time)])
+                    # Calculate offset for subtitle timestamps
+                    parts = str(start_time).split(':')
+                    start_offset_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
                 else:
                     ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=float(start_time)))])
-            
+                    start_offset_seconds = float(start_time)
+
             if end_time:
                 # Parse end time and calculate duration
                 if ':' in str(end_time):
@@ -385,30 +391,27 @@ def try_transcribe(file, current_model, srt_file, language, device, compute_type
                     end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
                 else:
                     end_seconds = float(end_time)
-                
+
                 # Calculate duration
                 if start_time:
-                    if ':' in str(start_time):
-                        parts = str(start_time).split(':')
-                        start_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                    else:
-                        start_seconds = float(start_time)
-                    duration = end_seconds - start_seconds
+                    duration = end_seconds - start_offset_seconds
                 else:
                     duration = end_seconds
-                
+
                 ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
-            
+
             ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', '192k', trimmed_audio_path])
-            
+
             write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 audio_to_transcribe = trimmed_audio_path
                 write(f"Created trimmed audio: {trimmed_audio_path}")
+                write(f"Subtitle offset: {start_offset_seconds:.2f}s")
             else:
                 write(f"Warning: FFmpeg trimming failed: {result.stderr}, using original file")
                 trimmed_audio_path = None
+                start_offset_seconds = 0.0
         # --- END TIME RANGE CUTTING ---
 
         # --- RESUME LOGIC ---
@@ -498,6 +501,7 @@ vad_params = {vad_params if vad_params else 'None'}
 temperature = {temperature}
 merge_lines = {str(merge_lines).capitalize()}
 mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
+start_offset_seconds = {start_offset_seconds}
 segments_written = 0
 
 def write_segments():
@@ -510,8 +514,11 @@ def write_segments():
         while not stop_event.is_set() or not segment_queue.empty():
             try:
                 segment = segment_queue.get(timeout=0.5)
-                start_time = format_timestamp(segment.start)
-                end_time = format_timestamp(segment.end)
+                # Apply time offset if audio was trimmed
+                adjusted_start = segment.start + start_offset_seconds
+                adjusted_end = segment.end + start_offset_seconds
+                start_time = format_timestamp(adjusted_start)
+                end_time = format_timestamp(adjusted_end)
 
                 f.write(f"{{current_index}}\\n")
                 f.write(f"{{start_time}} --> {{end_time}}\\n")

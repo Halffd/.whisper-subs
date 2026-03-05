@@ -220,10 +220,18 @@ class TranscriptionThread(QThread):
     def process_local_file(self, file_path):
         """Process a local file using unified transcription module"""
         try:
-            # Create output srt file path
+            # Get base filename
             dir_path = os.path.dirname(file_path)
             base_name = os.path.splitext(os.path.basename(file_path))[0]
+            
+            # Primary output: video file's folder
             srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
+            
+            # Secondary output: Documents/Youtube-Subs/local_files
+            output_dir = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
+            local_files_dir = os.path.join(output_dir, "local_files")
+            os.makedirs(local_files_dir, exist_ok=True)
+            srt_file_secondary = os.path.join(local_files_dir, f"{base_name}.{self.model_name}.srt")
 
             # Get VAD settings
             vad_params = None
@@ -241,7 +249,7 @@ class TranscriptionThread(QThread):
                 import socket
                 import json
                 mpv_socket_path = '/tmp/mpvsocket'
-                
+
                 def reload_subtitles():
                     try:
                         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -252,7 +260,7 @@ class TranscriptionThread(QThread):
                         sock.close()
                     except Exception as e:
                         self.progress.emit(f"MPV IPC reload failed: {e}")
-                
+
                 mpv_reload_callback = reload_subtitles
 
             # Use unified transcription module with all settings
@@ -279,6 +287,14 @@ class TranscriptionThread(QThread):
 
             if success:
                 self.progress.emit(f"Successfully transcribed {file_path}")
+                # Copy to secondary location
+                if os.path.exists(srt_file):
+                    try:
+                        import shutil
+                        shutil.copy2(srt_file, srt_file_secondary)
+                        self.progress.emit(f"Copied subtitle to: {srt_file_secondary}")
+                    except Exception as copy_err:
+                        self.progress.emit(f"Warning: Could not copy to secondary location: {copy_err}")
             else:
                 self.error.emit(f"Failed to transcribe {file_path}")
 

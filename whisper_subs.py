@@ -918,11 +918,24 @@ class WhisperSubs:
             base_name = os.path.splitext(os.path.basename(audio_file))[0]
             if not base_name.endswith(f".{self.model_name}"):
                 base_name = f"{base_name}.{self.model_name}"
-            srt_file = os.path.join(channel_dir, f"{base_name}.srt")
             
+            # Write to both locations: video folder AND Documents/Youtube-Subs/local_files
+            if is_local:
+                # Primary: video file's folder
+                srt_file = os.path.join(os.path.dirname(audio_file), f"{base_name}.srt")
+                # Secondary: Documents/Youtube-Subs/local_files
+                local_files_dir = os.path.join(OUTPUT_DIR, "local_files")
+                os.makedirs(local_files_dir, exist_ok=True)
+                srt_file_secondary = os.path.join(local_files_dir, f"{base_name}.srt")
+            else:
+                channel_dir = os.path.join(OUTPUT_DIR, self.clean_filename(self.channel_name))
+                os.makedirs(channel_dir, exist_ok=True)
+                srt_file = os.path.join(channel_dir, f"{base_name}.srt")
+                srt_file_secondary = None
+
             # Create helper files (bash, bat, thumbnail) before transcription
             transcribe.make_files(srt_file.replace('.srt', '.unfinished.srt'), url=task_source)
-            
+
             if transcribe.process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
@@ -932,6 +945,16 @@ class WhisperSubs:
                     if new_srt_file != srt_file and os.path.exists(new_srt_file):
                         srt_file = new_srt_file
                 transcribe.make_files(srt_file, url=task_source)
+                
+                # Copy to secondary location if applicable
+                if srt_file_secondary and os.path.exists(srt_file):
+                    try:
+                        import shutil
+                        shutil.copy2(srt_file, srt_file_secondary)
+                        self.log(f"Copied subtitle to: {srt_file_secondary}")
+                    except Exception as copy_err:
+                        self.log(f"Warning: Could not copy to secondary location: {copy_err}")
+                
                 update_task_status(job_id, task_source, 'completed')
                 self.mark_as_processed(unique_id)
                 

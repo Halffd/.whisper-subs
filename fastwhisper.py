@@ -136,6 +136,8 @@ class TranscriptionThread(QThread):
             self.temperature = 0.3
             self.merge_lines = False
             self.mpv_ipc = False
+            self.start_time = None
+            self.end_time = None
         
         # Setup WebSocket
         import socketio

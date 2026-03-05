@@ -125,7 +125,7 @@ class TranscriptionThread(QThread):
             self.compute_type = 'int8'
             self.force_device = False
             self.force_lang = None
-            self.vad_enabled = True
+            self.vad_enabled = False  # Disabled by default
             self.vad_silence_duration = 500
             self.diarization_enabled = False
             self.min_speakers = 1
@@ -647,7 +647,7 @@ class TranscriptionApp(QWidget):
         
         # VAD filter checkbox
         self.vad_enabled = QCheckBox("Enable VAD Filter")
-        self.vad_enabled.setChecked(True)
+        self.vad_enabled.setChecked(False)  # Disabled by default
         vad_layout.addWidget(self.vad_enabled)
         
         # VAD parameters

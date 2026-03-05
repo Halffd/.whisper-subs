@@ -204,9 +204,6 @@ def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None,
             #    speech_pad_ms=600,             # smoother joins
             #),
 #            no_speech_threshold=0.4,           # stricter silence rejection
-            repetition_penalty=1.2,
-            no_repeat_ngram_size=3,
-            suppress_tokens=[-1]
         )
 
         # Convert segments generator to list for post-processing
@@ -497,7 +494,7 @@ device = "{device}"
 compute_type = "{compute_type}"
 cpu_threads = {cpu_threads if cpu_threads else 'None'}
 vad_filter = {str(vad_filter).capitalize()}
-vad_params = {vad_params if vad_params else 'None'}
+vad_params = {vad_params if vad_filter and vad_params else 'None'}
 temperature = {temperature}
 merge_lines = {str(merge_lines).capitalize()}
 mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
@@ -557,11 +554,8 @@ try:
         r"{audio_to_transcribe}",
         language={language_param},
         vad_filter=vad_filter,
-        vad_parameters=vad_params if vad_params else None,
-        temperature=temperature,
-        repetition_penalty=1.2,
-        no_repeat_ngram_size=3,
-        suppress_tokens=[-1]
+        vad_parameters=vad_params if vad_filter and vad_params else None,
+        temperature=temperature
     )
     
     resume_offset = {resume_offset_seconds}

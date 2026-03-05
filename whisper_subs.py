@@ -137,7 +137,7 @@ class WhisperSubs:
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         self.delay = 30
         self.start_delay = 30
-        # VAD settings
+        # VAD settings (disabled by default)
         self.vad_filter = vad_filter
         self.vad_min_silence_duration = vad_min_silence_duration
         # Diarization settings

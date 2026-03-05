@@ -116,7 +116,7 @@ class TranscriptionThread(QThread):
 
             # Get advanced transcription settings
             temp_text = main_window.temperature_spinbox.currentText()
-            if temp_text == "Default (0.3)":
+            if temp_text == "None (Model Default)":
                 self.temperature = None  # Use model default
             else:
                 self.temperature = float(temp_text)
@@ -729,8 +729,8 @@ class TranscriptionApp(QWidget):
         temp_layout = QHBoxLayout()
         temp_layout.addWidget(QLabel("Temperature:"))
         self.temperature_spinbox = QComboBox()
-        self.temperature_spinbox.addItems(["Default (0.3)", "0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"])
-        self.temperature_spinbox.setCurrentText("Default (0.3)")
+        self.temperature_spinbox.addItems(["None (Model Default)", "0.0", "0.1", "0.2", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"])
+        self.temperature_spinbox.setCurrentText("None (Model Default)")
         temp_layout.addWidget(self.temperature_spinbox)
         temp_layout.addWidget(QLabel("(Higher = more creative, Lower = more deterministic)"))
         advanced_transcribe_layout.addLayout(temp_layout)

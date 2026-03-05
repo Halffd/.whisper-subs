@@ -115,9 +115,9 @@ def list_jobs():
 # --- Core Class ---
 class WhisperSubs:
     def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser="brave", strict_language_tier=False, force_retry=False,
-                 vad_filter=False, vad_min_silence_duration=500,
+                 vad_filter=None, vad_min_silence_duration=None,
                  diarization=False, min_speakers=1, max_speakers=2,
-                 temperature=0, merge_lines=False,
+                 temperature=None, merge_lines=False,
                  start_time=None, end_time=None,
                  mpv_ipc=False, mpv_socket=None):
         self.model_name = model_name

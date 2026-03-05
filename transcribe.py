@@ -547,16 +547,28 @@ writer_thread.start()
 try:
     print(f"Starting transcription with model {current_model} on device {{device}}")
     print(f"Full log will be written to: {{log_file}}")
-    
+
     model = faster_whisper.WhisperModel("{current_model}", device=device, compute_type=compute_type, cpu_threads=cpu_threads if cpu_threads else os.cpu_count())
 
-    segments, info = model.transcribe(
-        r"{audio_to_transcribe}",
-        language={language_param},
-        vad_filter=vad_filter,
-        vad_parameters=vad_params if vad_filter and vad_params else None,
-        temperature=temperature
-    )
+    # Build transcribe kwargs dynamically - only pass non-None values
+    transcribe_kwargs = {{
+        "audio_file": r"{audio_to_transcribe}",
+        "language": {language_param}
+    }}
+    
+    if vad_filter is not None:
+        transcribe_kwargs["vad_filter"] = vad_filter
+        if vad_params is not None:
+            transcribe_kwargs["vad_parameters"] = vad_params
+    
+    if temperature is not None:
+        transcribe_kwargs["temperature"] = temperature
+    
+    if merge_lines:
+        transcribe_kwargs["no_speech_threshold"] = 0.6
+        transcribe_kwargs["compression_ratio_threshold"] = 1.4
+
+    segments, info = model.transcribe(**transcribe_kwargs)
     
     resume_offset = {resume_offset_seconds}
     

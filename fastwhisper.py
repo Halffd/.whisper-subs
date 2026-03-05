@@ -87,12 +87,12 @@ class TranscriptionThread(QThread):
             selected_lang = main_window.lang_combo.currentText()
             self.force_lang = None if selected_lang == "Automatic" else selected_lang.split('(')[-1].strip(')')
             
-            # Get VAD settings
-            self.vad_enabled = main_window.vad_enabled.isChecked()
+            # Get VAD settings (None = model default, True/False = explicit)
+            self.vad_enabled = main_window.vad_enabled.isChecked() if main_window.vad_enabled.isChecked() else None
             try:
-                self.vad_silence_duration = int(main_window.vad_silence_duration.text() or "500")
+                self.vad_silence_duration = int(main_window.vad_silence_duration.text() or "500") if main_window.vad_enabled.isChecked() else None
             except ValueError:
-                self.vad_silence_duration = 500
+                self.vad_silence_duration = None
             
             # Get diarization settings
             self.diarization_enabled = main_window.diarization_enabled.isChecked()
@@ -115,7 +115,11 @@ class TranscriptionThread(QThread):
             self.process_priority = priority_text.split()[0]  # Get first word (e.g., "Normal", "Low")
 
             # Get advanced transcription settings
-            self.temperature = float(main_window.temperature_spinbox.currentText())
+            temp_text = main_window.temperature_spinbox.currentText()
+            if temp_text == "Default (0.3)":
+                self.temperature = None  # Use model default
+            else:
+                self.temperature = float(temp_text)
             self.merge_lines = main_window.merge_lines_check.isChecked()
             self.mpv_ipc = main_window.mpv_ipc_check.isChecked()
 
@@ -125,15 +129,15 @@ class TranscriptionThread(QThread):
             self.compute_type = 'int8'
             self.force_device = False
             self.force_lang = None
-            self.vad_enabled = False  # Disabled by default
-            self.vad_silence_duration = 500
+            self.vad_enabled = None  # None = use model default
+            self.vad_silence_duration = None
             self.diarization_enabled = False
             self.min_speakers = 1
             self.max_speakers = 2
             self.use_faster_whisper = False
             self.cpu_threads = None
             self.process_priority = "Normal"
-            self.temperature = 0.3
+            self.temperature = None  # None = use model default
             self.merge_lines = False
             self.mpv_ipc = False
             self.start_time = None
@@ -233,10 +237,10 @@ class TranscriptionThread(QThread):
             os.makedirs(local_files_dir, exist_ok=True)
             srt_file_secondary = os.path.join(local_files_dir, f"{base_name}.{self.model_name}.srt")
 
-            # Get VAD settings
+            # Get VAD settings (only pass if explicitly enabled)
             vad_params = None
-            if self.vad_enabled:
-                vad_params = dict(min_silence_duration_ms=self.vad_silence_duration)
+            if self.vad_enabled is True:  # Explicitly True, not just truthy
+                vad_params = dict(min_silence_duration_ms=self.vad_silence_duration) if self.vad_silence_duration else None
 
             # Get diarization settings
             diarization_params = None
@@ -647,7 +651,7 @@ class TranscriptionApp(QWidget):
         
         # VAD filter checkbox
         self.vad_enabled = QCheckBox("Enable VAD Filter")
-        self.vad_enabled.setChecked(False)  # Disabled by default
+        self.vad_enabled.setChecked(False)  # Unchecked = None (model default)
         vad_layout.addWidget(self.vad_enabled)
         
         # VAD parameters
@@ -725,8 +729,8 @@ class TranscriptionApp(QWidget):
         temp_layout = QHBoxLayout()
         temp_layout.addWidget(QLabel("Temperature:"))
         self.temperature_spinbox = QComboBox()
-        self.temperature_spinbox.addItems(["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"])
-        self.temperature_spinbox.setCurrentText("0.3")
+        self.temperature_spinbox.addItems(["Default (0.3)", "0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"])
+        self.temperature_spinbox.setCurrentText("Default (0.3)")
         temp_layout.addWidget(self.temperature_spinbox)
         temp_layout.addWidget(QLabel("(Higher = more creative, Lower = more deterministic)"))
         advanced_transcribe_layout.addLayout(temp_layout)

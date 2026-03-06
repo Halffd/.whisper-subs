@@ -14,7 +14,7 @@ import socketio
 import secrets
 import hashlib
 import jwt
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect, Depends, Security, Form
 from fastapi.security import APIKeyHeader, APIKeyQuery
 from fastapi.responses import JSONResponse, FileResponse
@@ -57,20 +57,20 @@ class AuthManager:
     def __init__(self, config_file: str):
         self.config_file = config_file
         self.config = self._load_config()
-        self.token_blacklist = set()
+        self.token_blacklist: set = set()
         self.lock = threading.Lock()
     
-    def _load_config(self) -> Dict:
+    def _load_config(self) -> Dict[str, Any]:
         """Load or create API configuration"""
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r') as f:
                     return json.load(f)
-            except:
+            except Exception:
                 pass
         
         # Default configuration
-        config = {
+        config: Dict[str, Any] = {
             "users": {
                 "admin": {
                     "password_hash": bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode(),
@@ -90,7 +90,7 @@ class AuthManager:
         self._save_config(config)
         return config
     
-    def _save_config(self, config: Dict):
+    def _save_config(self, config: Dict[str, Any]) -> None:
         """Save configuration to file"""
         with self.lock:
             with open(self.config_file, 'w') as f:
@@ -120,7 +120,7 @@ class AuthManager:
                 return username
         return None
     
-    def create_jwt_token(self, username: str, expires_hours: int = None) -> str:
+    def create_jwt_token(self, username: str, expires_hours: Optional[int] = None) -> str:
         """Create JWT token for user"""
         if expires_hours is None:
             expires_hours = JWT_EXPIRATION_HOURS
@@ -146,11 +146,11 @@ class AuthManager:
         except jwt.InvalidTokenError:
             return None
     
-    def revoke_token(self, token: str):
+    def revoke_token(self, token: str) -> None:
         """Add token to blacklist"""
         self.token_blacklist.add(token)
     
-    def get_user_info(self, username: str) -> Optional[Dict]:
+    def get_user_info(self, username: str) -> Optional[Dict[str, Any]]:
         """Get user information (without sensitive data)"""
         if username not in self.config.get('users', {}):
             return None

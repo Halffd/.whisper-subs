@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+WhisperSubs - Automated Video Transcription Tool
+
+Transcribes audio from YouTube, Twitch, and local files using Whisper AI.
+"""
 import os
 import sys
 import json
@@ -8,18 +13,19 @@ import re
 import subprocess
 import time
 import shutil
+import threading
 import pyperclip
 import yt_dlp
 import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+from typing import Optional, List, Dict, Any, Tuple, Union
 
 # Assuming these modules are in the same directory or installed
 import transcribe
 import twitch_vod
 import model
-import yt_dlp
 import livestream_transcriber
 
 # --- Configuration ---
@@ -114,12 +120,30 @@ def list_jobs():
 
 # --- Core Class ---
 class WhisperSubs:
-    def __init__(self, model_name='large', device='cpu', compute_type='int8', force=False, ignore_subs=False, sub_lang=None, run_mpv=False, browser="brave", strict_language_tier=False, force_retry=False,
-                 vad_filter=None, vad_min_silence_duration=None,
-                 diarization=False, min_speakers=1, max_speakers=2,
-                 temperature=None, merge_lines=False,
-                 start_time=None, end_time=None,
-                 mpv_ipc=False, mpv_socket=None):
+    def __init__(
+        self,
+        model_name: str = 'large',
+        device: str = 'cpu',
+        compute_type: str = 'int8',
+        force: bool = False,
+        ignore_subs: bool = False,
+        sub_lang: Optional[str] = None,
+        run_mpv: bool = False,
+        browser: str = "brave",
+        strict_language_tier: bool = False,
+        force_retry: bool = False,
+        vad_filter: Optional[bool] = None,
+        vad_min_silence_duration: Optional[int] = None,
+        diarization: bool = False,
+        min_speakers: int = 1,
+        max_speakers: int = 2,
+        temperature: Optional[float] = None,
+        merge_lines: bool = False,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        mpv_ipc: bool = False,
+        mpv_socket: Optional[str] = None
+    ):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
@@ -154,7 +178,7 @@ class WhisperSubs:
         self.mpv_ipc = mpv_ipc
         self.mpv_socket = mpv_socket or '/tmp/mpvsocket'
 
-    def log(self, message):
+    def log(self, message: str) -> None:
         message_str = str(message)
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"[{timestamp}] {message_str}")
@@ -162,12 +186,19 @@ class WhisperSubs:
             with open(self.log_file, 'a', encoding='utf-8') as f:
                 f.write(f"[{timestamp}] {message_str}\n")
 
-    def is_youtube(self, url): return url and 'youtu' in urlparse(url).netloc
-    def is_twitch(self, url): return url and 'twitch.tv' in urlparse(url).netloc
-    def is_local_file(self, path): return path and os.path.exists(path)
-    def is_local_dir(self, path): return path and os.path.isdir(path)
+    def is_youtube(self, url: str) -> bool:
+        return bool(url and 'youtu' in urlparse(url).netloc)
     
-    def _strip_model_from_filename(self, filename):
+    def is_twitch(self, url: str) -> bool:
+        return bool(url and 'twitch.tv' in urlparse(url).netloc)
+    
+    def is_local_file(self, path: str) -> bool:
+        return bool(path and os.path.exists(path))
+    
+    def is_local_dir(self, path: str) -> bool:
+        return bool(path and os.path.isdir(path))
+
+    def _strip_model_from_filename(self, filename: str) -> str:
         """Strip any existing model name from filename to prevent duplicate model suffixes."""
         # Import model module to access MODEL_NAMES
         import model
@@ -190,7 +221,9 @@ class WhisperSubs:
             elif len(path_parts) == 2 and path_parts[1] == 'videos':
                 return path_parts[0]
         return None
-    def get_video_info(self, url):
+    
+    def get_video_info(self, url: str) -> Tuple[str, str]:
+        """Get video title and channel name."""
         try:
             ydl_opts = {
                 "quiet": True,
@@ -229,9 +262,9 @@ class WhisperSubs:
         self.info_cache[clean_url] = info
         return info
 
-    def clean_youtube_url(self, url):
+    def clean_youtube_url(self, url: str) -> str:
         """Clean YouTube URLs by removing tracking parameters and extracting just the video ID.
-        
+
         Handles:
         - Full URLs (youtube.com/watch?v=ID)
         - Short URLs (youtu.be/ID)
@@ -524,8 +557,9 @@ class WhisperSubs:
             self.log(f"Subtitle check failed: {e}")
         
         return False
-    def download_audio(self, url, output_path):
-        """Downloads audio and returns the actual file path."""
+    
+    def download_audio(self, url: str, output_path: str) -> Optional[str]:
+        """Download audio and return the actual file path."""
         self.log(f"Downloading audio from {url}...")
         
         os.makedirs(output_path, exist_ok=True)
@@ -1134,7 +1168,7 @@ class WhisperSubs:
         update_job(job['id'], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
 
-    def process(self, job_or_source):
+    def process(self, job_or_source: Union[Dict[str, Any], str]) -> None:
         """Main processing entry point."""
         if isinstance(job_or_source, dict):
             job = job_or_source

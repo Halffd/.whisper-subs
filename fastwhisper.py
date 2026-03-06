@@ -7,8 +7,9 @@ import os
 import sys
 import datetime
 import subprocess
+import threading
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, Union
+from typing import Optional, List, Dict, Any, Tuple, Union, Callable
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout,
@@ -17,11 +18,19 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5 import QtGui, QtCore
 import pymkv
-import transcribe
 import time
 from whisper_subs import WhisperSubs
 import pyperclip
 import json
+
+# Lazy imports - only import when needed
+_transcribe_module = None
+def _get_transcribe():
+    """Lazy import for transcribe module"""
+    global _transcribe_module
+    if _transcribe_module is None:
+        import transcribe as _transcribe_module
+    return _transcribe_module
 
 # Setup Qt message handler to suppress propagateSizeHints warning
 def qt_message_handler(mode, context, message):
@@ -75,7 +84,7 @@ class TranscriptionThread(QThread):
         self,
         files_to_process: List[str],
         model_name: str,
-        log_callback: callable,
+        log_callback: Callable,
         youtube_urls: Optional[str] = None,
         use_cookies: bool = False,
         browser: Optional[str] = None,
@@ -84,11 +93,41 @@ class TranscriptionThread(QThread):
         super().__init__()
         self.files_to_process: List[str] = files_to_process
         self.model_name: str = model_name
-        self.log_callback: callable = log_callback
+        self.log_callback: Callable = log_callback
         self.youtube_urls: Optional[str] = youtube_urls
         self.use_cookies: bool = use_cookies
         self.browser: Optional[str] = browser
         self.cookie_file: Optional[str] = cookie_file
+        
+        # Threading primitives for synchronization
+        self._stop_event: threading.Event = threading.Event()
+        self._pause_event: threading.Event = threading.Event()
+        self._pause_event.set()  # Not paused by default
+        self._lock: threading.Lock = threading.Lock()
+        self._progress_lock: threading.Lock = threading.Lock()
+        
+        # Runtime attributes (initialized in run())
+        self.device: str = 'cuda'
+        self.compute_type: str = 'int8'
+        self.force_device: bool = False
+        self.use_faster_whisper: bool = False
+        self.force_lang: Optional[str] = None
+        self.vad_enabled: Optional[bool] = None
+        self.vad_silence_duration: Optional[int] = None
+        self.diarization_enabled: bool = False
+        self.min_speakers: int = 1
+        self.max_speakers: int = 2
+        self.cpu_threads: Optional[int] = None
+        self.process_priority: str = "Normal"
+        self.temperature: Optional[float] = None
+        self.merge_lines: bool = False
+        self.mpv_ipc: bool = False
+        self.start_time: Optional[str] = None
+        self.end_time: Optional[str] = None
+        self.force: bool = False
+        self.replace_subs: bool = False
+        self.backup_subs: bool = True
+        self.retry: bool = True
         
         # Get UI settings from the main window
         main_window = QApplication.activeWindow()

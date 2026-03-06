@@ -3,7 +3,7 @@ WhisperSubs Transcribe Module
 
 Core transcription functionality using faster-whisper.
 """
-import model
+import model as _model_module
 import faster_whisper
 import torch.cuda as cuda
 import torch.backends.cudnn as cudnn
@@ -342,7 +342,7 @@ def process_create(
         device = 'cpu'
         compute_type = 'int8'
         write(f"Falling back to CPU and int8")
-    model_names = model.MODEL_NAMES
+    model_names = _model_module.MODEL_NAMES
 
     if device == 'cuda' and auto:
         chooser = WhisperModelChooser()
@@ -352,7 +352,7 @@ def process_create(
         write(f"Selected model: {model_name} {compute_type}")
     compute_type = 'int8'
     if not model_name in model_names:
-        model_name = model.getName(model_name)
+        model_name = _model_module.getName(model_name)
     write(f"Transcribe Model name: {model_name}")
     if model_name in model_names:
         i = model_names.index(model_name)

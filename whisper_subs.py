@@ -22,11 +22,39 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Tuple, Union
 
-# Assuming these modules are in the same directory or installed
-import transcribe
-import twitch_vod
-import model
-import livestream_transcriber
+# Lazy imports - only import when needed
+_transcribe_module = None
+_twitch_vod_module = None
+_model_module = None
+_livestream_transcriber_module = None
+
+def _get_transcribe():
+    """Lazy import for transcribe module"""
+    global _transcribe_module
+    if _transcribe_module is None:
+        import transcribe as _transcribe_module
+    return _transcribe_module
+
+def _get_twitch_vod():
+    """Lazy import for twitch_vod module"""
+    global _twitch_vod_module
+    if _twitch_vod_module is None:
+        import twitch_vod as _twitch_vod_module
+    return _twitch_vod_module
+
+def _get_model():
+    """Lazy import for model module"""
+    global _model_module
+    if _model_module is None:
+        import model as _model_module
+    return _model_module
+
+def _get_livestream_transcriber():
+    """Lazy import for livestream_transcriber module"""
+    global _livestream_transcriber_module
+    if _livestream_transcriber_module is None:
+        import livestream_transcriber as _livestream_transcriber_module
+    return _livestream_transcriber_module
 
 # --- Configuration ---
 APP_NAME = "WhisperSubs"
@@ -157,10 +185,16 @@ class WhisperSubs:
         self.strict_language_tier = strict_language_tier
         self.model = None
         self.log_file = os.path.join(os.path.expanduser("~/.config/WhisperSubs"), 'whisper_subs.log')
-        self.info_cache = {}  # Cache for video info to avoid re-fetching
+        self.info_cache: Dict[str, Tuple[str, str]] = {}  # Cache for video info to avoid re-fetching
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         self.delay = 30
         self.start_delay = 30
+        
+        # Threading primitives for synchronization
+        self._lock: threading.Lock = threading.Lock()
+        self._stop_event: threading.Event = threading.Event()
+        self._process_lock: threading.Lock = threading.Lock()
+        
         # VAD settings (disabled by default)
         self.vad_filter = vad_filter
         self.vad_min_silence_duration = vad_min_silence_duration
@@ -204,7 +238,7 @@ class WhisperSubs:
         import model
         title = filename
         # Go through all model names and remove them if they appear in the filename
-        for model_name in model.MODEL_NAMES:
+        for model_name in _get_model().MODEL_NAMES:
             # Remove model name if it appears at the end (after the last dot) or with a dot before
             title = re.sub(rf'\.{re.escape(model_name)}(?=\.\w+$|$)', '', title)
         return title
@@ -425,7 +459,7 @@ class WhisperSubs:
                 self.log(f"Fetching all VODs for channel: {channel_name}")
 
                 try:
-                    downloader = twitch_vod.StreamlinkVODDownloader()
+                    downloader = _get_twitch_vod().StreamlinkVODDownloader()
                     user_id = downloader.get_user_id_by_login(channel_name)
 
                     if not user_id:
@@ -579,7 +613,7 @@ class WhisperSubs:
                 self.log(f"Extracted VOD ID: {vod_id}")
                 
                 try:
-                    downloader = twitch_vod.StreamlinkVODDownloader()
+                    downloader = _get_twitch_vod().StreamlinkVODDownloader()
                     # Get VOD info for the title
                     vod_info = downloader.get_vod_info(vod_id)
                     if not vod_info:
@@ -867,7 +901,7 @@ class WhisperSubs:
             return False
         
         # Get current model info
-        current_model_index = model.getIndex(self.model_name)
+        current_model_index = _get_model().getIndex(self.model_name)
         if current_model_index == -1:
             return False
         
@@ -885,7 +919,7 @@ class WhisperSubs:
                 if history_id != unique_id:
                     continue
                 
-                history_model_index = model.getIndex(history_model)
+                history_model_index = _get_model().getIndex(history_model)
                 if history_model_index == -1:
                     continue
                 
@@ -931,7 +965,7 @@ class WhisperSubs:
             if is_local: 
                 self.channel_name = "local_files"
             update_task_status(job_id, task_source, 'processing', title)
-            self.model_name = model.getName(self.model_name)
+            self.model_name = _get_model().getName(self.model_name)
             channel_dir = os.path.join(OUTPUT_DIR, self.clean_filename(self.channel_name))
             os.makedirs(channel_dir, exist_ok=True)
 
@@ -983,7 +1017,7 @@ class WhisperSubs:
             if hasattr(self, 'mpv_ipc') and self.mpv_ipc and mpv_process:
                 reload_thread = self.start_mpv_auto_reload(srt_file, reload_stop_event)
 
-            if transcribe.process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
+            if _get_transcribe().process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
                 if os.path.exists(srt_file):
@@ -991,7 +1025,7 @@ class WhisperSubs:
                     new_srt_file = f"{base_name}.srt"
                     if new_srt_file != srt_file and os.path.exists(new_srt_file):
                         srt_file = new_srt_file
-                transcribe.make_files(srt_file, url=task_source)
+                _get_transcribe().make_files(srt_file, url=task_source)
 
                 # Copy to secondary location if applicable
                 if srt_file_secondary and os.path.exists(srt_file):

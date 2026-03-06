@@ -936,6 +936,19 @@ class WhisperSubs:
             # Create helper files (bash, bat, thumbnail) before transcription
             transcribe.make_files(srt_file.replace('.srt', '.unfinished.srt'), url=task_source)
 
+            # Launch mpv FIRST if --run option is specified (before transcription starts)
+            mpv_process = None
+            if hasattr(self, 'run_mpv') and self.run_mpv:
+                mpv_process = self.launch_mpv(audio_file if is_local else task_source, srt_file, task_source)
+                # Wait a moment for mpv to start
+                time.sleep(1)
+
+            # Start auto-reload thread if mpv_ipc is enabled
+            reload_stop_event = threading.Event()
+            reload_thread = None
+            if hasattr(self, 'mpv_ipc') and self.mpv_ipc and mpv_process:
+                reload_thread = self.start_mpv_auto_reload(srt_file, reload_stop_event)
+
             if transcribe.process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
@@ -945,7 +958,7 @@ class WhisperSubs:
                     if new_srt_file != srt_file and os.path.exists(new_srt_file):
                         srt_file = new_srt_file
                 transcribe.make_files(srt_file, url=task_source)
-                
+
                 # Copy to secondary location if applicable
                 if srt_file_secondary and os.path.exists(srt_file):
                     try:
@@ -954,13 +967,18 @@ class WhisperSubs:
                         self.log(f"Copied subtitle to: {srt_file_secondary}")
                     except Exception as copy_err:
                         self.log(f"Warning: Could not copy to secondary location: {copy_err}")
-                
+
+                # Stop auto-reload thread
+                if reload_thread:
+                    reload_stop_event.set()
+                    reload_thread.join(timeout=2)
+
+                # Final subtitle reload
+                if hasattr(self, 'mpv_ipc') and self.mpv_ipc and mpv_process:
+                    self.mpv_reload_subtitles(srt_file)
+
                 update_task_status(job_id, task_source, 'completed')
                 self.mark_as_processed(unique_id)
-                
-                # Launch mpv in background if --run option is specified
-                if hasattr(self, 'run_mpv') and self.run_mpv:
-                    self.launch_mpv(audio_file, srt_file, task_source)
             else:
                 raise Exception("Transcription process failed.")
                 
@@ -998,11 +1016,35 @@ class WhisperSubs:
             self.log(f"Launching mpv: {' '.join(cmd)}")
 
             # Run mpv in the background
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.log("mpv launched in background with --pause and mpvsocket")
+            
+            return process
 
         except Exception as e:
             self.log(f"Error launching mpv: {e}")
+            return None
+
+    def start_mpv_auto_reload(self, srt_file, stop_event):
+        """Start background thread to auto-reload subtitles every minute."""
+        def auto_reload_worker():
+            reload_count = 0
+            while not stop_event.is_set():
+                # Wait 60 seconds or until stop event
+                if stop_event.wait(timeout=60):
+                    break
+                
+                # Reload subtitles
+                reload_count += 1
+                if self.mpv_reload_subtitles(srt_file):
+                    self.log(f"Auto-reloaded subtitles (#{reload_count})")
+                else:
+                    self.log(f"Auto-reload failed (#{reload_count}) - mpv may not be running")
+        
+        thread = threading.Thread(target=auto_reload_worker, daemon=True)
+        thread.start()
+        self.log("Started MPV auto-reload thread (60s interval)")
+        return thread
 
     def mpv_reload_subtitles(self, srt_file):
         """Send IPC command to MPV to reload subtitle file."""

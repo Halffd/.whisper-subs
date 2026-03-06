@@ -65,7 +65,13 @@ HISTORY_FILE = os.path.join(OUTPUT_DIR, "history.txt")
 PROCESS_FILE = os.path.join(OUTPUT_DIR, "process.txt")
 # Ensure config directories exist
 os.makedirs(CONFIG_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Ensure OUTPUT_DIR exists (handle case where parent might be a file)
+try:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+except (FileNotFoundError, FileExistsError):
+    # If OUTPUT_DIR can't be created, use fallback
+    OUTPUT_DIR = os.path.join(os.getcwd(), "Youtube-Subs")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # --- Job Management ---
 def get_jobs():
@@ -1413,7 +1419,7 @@ Examples:
                 if source_model is None:
                     print("Error: No model specified for source and no default model provided. Either specify a model in your process file or provide a model argument (e.g., 'wsub large -p').", file=sys.stderr)
                     return 1
-                model_for_this_source = model.getName(source_model)
+                model_for_this_source = _get_model().getName(source_model)
                 processor = WhisperSubs(
                     model_name=model_for_this_source,
                     device='cuda' if args.gpu else args.device,
@@ -1446,8 +1452,8 @@ Examples:
         # Handle normal source input
         job_or_source = args.source
         model_to_use = args.model
-        print(f"Model: {model_to_use} {model.getName(model_to_use)}")
-        model_to_use = model.getName(model_to_use)
+        print(f"Model: {model_to_use} {_get_model().getName(model_to_use)}")
+        model_to_use = _get_model().getName(model_to_use)
         # If no source provided, check clipboard
         if not job_or_source:
             try:
@@ -1473,7 +1479,7 @@ Examples:
     
     # Handle model selection
     if args.continue_last:
-        model_to_use = model.getName(job['model'])
+        model_to_use = _get_model().getName(job['model'])
     elif args.process_file:
         # For process file, we'll get the model from the file or use default
         # This will be handled in the process file loop
@@ -1481,7 +1487,7 @@ Examples:
     elif not args.model and not any([args.list, args.continue_last, args.file_or_dir]):
         parser.error("Model argument is required unless using --list, --continue, or --file/-d.")
     else:
-        model_to_use = model.getName(args.model)
+        model_to_use = _get_model().getName(args.model)
 
     # Handle live stream transcription separately
     if args.live:

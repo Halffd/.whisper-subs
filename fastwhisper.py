@@ -6,7 +6,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout,
-    QSystemTrayIcon, QMenu, QAction, QListWidget, QAbstractItemView
+    QSystemTrayIcon, QMenu, QAction, QListWidget, QAbstractItemView, QSlider
 )
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from PyQt5 import QtGui, QtCore

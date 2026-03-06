@@ -48,12 +48,61 @@ app.add_middleware(
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 socket_app = socketio.ASGIApp(sio, app)
 
-# Thread pool for running WhisperSubs processing in the background
-executor = ThreadPoolExecutor(max_workers=5)  # Increased for concurrent tasks
+# Enhanced thread pool with better resource management
+class PriorityThreadPoolExecutor:
+    """Thread pool executor with priority-based task scheduling"""
+    
+    def __init__(self, max_workers=5):
+        self.max_workers = max_workers
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.active_tasks = {}
+        self.task_lock = threading.Lock()
+        self.cpu_usage = {}
+        
+    def submit(self, fn, *args, priority=5, task_id=None, **kwargs):
+        """Submit task with priority (higher = more important)"""
+        if task_id:
+            with self.task_lock:
+                self.active_tasks[task_id] = {
+                    'priority': priority,
+                    'started_at': datetime.now(),
+                    'status': 'queued'
+                }
+        
+        def wrapper():
+            if task_id:
+                with self.task_lock:
+                    self.active_tasks[task_id]['status'] = 'running'
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                if task_id:
+                    with self.task_lock:
+                        self.active_tasks.pop(task_id, None)
+        
+        return self.executor.submit(wrapper)
+    
+    def get_active_count(self):
+        """Get number of currently running tasks"""
+        with self.task_lock:
+            return len([t for t in self.active_tasks.values() if t['status'] == 'running'])
+    
+    def shutdown(self, wait=True):
+        """Shutdown the executor"""
+        self.executor.shutdown(wait=wait)
 
-# Task queue for chained/batch processing
-task_queue = asyncio.Queue()
+# Global executor with increased workers for better concurrency
+executor = PriorityThreadPoolExecutor(max_workers=8)
+
+# Task queue for batch processing with priority support
+task_queue = asyncio.PriorityQueue()
 task_queue_lock = asyncio.Lock()
+
+# Rate limiting
+rate_limit_lock = asyncio.Lock()
+rate_limit_tasks = {}  # {client_ip: {'count': int, 'reset_at': datetime}}
+RATE_LIMIT_MAX = 10  # Max concurrent tasks per client
+RATE_LIMIT_WINDOW = 300  # 5 minutes
 
 # Dictionary to track ongoing tasks
 task_status = {}
@@ -62,6 +111,15 @@ task_lock = threading.Lock()
 # Batch processing state
 batch_status = {}
 batch_lock = threading.Lock()
+
+# Resource monitoring
+resource_lock = threading.Lock()
+resource_stats = {
+    'cpu_percent': 0,
+    'memory_percent': 0,
+    'disk_usage': 0,
+    'last_update': datetime.now()
+}
 
 # Output directory
 OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
@@ -150,8 +208,9 @@ class BatchTranscriptionRequest(BaseModel):
     
     # Batch options
     batch_id: Optional[str] = Field(None, description="Custom batch ID (auto-generated if not provided)")
-    concurrent: int = Field(2, ge=1, le=5, description="Number of concurrent transcriptions")
+    concurrent: int = Field(3, ge=1, le=8, description="Number of concurrent transcriptions")
     priority: int = Field(5, ge=1, le=10, description="Batch priority")
+    auto_retry_failed: bool = Field(True, description="Automatically retry failed tasks with smaller models")
 
 
 class BatchStatusResponse(BaseModel):
@@ -333,84 +392,144 @@ async def start_batch_transcription(request: BatchTranscriptionRequest, backgrou
         with batch_lock:
             batch_status[batch_id]["tasks"].append(task_id)
     
-    # Worker function to process tasks with concurrency limit
+    # Worker function to process tasks with concurrency limit and priority
     async def process_batch():
+        # Use semaphore for concurrency control
         semaphore = asyncio.Semaphore(request.concurrent)
         
-        async def process_single_task(task_id: str, source: str):
+        # Sort sources by priority (could be extended for per-source priority)
+        sorted_sources = list(enumerate(request.sources))
+        
+        async def process_single_task(idx: int, source: str):
+            task_id = task_ids[idx]
             async with semaphore:
-                await asyncio.get_event_loop().run_in_executor(
-                    executor,
+                # Check if task was cancelled
+                with task_lock:
+                    if task_status.get(task_id, {}).get('status') == 'cancelled':
+                        return
+                
+                # Run transcription in thread pool
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    executor.executor,  # Use underlying executor
                     run_single_transcription,
                     task_id,
                     source,
                     request,
-                    batch_id
+                    batch_id,
+                    idx  # Pass index for retry logic
                 )
         
         # Create tasks for all sources
         tasks = [
-            process_single_task(task_id, source)
-            for task_id, source in zip(task_ids, request.sources)
+            process_single_task(idx, source)
+            for idx, source in sorted_sources
         ]
         
-        # Run all tasks with concurrency limit
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Run all tasks with concurrency limit and exception handling
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Handle any exceptions that weren't caught
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                task_id = task_ids[idx]
+                with task_lock:
+                    if task_id in task_status:
+                        task_status[task_id]['status'] = 'failed'
+                        task_status[task_id]['error'] = str(result)
+                        task_status[task_id]['completed_at'] = datetime.now().isoformat()
+                        batch_status[batch_id]['failed'] += 1
+                        batch_status[batch_id]['processing'] = max(0, batch_status[batch_id]['processing'] - 1)
+                print(f"Task {task_id} failed with exception: {result}")
         
         # Update batch status when all tasks complete
         with batch_lock:
-            batch_status[batch_id]["completed_at"] = datetime.now().isoformat()
+            batch_status[batch_id]['completed_at'] = datetime.now().isoformat()
+            # Recalculate counts from tasks
+            completed = sum(1 for tid in task_ids if task_status.get(tid, {}).get('status') == 'completed')
+            failed = sum(1 for tid in task_ids if task_status.get(tid, {}).get('status') == 'failed')
+            batch_status[batch_id]['completed'] = completed
+            batch_status[batch_id]['failed'] = failed
+            batch_status[batch_id]['pending'] = 0
+            batch_status[batch_id]['processing'] = 0
         
         # Emit batch completion
-        await sio.emit('batch_completed', {'batch_id': batch_id})
+        await sio.emit('batch_completed', {
+            'batch_id': batch_id,
+            'total': len(task_ids),
+            'completed': batch_status[batch_id]['completed'],
+            'failed': batch_status[batch_id]['failed']
+        })
     
-    def run_single_transcription(task_id: str, source: str, request: BatchTranscriptionRequest, batch_id: str):
-        """Run single transcription within batch"""
-        try:
-            with task_lock:
-                task_status[task_id]["status"] = "processing"
-                batch_status[batch_id]["processing"] += 1
-                batch_status[batch_id]["pending"] -= 1
-            
-            processor = WhisperSubs(
-                model_name=request.model_name,
-                device=request.device,
-                compute_type=request.compute_type,
-                force=request.force,
-                ignore_subs=request.ignore_subs,
-                sub_lang=request.sub_lang,
-                run_mpv=request.run_mpv,
-                force_retry=request.retry,
-                vad_filter=request.vad_filter,
-                vad_min_silence_duration=request.vad_silence_duration,
-                diarization=request.diarization,
-                min_speakers=request.min_speakers,
-                max_speakers=request.max_speakers,
-                temperature=request.temperature,
-                start_time=request.start_time,
-                end_time=request.end_time,
-                mpv_ipc=request.mpv_ipc,
-                mpv_socket=request.mpv_socket
-            )
-            
-            job = add_job(source, request.model_name)
-            processor.process(source)
-            
-            with task_lock:
-                task_status[task_id]["status"] = "completed"
-                task_status[task_id]["completed_at"] = datetime.now().isoformat()
-                batch_status[batch_id]["completed"] += 1
-                batch_status[batch_id]["processing"] -= 1
-            
-        except Exception as e:
-            with task_lock:
-                task_status[task_id]["status"] = "failed"
-                task_status[task_id]["error"] = str(e)
-                task_status[task_id]["completed_at"] = datetime.now().isoformat()
-                batch_status[batch_id]["failed"] += 1
-                if batch_status[batch_id]["processing"] > 0:
-                    batch_status[batch_id]["processing"] -= 1
-            print(f"Error in batch task {task_id}: {e}")
+    def run_single_transcription(task_id: str, source: str, request: BatchTranscriptionRequest, batch_id: str, task_index: int):
+        """Run single transcription within batch with retry support"""
+        max_retries = 3 if request.auto_retry_failed else 1
+        models_to_try = [request.model_name]
+        
+        # Add fallback models if retry is enabled
+        if request.retry:
+            fallback_models = ['medium', 'small', 'base']
+            models_to_try.extend([m for m in fallback_models if m != request.model_name])
+        
+        for attempt, model_name in enumerate(models_to_try[:max_retries]):
+            try:
+                with task_lock:
+                    if attempt == 0:
+                        task_status[task_id]['status'] = 'processing'
+                        batch_status[batch_id]['processing'] += 1
+                        batch_status[batch_id]['pending'] -= 1
+                    else:
+                        task_status[task_id]['progress'] = f"Retry {attempt}/{max_retries} with {model_name}"
+                
+                processor = WhisperSubs(
+                    model_name=model_name,
+                    device=request.device,
+                    compute_type=request.compute_type,
+                    force=request.force,
+                    ignore_subs=request.ignore_subs,
+                    sub_lang=request.sub_lang,
+                    run_mpv=request.run_mpv,
+                    force_retry=request.retry,
+                    vad_filter=request.vad_filter,
+                    vad_min_silence_duration=request.vad_silence_duration,
+                    diarization=request.diarization,
+                    min_speakers=request.min_speakers,
+                    max_speakers=request.max_speakers,
+                    temperature=request.temperature,
+                    start_time=request.start_time,
+                    end_time=request.end_time,
+                    mpv_ipc=request.mpv_ipc,
+                    mpv_socket=request.mpv_socket
+                )
+                
+                job = add_job(source, model_name)
+                processor.process(source)
+                
+                with task_lock:
+                    task_status[task_id]['status'] = 'completed'
+                    task_status[task_id]['completed_at'] = datetime.now().isoformat()
+                    task_status[task_id]['model_name'] = model_name
+                    batch_status[batch_id]['completed'] += 1
+                    batch_status[batch_id]['processing'] -= 1
+                
+                # Success - break retry loop
+                break
+                
+            except Exception as e:
+                is_last_attempt = attempt >= len(models_to_try) - 1 or attempt >= max_retries - 1
+                
+                if is_last_attempt:
+                    with task_lock:
+                        task_status[task_id]['status'] = 'failed'
+                        task_status[task_id]['error'] = str(e)
+                        task_status[task_id]['completed_at'] = datetime.now().isoformat()
+                        batch_status[batch_id]['failed'] += 1
+                        if batch_status[batch_id]['processing'] > 0:
+                            batch_status[batch_id]['processing'] -= 1
+                    print(f"Task {task_id} failed after {attempt + 1} attempts: {e}")
+                else:
+                    print(f"Task {task_id} attempt {attempt + 1} failed, retrying with {models_to_try[attempt + 1]}...")
+                    # Continue to next model
     
     # Start batch processing in background
     background_tasks.add_task(process_batch)
@@ -593,14 +712,103 @@ def list_jobs():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint with system info"""
+    """Health check endpoint with detailed system and task metrics"""
     import psutil
+    
+    with resource_lock:
+        # Update resource stats
+        resource_stats['cpu_percent'] = psutil.cpu_percent(interval=0.1)
+        resource_stats['memory_percent'] = psutil.virtual_memory().percent
+        resource_stats['disk_usage'] = psutil.disk_usage(OUTPUT_DIR).percent if os.path.exists(OUTPUT_DIR) else 0
+        resource_stats['last_update'] = datetime.now().isoformat()
+    
+    with task_lock:
+        active_tasks = len([t for t in task_status.values() if t["status"] == "processing"])
+        queued_tasks = len([t for t in task_status.values() if t["status"] == "queued"])
+    
+    with batch_lock:
+        active_batches = len([b for b in batch_status.values() if b.get('completed_at') is None])
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "cpu_percent": psutil.cpu_percent(),
-        "memory_percent": psutil.virtual_memory().percent,
-        "active_tasks": len([t for t in task_status.values() if t["status"] == "processing"])
+        "resources": resource_stats.copy(),
+        "tasks": {
+            "total": len(task_status),
+            "active": active_tasks,
+            "queued": queued_tasks
+        },
+        "batches": {
+            "total": len(batch_status),
+            "active": active_batches
+        },
+        "executor": {
+            "max_workers": executor.max_workers,
+            "active_tasks": executor.get_active_count()
+        }
+    }
+
+
+@app.get("/metrics")
+def get_metrics():
+    """Get detailed system and performance metrics"""
+    import psutil
+    
+    # CPU info
+    cpu_info = {
+        "percent": psutil.cpu_percent(interval=0.1),
+        "count_physical": psutil.cpu_count(logical=False),
+        "count_logical": psutil.cpu_count(logical=True),
+        "freq": psutil.cpu_freq()._asdict() if psutil.cpu_freq() else None
+    }
+    
+    # Memory info
+    mem = psutil.virtual_memory()
+    memory_info = {
+        "total_gb": mem.total / (1024**3),
+        "available_gb": mem.available / (1024**3),
+        "percent": mem.percent,
+        "used_gb": mem.used / (1024**3)
+    }
+    
+    # Disk info
+    disk = psutil.disk_usage(OUTPUT_DIR) if os.path.exists(OUTPUT_DIR) else None
+    disk_info = {
+        "total_gb": disk.total / (1024**3) if disk else 0,
+        "used_gb": disk.used / (1024**3) if disk else 0,
+        "free_gb": disk.free / (1024**3) if disk else 0,
+        "percent": disk.percent if disk else 0
+    } if disk else {"error": "Output directory not found"}
+    
+    # Task statistics
+    with task_lock:
+        task_stats = {
+            "total": len(task_status),
+            "by_status": {}
+        }
+        for task in task_status.values():
+            status = task.get('status', 'unknown')
+            task_stats['by_status'][status] = task_stats['by_status'].get(status, 0) + 1
+    
+    # Batch statistics
+    with batch_lock:
+        batch_stats = {
+            "total": len(batch_status),
+            "total_tasks": sum(b['total'] for b in batch_status.values()),
+            "completed_tasks": sum(b.get('completed', 0) for b in batch_status.values())
+        }
+    
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "cpu": cpu_info,
+        "memory": memory_info,
+        "disk": disk_info,
+        "tasks": task_stats,
+        "batches": batch_stats,
+        "executor": {
+            "max_workers": executor.max_workers,
+            "active": executor.get_active_count()
+        }
     }
 
 

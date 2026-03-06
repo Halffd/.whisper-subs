@@ -115,18 +115,21 @@ class TranscriptionThread(QThread):
             self.process_priority = priority_text.split()[0]  # Get first word (e.g., "Normal", "Low")
 
             # Get advanced transcription settings
-            if self.temperature_auto_check.isChecked():
+            if hasattr(main_window, 'temperature_auto_check') and main_window.temperature_auto_check.isChecked():
                 self.temperature = None  # Use model default
+            elif hasattr(main_window, 'temperature_slider'):
+                self.temperature = main_window.temperature_slider.value() / 10.0
             else:
-                self.temperature = self.temperature_slider.value() / 10.0
-            self.merge_lines = main_window.merge_lines_check.isChecked()
-            self.mpv_ipc = main_window.mpv_ipc_check.isChecked()
+                self.temperature = None
+            
+            self.merge_lines = hasattr(main_window, 'merge_lines_check') and main_window.merge_lines_check.isChecked()
+            self.mpv_ipc = hasattr(main_window, 'mpv_ipc_check') and main_window.mpv_ipc_check.isChecked()
             
             # Get transcription options
-            self.force = main_window.force_check.isChecked()
-            self.replace_subs = main_window.replace_subs_check.isChecked()
-            self.backup_subs = main_window.backup_subs_check.isChecked()
-            self.retry = main_window.retry_check.isChecked()
+            self.force = hasattr(main_window, 'force_check') and main_window.force_check.isChecked()
+            self.replace_subs = hasattr(main_window, 'replace_subs_check') and main_window.replace_subs_check.isChecked()
+            self.backup_subs = hasattr(main_window, 'backup_subs_check') and main_window.backup_subs_check.isChecked()
+            self.retry = hasattr(main_window, 'retry_check') and main_window.retry_check.isChecked()
 
         else:
             # Default values if window not found

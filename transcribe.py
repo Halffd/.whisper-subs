@@ -552,7 +552,6 @@ try:
 
     # Build transcribe kwargs dynamically - only pass non-None values
     transcribe_kwargs = {{
-        "audio_file": r"{audio_to_transcribe}",
         "language": {language_param}
     }}
     
@@ -568,7 +567,8 @@ try:
         transcribe_kwargs["no_speech_threshold"] = 0.6
         transcribe_kwargs["compression_ratio_threshold"] = 1.4
 
-    segments, info = model.transcribe(**transcribe_kwargs)
+    # audio_file is passed as positional argument, not keyword
+    segments, info = model.transcribe(r"{audio_to_transcribe}", **transcribe_kwargs)
     
     resume_offset = {resume_offset_seconds}
     

@@ -3,7 +3,7 @@
 FastAPI server for WhisperSubs
 
 Provides REST API endpoints for audio/video transcription services.
-Enhanced with WebSocket support, advanced options, and task management.
+Enhanced with WebSocket support, advanced options, task management, and authentication.
 """
 import os
 import sys
@@ -11,15 +11,20 @@ import json
 import asyncio
 import shutil
 import socketio
+import secrets
+import hashlib
+import jwt
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect, Depends, Security, Form
+from fastapi.security import APIKeyHeader, APIKeyQuery
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+import bcrypt
 
 # Add the project root to the Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,12 +33,168 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from whisper_subs import WhisperSubs, add_job, get_jobs, list_jobs as get_job_list
 import model
 
+# Configuration
+API_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'api_config.json')
+JWT_SECRET_KEY = os.environ.get('WHISPER_JWT_SECRET', secrets.token_urlsafe(32))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
+
+# Authentication schemes
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+API_KEY_QUERY = APIKeyQuery(name="api_key", auto_error=False)
+
 # Create the FastAPI app
 app = FastAPI(
     title="WhisperSubs API",
     description="API for transcribing audio from various sources using Whisper",
-    version="2.0.0"
+    version="3.0.0"
 )
+
+# Authentication Manager
+class AuthManager:
+    """Manage API keys, users, and JWT tokens"""
+    
+    def __init__(self, config_file: str):
+        self.config_file = config_file
+        self.config = self._load_config()
+        self.token_blacklist = set()
+        self.lock = threading.Lock()
+    
+    def _load_config(self) -> Dict:
+        """Load or create API configuration"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        
+        # Default configuration
+        config = {
+            "users": {
+                "admin": {
+                    "password_hash": bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode(),
+                    "api_keys": [secrets.token_urlsafe(32)],
+                    "role": "admin",
+                    "created_at": datetime.now().isoformat()
+                }
+            },
+            "settings": {
+                "require_auth": True,
+                "allow_registration": False,
+                "max_tasks_per_user": 10,
+                "rate_limit_per_minute": 60
+            }
+        }
+        
+        self._save_config(config)
+        return config
+    
+    def _save_config(self, config: Dict):
+        """Save configuration to file"""
+        with self.lock:
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+    
+    def verify_password(self, username: str, password: str) -> bool:
+        """Verify user password"""
+        if username not in self.config.get('users', {}):
+            return False
+        user = self.config['users'][username]
+        return bcrypt.checkpw(password.encode(), user['password_hash'].encode())
+    
+    def create_api_key(self, username: str) -> Optional[str]:
+        """Generate new API key for user"""
+        if username not in self.config.get('users', {}):
+            return None
+        
+        api_key = secrets.token_urlsafe(32)
+        self.config['users'][username]['api_keys'].append(api_key)
+        self._save_config(self.config)
+        return api_key
+    
+    def verify_api_key(self, api_key: str) -> Optional[str]:
+        """Verify API key and return username if valid"""
+        for username, user_data in self.config.get('users', {}).items():
+            if api_key in user_data.get('api_keys', []):
+                return username
+        return None
+    
+    def create_jwt_token(self, username: str, expires_hours: int = None) -> str:
+        """Create JWT token for user"""
+        if expires_hours is None:
+            expires_hours = JWT_EXPIRATION_HOURS
+        
+        payload = {
+            "sub": username,
+            "exp": datetime.now() + timedelta(hours=expires_hours),
+            "iat": datetime.now(),
+            "type": "access"
+        }
+        return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    
+    def verify_jwt_token(self, token: str) -> Optional[str]:
+        """Verify JWT token and return username if valid"""
+        if token in self.token_blacklist:
+            return None
+        
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            return payload.get("sub")
+        except jwt.ExpiredSignatureError:
+            return None
+        except jwt.InvalidTokenError:
+            return None
+    
+    def revoke_token(self, token: str):
+        """Add token to blacklist"""
+        self.token_blacklist.add(token)
+    
+    def get_user_info(self, username: str) -> Optional[Dict]:
+        """Get user information (without sensitive data)"""
+        if username not in self.config.get('users', {}):
+            return None
+        
+        user = self.config['users'][username]
+        return {
+            "username": username,
+            "role": user.get('role', 'user'),
+            "created_at": user.get('created_at'),
+            "api_keys_count": len(user.get('api_keys', []))
+        }
+    
+    def register_user(self, username: str, password: str) -> bool:
+        """Register new user"""
+        if not self.config.get('settings', {}).get('allow_registration', False):
+            return False
+        
+        if username in self.config.get('users', {}):
+            return False
+        
+        self.config['users'][username] = {
+            "password_hash": bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
+            "api_keys": [secrets.token_urlsafe(32)],
+            "role": "user",
+            "created_at": datetime.now().isoformat()
+        }
+        self._save_config(self.config)
+        return True
+    
+    def delete_api_key(self, username: str, api_key: str) -> bool:
+        """Delete specific API key"""
+        if username not in self.config.get('users', {}):
+            return False
+        
+        keys = self.config['users'][username]['api_keys']
+        if api_key in keys:
+            keys.remove(api_key)
+            self._save_config(self.config)
+            return True
+        return False
+
+
+# Global auth manager instance
+auth_manager = AuthManager(API_CONFIG_FILE)
 
 # Enable CORS
 app.add_middleware(
@@ -43,6 +204,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Authentication dependencies
+async def get_current_user(
+    api_key_header: Optional[str] = Security(API_KEY_HEADER),
+    api_key_query: Optional[str] = Security(API_KEY_QUERY),
+    authorization: Optional[str] = None
+) -> str:
+    """Get current authenticated user from API key or JWT token"""
+    # Try API key first (from header or query)
+    api_key = api_key_header or api_key_query
+    if api_key:
+        username = auth_manager.verify_api_key(api_key)
+        if username:
+            return username
+    
+    # Try JWT token from Authorization header
+    if authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:]
+            username = auth_manager.verify_jwt_token(token)
+            if username:
+                return username
+    
+    raise HTTPException(status_code=401, detail="Invalid or missing authentication credentials")
+
+
+async def get_current_user_optional(
+    api_key_header: Optional[str] = Security(API_KEY_HEADER),
+    api_key_query: Optional[str] = Security(API_KEY_QUERY)
+) -> Optional[str]:
+    """Get current user if authenticated, None otherwise"""
+    api_key = api_key_header or api_key_query
+    if api_key:
+        return auth_manager.verify_api_key(api_key)
+    return None
 
 # Socket.IO server for real-time progress updates
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -246,7 +442,99 @@ class TaskStatusResponse(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "WhisperSubs API", "status": "running"}
+    return {"message": "WhisperSubs API", "status": "running", "version": "3.0.0"}
+
+
+# Authentication Endpoints
+@app.post("/auth/login")
+def login(username: str = Form(...), password: str = Form(...)):
+    """Login and get JWT token"""
+    if not auth_manager.verify_password(username, password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token = auth_manager.create_jwt_token(username)
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@app.post("/auth/token/refresh")
+async def refresh_token(current_user: str = Depends(get_current_user)):
+    """Refresh JWT token"""
+    token = auth_manager.create_jwt_token(current_user)
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@app.post("/auth/logout")
+async def logout(
+    authorization: Optional[str] = None,
+    current_user: str = Depends(get_current_user)
+):
+    """Logout and invalidate current token"""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+        auth_manager.revoke_token(token)
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/auth/me")
+async def get_me(current_user: str = Depends(get_current_user)):
+    """Get current user information"""
+    user_info = auth_manager.get_user_info(current_user)
+    if not user_info:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_info
+
+
+@app.post("/auth/api-keys")
+async def create_api_key(current_user: str = Depends(get_current_user)):
+    """Create new API key for current user"""
+    api_key = auth_manager.create_api_key(current_user)
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Failed to create API key")
+    return {"api_key": api_key, "message": "Store this key securely - it won't be shown again"}
+
+
+@app.get("/auth/api-keys")
+async def list_api_keys(current_user: str = Depends(get_current_user)):
+    """List API keys for current user (masked)"""
+    user = auth_manager.config['users'].get(current_user, {})
+    keys = user.get('api_keys', [])
+    # Mask all but first 8 and last 8 characters
+    masked_keys = [f"{k[:8]}...{k[-8:]}" if len(k) > 16 else "***" for k in keys]
+    return {"api_keys": masked_keys, "count": len(keys)}
+
+
+@app.delete("/auth/api-keys/{api_key}")
+async def delete_api_key(
+    api_key: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete specific API key"""
+    if auth_manager.delete_api_key(current_user, api_key):
+        return {"message": "API key deleted"}
+    raise HTTPException(status_code=404, detail="API key not found")
+
+
+@app.post("/auth/register", status_code=201)
+def register_user(username: str = Form(...), password: str = Form(...)):
+    """Register new user (if registration is enabled)"""
+    if len(username) < 3 or len(username) > 50:
+        raise HTTPException(status_code=400, detail="Username must be 3-50 characters")
+    
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    
+    if not auth_manager.register_user(username, password):
+        raise HTTPException(status_code=400, detail="Registration failed or username already exists")
+    
+    # Auto-login after registration
+    token = auth_manager.create_jwt_token(username)
+    user_info = auth_manager.get_user_info(username)
+    
+    return {
+        "message": "User registered successfully",
+        "access_token": token,
+        "user": user_info
+    }
 
 
 @app.get("/models", response_model=List[str])
@@ -256,7 +544,11 @@ def get_available_models():
 
 
 @app.post("/transcribe", response_model=TaskResponse)
-async def start_transcription(request: TranscriptionRequest, background_tasks: BackgroundTasks):
+async def start_transcription(
+    request: TranscriptionRequest,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user)
+):
     """Start a new transcription task with advanced options"""
     # Validate model name
     if request.model_name not in model.MODEL_NAMES:
@@ -347,7 +639,11 @@ async def start_transcription(request: TranscriptionRequest, background_tasks: B
 
 
 @app.post("/transcribe/batch", response_model=BatchStatusResponse)
-async def start_batch_transcription(request: BatchTranscriptionRequest, background_tasks: BackgroundTasks):
+async def start_batch_transcription(
+    request: BatchTranscriptionRequest,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user)
+):
     """Start batch transcription of multiple sources with concurrent processing"""
     import uuid
     

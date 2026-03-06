@@ -49,11 +49,19 @@ sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 socket_app = socketio.ASGIApp(sio, app)
 
 # Thread pool for running WhisperSubs processing in the background
-executor = ThreadPoolExecutor(max_workers=3)
+executor = ThreadPoolExecutor(max_workers=5)  # Increased for concurrent tasks
+
+# Task queue for chained/batch processing
+task_queue = asyncio.Queue()
+task_queue_lock = asyncio.Lock()
 
 # Dictionary to track ongoing tasks
 task_status = {}
 task_lock = threading.Lock()
+
+# Batch processing state
+batch_status = {}
+batch_lock = threading.Lock()
 
 # Output directory
 OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
@@ -100,6 +108,63 @@ class TranscriptionRequestAdvanced(TranscriptionRequest):
     """Extended request with batch processing support"""
     batch_id: Optional[str] = Field(None, description="Batch ID for grouping tasks")
     priority: int = Field(5, ge=1, le=10, description="Task priority (1=lowest, 10=highest)")
+
+
+class BatchTranscriptionRequest(BaseModel):
+    """Request for batch/chained transcription of multiple sources"""
+    sources: List[str] = Field(..., description="List of URLs or file paths to transcribe")
+    model_name: str = Field("large", description="Whisper model name")
+    device: str = Field("cpu", description="Device (cpu, cuda)")
+    compute_type: str = Field("int8", description="Compute type")
+    
+    # Transcription options (apply to all)
+    force: bool = Field(False)
+    replace_subs: bool = Field(False)
+    backup_subs: bool = Field(True)
+    retry: bool = Field(True)
+    ignore_subs: bool = Field(False)
+    
+    # Language and processing
+    sub_lang: Optional[str] = Field(None)
+    language: Optional[str] = Field(None)
+    run_mpv: bool = Field(False)
+    
+    # VAD settings
+    vad_filter: Optional[bool] = Field(None)
+    vad_silence_duration: Optional[int] = Field(None)
+    
+    # Diarization
+    diarization: bool = Field(False)
+    min_speakers: Optional[int] = Field(None)
+    max_speakers: Optional[int] = Field(None)
+    
+    # Advanced
+    temperature: Optional[float] = Field(None)
+    start_time: Optional[str] = Field(None)
+    end_time: Optional[str] = Field(None)
+    cpu_threads: Optional[int] = Field(None)
+    
+    # MPV IPC
+    mpv_ipc: bool = Field(False)
+    mpv_socket: Optional[str] = Field("/tmp/mpvsocket")
+    
+    # Batch options
+    batch_id: Optional[str] = Field(None, description="Custom batch ID (auto-generated if not provided)")
+    concurrent: int = Field(2, ge=1, le=5, description="Number of concurrent transcriptions")
+    priority: int = Field(5, ge=1, le=10, description="Batch priority")
+
+
+class BatchStatusResponse(BaseModel):
+    batch_id: str
+    total: int
+    pending: int
+    processing: int
+    completed: int
+    failed: int
+    cancelled: int
+    created_at: str
+    completed_at: Optional[str] = None
+    tasks: List[str]  # List of task IDs
 
 
 class TaskResponse(BaseModel):
@@ -220,6 +285,188 @@ async def start_transcription(request: TranscriptionRequest, background_tasks: B
         model_name=request.model_name,
         created_at=task_status[task_id]["created_at"]
     )
+
+
+@app.post("/transcribe/batch", response_model=BatchStatusResponse)
+async def start_batch_transcription(request: BatchTranscriptionRequest, background_tasks: BackgroundTasks):
+    """Start batch transcription of multiple sources with concurrent processing"""
+    import uuid
+    
+    batch_id = request.batch_id or f"batch_{uuid.uuid4().hex[:8]}"
+    task_ids = []
+    
+    # Create batch status entry
+    with batch_lock:
+        batch_status[batch_id] = {
+            "total": len(request.sources),
+            "pending": len(request.sources),
+            "processing": 0,
+            "completed": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "created_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "tasks": []
+        }
+    
+    # Create individual transcription requests for each source
+    for idx, source in enumerate(request.sources):
+        task_id = f"task_{batch_id}_{idx}_{datetime.now().strftime('%H%M%S_%f')}"
+        task_ids.append(task_id)
+        
+        # Create task status with batch reference
+        with task_lock:
+            task_status[task_id] = {
+                "status": "queued",
+                "source": source,
+                "model_name": request.model_name,
+                "batch_id": batch_id,
+                "priority": request.priority,
+                "created_at": datetime.now().isoformat(),
+                "completed_at": None,
+                "progress": None,
+                "result": None,
+                "error": None
+            }
+        
+        # Add to batch task list
+        with batch_lock:
+            batch_status[batch_id]["tasks"].append(task_id)
+    
+    # Worker function to process tasks with concurrency limit
+    async def process_batch():
+        semaphore = asyncio.Semaphore(request.concurrent)
+        
+        async def process_single_task(task_id: str, source: str):
+            async with semaphore:
+                await asyncio.get_event_loop().run_in_executor(
+                    executor,
+                    run_single_transcription,
+                    task_id,
+                    source,
+                    request,
+                    batch_id
+                )
+        
+        # Create tasks for all sources
+        tasks = [
+            process_single_task(task_id, source)
+            for task_id, source in zip(task_ids, request.sources)
+        ]
+        
+        # Run all tasks with concurrency limit
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Update batch status when all tasks complete
+        with batch_lock:
+            batch_status[batch_id]["completed_at"] = datetime.now().isoformat()
+        
+        # Emit batch completion
+        await sio.emit('batch_completed', {'batch_id': batch_id})
+    
+    def run_single_transcription(task_id: str, source: str, request: BatchTranscriptionRequest, batch_id: str):
+        """Run single transcription within batch"""
+        try:
+            with task_lock:
+                task_status[task_id]["status"] = "processing"
+                batch_status[batch_id]["processing"] += 1
+                batch_status[batch_id]["pending"] -= 1
+            
+            processor = WhisperSubs(
+                model_name=request.model_name,
+                device=request.device,
+                compute_type=request.compute_type,
+                force=request.force,
+                ignore_subs=request.ignore_subs,
+                sub_lang=request.sub_lang,
+                run_mpv=request.run_mpv,
+                force_retry=request.retry,
+                vad_filter=request.vad_filter,
+                vad_min_silence_duration=request.vad_silence_duration,
+                diarization=request.diarization,
+                min_speakers=request.min_speakers,
+                max_speakers=request.max_speakers,
+                temperature=request.temperature,
+                start_time=request.start_time,
+                end_time=request.end_time,
+                mpv_ipc=request.mpv_ipc,
+                mpv_socket=request.mpv_socket
+            )
+            
+            job = add_job(source, request.model_name)
+            processor.process(source)
+            
+            with task_lock:
+                task_status[task_id]["status"] = "completed"
+                task_status[task_id]["completed_at"] = datetime.now().isoformat()
+                batch_status[batch_id]["completed"] += 1
+                batch_status[batch_id]["processing"] -= 1
+            
+        except Exception as e:
+            with task_lock:
+                task_status[task_id]["status"] = "failed"
+                task_status[task_id]["error"] = str(e)
+                task_status[task_id]["completed_at"] = datetime.now().isoformat()
+                batch_status[batch_id]["failed"] += 1
+                if batch_status[batch_id]["processing"] > 0:
+                    batch_status[batch_id]["processing"] -= 1
+            print(f"Error in batch task {task_id}: {e}")
+    
+    # Start batch processing in background
+    background_tasks.add_task(process_batch)
+    
+    return BatchStatusResponse(
+        batch_id=batch_id,
+        total=batch_status[batch_id]["total"],
+        pending=batch_status[batch_id]["pending"],
+        processing=batch_status[batch_id]["processing"],
+        completed=batch_status[batch_id]["completed"],
+        failed=batch_status[batch_id]["failed"],
+        cancelled=batch_status[batch_id]["cancelled"],
+        created_at=batch_status[batch_id]["created_at"],
+        tasks=batch_status[batch_id]["tasks"]
+    )
+
+
+@app.get("/batch/{batch_id}", response_model=BatchStatusResponse)
+def get_batch_status(batch_id: str):
+    """Get status of a batch transcription"""
+    if batch_id not in batch_status:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    
+    batch = batch_status[batch_id]
+    return BatchStatusResponse(
+        batch_id=batch_id,
+        total=batch["total"],
+        pending=batch["pending"],
+        processing=batch["processing"],
+        completed=batch["completed"],
+        failed=batch["failed"],
+        cancelled=batch["cancelled"],
+        created_at=batch["created_at"],
+        completed_at=batch.get("completed_at"),
+        tasks=batch["tasks"]
+    )
+
+
+@app.get("/batches", response_model=List[BatchStatusResponse])
+def list_batches():
+    """List all batch transcriptions"""
+    batches = []
+    for batch_id, batch in batch_status.items():
+        batches.append(BatchStatusResponse(
+            batch_id=batch_id,
+            total=batch["total"],
+            pending=batch["pending"],
+            processing=batch["processing"],
+            completed=batch["completed"],
+            failed=batch["failed"],
+            cancelled=batch["cancelled"],
+            created_at=batch["created_at"],
+            completed_at=batch.get("completed_at"),
+            tasks=batch["tasks"]
+        ))
+    return batches
 
 
 @app.websocket("/ws/{task_id}")

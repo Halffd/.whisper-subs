@@ -590,7 +590,7 @@ class WhisperSubs:
                     os.remove(final_file)
                 os.rename(expected_file, final_file)
                 self.log(f"Subtitle saved to {final_file}")
-                transcribe.make_files(final_file, url=url)
+                _get_transcribe().make_files(final_file, url=url)
                 return True
                 
         except Exception as e:
@@ -1008,7 +1008,7 @@ class WhisperSubs:
                 srt_file_secondary = None
 
             # Create helper files (bash, bat, thumbnail) before transcription
-            transcribe.make_files(srt_file.replace('.srt', '.unfinished.srt'), url=task_source)
+            _get_transcribe().make_files(srt_file.replace('.srt', '.unfinished.srt'), url=task_source)
 
             # Launch mpv FIRST if --run option is specified (before transcription starts)
             mpv_process = None

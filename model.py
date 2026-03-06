@@ -1,13 +1,19 @@
+"""
+WhisperSubs Model Module
+
+Centralized model name management and validation.
+"""
 import sys
 import os
 import argparse
+from typing import List, Optional
 
 # KMP_DUPLICATE_LIB_OK is a workaround for a common issue on macOS and Windows with Intel MKL libraries.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # --- Model Configuration ---
 # A single, clear source of truth for all available model names.
-MODEL_NAMES = [
+MODEL_NAMES: List[str] = [
     "tiny", "base", "small", "medium", "large", "large-v2", "large-v3",
     "tiny.en", "base.en", "small.en", "medium.en",
     "jlondonobo/whisper-medium-pt",
@@ -28,7 +34,7 @@ def getIndex(model_name: str) -> int:
     except ValueError:
         return -1
 
-def list_available_models():
+def list_available_models() -> None:
     """Prints a formatted list of all available models with their indices."""
     print("Available models:")
     for i, model in enumerate(MODEL_NAMES):
@@ -36,7 +42,7 @@ def list_available_models():
 
 # --- Argument Parsing ---
 
-def getName(value: str):
+def getName(value: str) -> Optional[str]:
     """
     Custom argparse type to validate and convert a model identifier (name or index)
     into a valid model name string.

@@ -1,8 +1,14 @@
+"""
+WhisperSubs GUI - PyQt5 Desktop Application
+
+Graphical interface for audio/video transcription using Whisper AI.
+"""
 import os
 import sys
 import datetime
 import subprocess
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple, Union
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox, QRadioButton, QGroupBox, QGridLayout,
@@ -52,7 +58,7 @@ os.environ["QT_SCALE_FACTOR"] = "1"
 # Debug output for Qt
 #os.environ['QT_DEBUG_PLUGINS'] = '1'
 
-MODEL_NAMES = [
+MODEL_NAMES: List[str] = [
     "distil-whisper/distil-large-v2",  # Distilled version of large-v2
     "distil-whisper/distil-medium.en",  # English-only models
     "Systran/faster-distil-large-v2",  # Optimized for CPU
@@ -65,15 +71,24 @@ class TranscriptionThread(QThread):
     progress = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, files_to_process, model_name, log_callback, youtube_urls=None, use_cookies=False, browser=None, cookie_file=None):
+    def __init__(
+        self,
+        files_to_process: List[str],
+        model_name: str,
+        log_callback: callable,
+        youtube_urls: Optional[str] = None,
+        use_cookies: bool = False,
+        browser: Optional[str] = None,
+        cookie_file: Optional[str] = None
+    ):
         super().__init__()
-        self.files_to_process = files_to_process
-        self.model_name = model_name
-        self.log_callback = log_callback
-        self.youtube_urls = youtube_urls
-        self.use_cookies = use_cookies
-        self.browser = browser
-        self.cookie_file = cookie_file
+        self.files_to_process: List[str] = files_to_process
+        self.model_name: str = model_name
+        self.log_callback: callable = log_callback
+        self.youtube_urls: Optional[str] = youtube_urls
+        self.use_cookies: bool = use_cookies
+        self.browser: Optional[str] = browser
+        self.cookie_file: Optional[str] = cookie_file
         
         # Get UI settings from the main window
         main_window = QApplication.activeWindow()
@@ -164,12 +179,12 @@ class TranscriptionThread(QThread):
         except Exception as e:
             self.error.emit(f"Could not connect to transcription service: {str(e)}")
 
-    def handle_progress(self, data):
+    def handle_progress(self, data: Dict[str, Any]) -> None:
         """Handle progress updates from WebSocket"""
         if 'message' in data:
             self.progress.emit(data['message'])
 
-    def run(self):
+    def run(self) -> None:
         try:
             # Set process priority
             self.set_process_priority(self.process_priority)
@@ -233,16 +248,16 @@ class TranscriptionThread(QThread):
         except Exception as e:
             self.progress.emit(f"Priority setting error: {str(e)}")
 
-    def process_local_file(self, file_path):
+    def process_local_file(self, file_path: str) -> None:
         """Process a local file using unified transcription module"""
         try:
             # Get base filename
             dir_path = os.path.dirname(file_path)
             base_name = os.path.splitext(os.path.basename(file_path))[0]
-            
+
             # Primary output: video file's folder
             srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
-            
+
             # Secondary output: Documents/Youtube-Subs/local_files
             output_dir = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
             local_files_dir = os.path.join(output_dir, "local_files")
@@ -317,7 +332,7 @@ class TranscriptionThread(QThread):
         except Exception as e:
             self.error.emit(f"Error processing {file_path}: {str(e)}")
 
-    def format_timestamp(self, seconds):
+    def format_timestamp(self, seconds: float) -> str:
         """Convert seconds to SRT timestamp format"""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
@@ -326,7 +341,7 @@ class TranscriptionThread(QThread):
         seconds = int(seconds)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
-    def process_url(self, url):
+    def process_url(self, url: str) -> None:
         """Process a YouTube URL using YoutubeSubs"""
         try:
             yt = YoutubeSubs(

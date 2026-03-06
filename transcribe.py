@@ -1,3 +1,8 @@
+"""
+WhisperSubs Transcribe Module
+
+Core transcription functionality using faster-whisper.
+"""
 import model
 import faster_whisper
 import torch.cuda as cuda
@@ -13,8 +18,9 @@ import threading
 import re
 import datetime
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple, Callable
 from whisper_model_chooser import WhisperModelChooser
+
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 audiofile, modelname, langcode = '', 'base', None
@@ -23,6 +29,7 @@ cudnn.benchmark = False
 cudnn.deterministic = True
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
+
 @dataclass
 class Segment:
     start: float
@@ -37,7 +44,7 @@ def srt_time_to_seconds(time_str: str) -> float:
     except (ValueError, IndexError):
         return 0.0
 
-def get_srt_resume_info(srt_path: str) -> (float, int):
+def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     """
     Parses an SRT file to find the last segment's number and end time.
     Returns (last_end_time_seconds, last_segment_number).
@@ -160,17 +167,24 @@ def merge_segments(
 
     return merged
 
-def transcribe_audio(audio_file, model_name, srt_file="file.srt", language=None, device='cpu', compute_type='int8'):
-    """  
+def transcribe_audio(
+    audio_file: str,
+    model_name: str,
+    srt_file: str = "file.srt",
+    language: Optional[str] = None,
+    device: str = 'cpu',
+    compute_type: str = 'int8'
+) -> bool:
+    """
     Transcribe audio file and generate SRT subtitles with helper files.
     Creates helper files for both in-progress and completed transcriptions.
     """
     original = srt_file
     temp_srt = srt_file.replace('.srt','.unfinished.srt')
-    
+
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(temp_srt) or '.', exist_ok=True)
-    
+
     # Automatically switch to CPU if CUDA is not available
     if device == 'cuda':
         try:
@@ -296,9 +310,29 @@ def write_srt(segments_file, srt):
             srt.write(f"{i}\n")
             srt.write(f"{start_time} --> {end_time}\n")
             srt.write(f"{text}\n\n")
-def process_create(file, model_name, srt_file='none', segments_file='segments.json', language='none', device='cpu', compute_type='int8', force_device=False, auto=True, write=print, cpu_threads=None,
-                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0, merge_lines=False,
-                   start_time=None, end_time=None, mpv_ipc_reload=None):
+
+def process_create(
+    file: str,
+    model_name: str,
+    srt_file: str = 'none',
+    segments_file: str = 'segments.json',
+    language: str = 'none',
+    device: str = 'cpu',
+    compute_type: str = 'int8',
+    force_device: bool = False,
+    auto: bool = True,
+    write: Callable = print,
+    cpu_threads: Optional[int] = None,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    diarization: bool = False,
+    diarization_params: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+    merge_lines: bool = False,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    mpv_ipc_reload: Optional[Callable] = None
+) -> bool:
     """Creates a new process to retry the transcription."""
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
@@ -350,9 +384,26 @@ def process_create(file, model_name, srt_file='none', segments_file='segments.js
         write('No model')
     return False
 
-def try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads=None,
-                   vad_filter=False, vad_params=None, diarization=False, diarization_params=None, temperature=0, merge_lines=False,
-                   start_time=None, end_time=None, mpv_ipc_reload=None):
+def try_transcribe(
+    file: str,
+    current_model: str,
+    srt_file: str,
+    language: str,
+    device: str,
+    compute_type: str,
+    force_device: bool,
+    write: Callable,
+    cpu_threads: Optional[int] = None,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    diarization: bool = False,
+    diarization_params: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+    merge_lines: bool = False,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    mpv_ipc_reload: Optional[Callable] = None
+) -> bool:
     """Try transcription with given parameters, supporting resume."""
     script_path = None
     resume_audio_path = None
@@ -801,16 +852,16 @@ def is_garbage(seg):
         return True
     return False
 
-def filter_garbage_segments(segments):
+def filter_garbage_segments(segments: List[Segment]) -> List[Segment]:
     """Remove segments that are likely to be garbage."""
     return [s for s in segments if not is_garbage(s)]
 
-def merge_adjacent_identical_segments(segments):
+def merge_adjacent_identical_segments(segments: List[Segment]) -> List[Segment]:
     """Merge adjacent segments that have identical text."""
     if not segments:
         return segments
 
-    merged = []
+    merged: List[Segment] = []
     for s in segments:
         if merged and s.text.strip() == merged[-1].text.strip():
             merged[-1].end = s.end
@@ -818,7 +869,7 @@ def merge_adjacent_identical_segments(segments):
             merged.append(s)
     return merged
 
-def create_helper_files(dir_path, subtitle_file, url):
+def create_helper_files(dir_path: str, subtitle_file: str, url: str) -> None:
     """Create helper files (HTML redirect, batch file, shell script)"""
     print(f"Creating helper files for {subtitle_file}")
     try:

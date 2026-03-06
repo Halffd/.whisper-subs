@@ -121,6 +121,12 @@ class TranscriptionThread(QThread):
                 self.temperature = self.temperature_slider.value() / 10.0
             self.merge_lines = main_window.merge_lines_check.isChecked()
             self.mpv_ipc = main_window.mpv_ipc_check.isChecked()
+            
+            # Get transcription options
+            self.force = main_window.force_check.isChecked()
+            self.replace_subs = main_window.replace_subs_check.isChecked()
+            self.backup_subs = main_window.backup_subs_check.isChecked()
+            self.retry = main_window.retry_check.isChecked()
 
         else:
             # Default values if window not found
@@ -141,6 +147,10 @@ class TranscriptionThread(QThread):
             self.mpv_ipc = False
             self.start_time = None
             self.end_time = None
+            self.force = False
+            self.replace_subs = False
+            self.backup_subs = True
+            self.retry = True
         
         # Setup WebSocket
         import socketio
@@ -591,6 +601,43 @@ class TranscriptionApp(QWidget):
 
         # Thread count and process priority
         advanced_layout = QVBoxLayout()
+
+        # Transcription options group
+        options_group = QGroupBox("Transcription Options")
+        options_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #5E81AC;
+                margin-top: 0.5em;
+                padding-top: 0.5em;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px 0 3px;
+            }
+        """)
+        options_layout = QGridLayout()
+
+        # Force transcription checkbox
+        self.force_check = QCheckBox("Force (Ignore existing subtitles)")
+        options_layout.addWidget(self.force_check, 0, 0)
+
+        # Replace subtitles checkbox
+        self.replace_subs_check = QCheckBox("Replace existing subtitles")
+        options_layout.addWidget(self.replace_subs_check, 0, 1)
+
+        # Backup subtitles checkbox
+        self.backup_subs_check = QCheckBox("Backup existing subtitles")
+        self.backup_subs_check.setChecked(True)  # Default enabled
+        options_layout.addWidget(self.backup_subs_check, 1, 0)
+
+        # Retry on failure checkbox
+        self.retry_check = QCheckBox("Retry on failure (smaller models)")
+        self.retry_check.setChecked(True)  # Default enabled
+        options_layout.addWidget(self.retry_check, 1, 1)
+
+        options_group.setLayout(options_layout)
+        advanced_layout.addWidget(options_group)
 
         # Thread count
         thread_layout = QHBoxLayout()
@@ -1368,7 +1415,11 @@ class TranscriptionApp(QWidget):
             'cpu_threads': self.thread_combo.currentText(),
             'process_priority': self.priority_combo.currentText(),
             'temperature_auto': self.temperature_auto_check.isChecked(),
-            'temperature_value': self.temperature_slider.value()
+            'temperature_value': self.temperature_slider.value(),
+            'force': self.force_check.isChecked(),
+            'replace_subs': self.replace_subs_check.isChecked(),
+            'backup_subs': self.backup_subs_check.isChecked(),
+            'retry': self.retry_check.isChecked()
         }
 
         try:
@@ -1501,6 +1552,16 @@ class TranscriptionApp(QWidget):
                     self.temperature_value_label.setText(f"{temp:.1f}")
                 # Toggle slider state based on auto checkbox
                 self.toggle_temperature_slider(None)
+
+                # Load transcription options
+                if 'force' in settings:
+                    self.force_check.setChecked(settings['force'])
+                if 'replace_subs' in settings:
+                    self.replace_subs_check.setChecked(settings['replace_subs'])
+                if 'backup_subs' in settings:
+                    self.backup_subs_check.setChecked(settings['backup_subs'])
+                if 'retry' in settings:
+                    self.retry_check.setChecked(settings['retry'])
 
         except Exception as e:
             self.log(f"Error loading settings: {str(e)}")

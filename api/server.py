@@ -3,18 +3,23 @@
 FastAPI server for WhisperSubs
 
 Provides REST API endpoints for audio/video transcription services.
+Enhanced with WebSocket support, advanced options, and task management.
 """
 import os
 import sys
 import json
 import asyncio
+import shutil
+import socketio
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from datetime import datetime
+from pathlib import Path
 
 # Add the project root to the Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,25 +32,74 @@ import model
 app = FastAPI(
     title="WhisperSubs API",
     description="API for transcribing audio from various sources using Whisper",
-    version="1.0.0"
+    version="2.0.0"
 )
 
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Socket.IO server for real-time progress updates
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+socket_app = socketio.ASGIApp(sio, app)
+
 # Thread pool for running WhisperSubs processing in the background
-executor = ThreadPoolExecutor(max_workers=1)
+executor = ThreadPoolExecutor(max_workers=3)
 
 # Dictionary to track ongoing tasks
 task_status = {}
+task_lock = threading.Lock()
+
+# Output directory
+OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
 
 class TranscriptionRequest(BaseModel):
     source: str = Field(..., description="URL or file path to transcribe")
-    model_name: str = Field("large", description="Whisper model name (tiny, base, small, medium, large, etc.)")
-    device: str = Field("cpu", description="Device to use (cpu, cuda)")
-    compute_type: str = Field("int8", description="Compute type (int8, float16)")
-    force: bool = Field(False, description="Force transcription even if already processed")
+    model_name: str = Field("large", description="Whisper model name")
+    device: str = Field("cpu", description="Device (cpu, cuda)")
+    compute_type: str = Field("int8", description="Compute type")
+    
+    # Transcription options
+    force: bool = Field(False, description="Force transcription")
+    replace_subs: bool = Field(False, description="Replace existing subtitles")
+    backup_subs: bool = Field(True, description="Backup existing subtitles")
+    retry: bool = Field(True, description="Retry with smaller models on failure")
     ignore_subs: bool = Field(False, description="Ignore existing subtitles")
-    sub_lang: Optional[str] = Field(None, description="Subtitle language code")
-    run_mpv: bool = Field(False, description="Run player in background")
-    force_retry: bool = Field(False, description="Force retry transcription even if already completed")
+    
+    # Language and processing
+    sub_lang: Optional[str] = Field(None, description="Subtitle language")
+    language: Optional[str] = Field(None, description="Source audio language")
+    run_mpv: bool = Field(False, description="Run MPV player")
+    
+    # VAD settings
+    vad_filter: Optional[bool] = Field(None, description="Enable VAD filter")
+    vad_silence_duration: Optional[int] = Field(None, description="VAD min silence (ms)")
+    
+    # Diarization
+    diarization: bool = Field(False, description="Enable speaker diarization")
+    min_speakers: Optional[int] = Field(None, description="Min speakers")
+    max_speakers: Optional[int] = Field(None, description="Max speakers")
+    
+    # Advanced
+    temperature: Optional[float] = Field(None, description="Sampling temperature")
+    start_time: Optional[str] = Field(None, description="Start time (HH:MM:SS or seconds)")
+    end_time: Optional[str] = Field(None, description="End time (HH:MM:SS or seconds)")
+    cpu_threads: Optional[int] = Field(None, description="CPU thread count")
+    
+    # MPV IPC
+    mpv_ipc: bool = Field(False, description="Enable MPV IPC subtitle reload")
+    mpv_socket: Optional[str] = Field("/tmp/mpvsocket", description="MPV socket path")
+
+
+class TranscriptionRequestAdvanced(TranscriptionRequest):
+    """Extended request with batch processing support"""
+    batch_id: Optional[str] = Field(None, description="Batch ID for grouping tasks")
+    priority: int = Field(5, ge=1, le=10, description="Task priority (1=lowest, 10=highest)")
 
 
 class TaskResponse(BaseModel):
@@ -78,8 +132,8 @@ def get_available_models():
 
 
 @app.post("/transcribe", response_model=TaskResponse)
-def start_transcription(request: TranscriptionRequest, background_tasks: BackgroundTasks):
-    """Start a new transcription task"""
+async def start_transcription(request: TranscriptionRequest, background_tasks: BackgroundTasks):
+    """Start a new transcription task with advanced options"""
     # Validate model name
     if request.model_name not in model.MODEL_NAMES:
         valid_model_name = model.getName(request.model_name)
@@ -89,23 +143,28 @@ def start_transcription(request: TranscriptionRequest, background_tasks: Backgro
 
     # Generate a unique task ID
     task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-    
-    # Create task status entry
-    task_status[task_id] = {
-        "status": "pending",
-        "source": request.source,
-        "model_name": request.model_name,
-        "created_at": datetime.now().isoformat(),
-        "completed_at": None,
-        "progress": None,
-        "result": None,
-        "error": None
-    }
 
-    # Create a WhisperSubs processor
+    # Create task status entry with extended info
+    with task_lock:
+        task_status[task_id] = {
+            "status": "pending",
+            "source": request.source,
+            "model_name": request.model_name,
+            "created_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "progress": None,
+            "result": None,
+            "error": None,
+            "options": request.dict()
+        }
+
+    # Create a WhisperSubs processor with all options
     def run_transcription():
         try:
-            task_status[task_id]["status"] = "processing"
+            with task_lock:
+                task_status[task_id]["status"] = "processing"
+            
+            # Build WhisperSubs with all parameters
             processor = WhisperSubs(
                 model_name=request.model_name,
                 device=request.device,
@@ -114,29 +173,46 @@ def start_transcription(request: TranscriptionRequest, background_tasks: Backgro
                 ignore_subs=request.ignore_subs,
                 sub_lang=request.sub_lang,
                 run_mpv=request.run_mpv,
-                force_retry=request.force_retry
+                force_retry=request.retry,
+                # VAD settings
+                vad_filter=request.vad_filter,
+                vad_min_silence_duration=request.vad_silence_duration,
+                # Diarization
+                diarization=request.diarization,
+                min_speakers=request.min_speakers,
+                max_speakers=request.max_speakers,
+                # Advanced
+                temperature=request.temperature,
+                start_time=request.start_time,
+                end_time=request.end_time,
+                # MPV IPC
+                mpv_ipc=request.mpv_ipc,
+                mpv_socket=request.mpv_socket
             )
-            
+
             # Process the source
             job = add_job(request.source, request.model_name)
-            processor.process(job)
-            
+            processor.process(request.source)
+
             # Update task status on completion
-            task_status[task_id]["status"] = "completed"
-            task_status[task_id]["completed_at"] = datetime.now().isoformat()
-            task_status[task_id]["result"] = {
-                "source": request.source,
-                "output_directory": os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
-            }
+            with task_lock:
+                task_status[task_id]["status"] = "completed"
+                task_status[task_id]["completed_at"] = datetime.now().isoformat()
+                task_status[task_id]["result"] = {
+                    "source": request.source,
+                    "output_directory": OUTPUT_DIR
+                }
+            
         except Exception as e:
-            task_status[task_id]["status"] = "failed"
-            task_status[task_id]["error"] = str(e)
-            task_status[task_id]["completed_at"] = datetime.now().isoformat()
+            with task_lock:
+                task_status[task_id]["status"] = "failed"
+                task_status[task_id]["error"] = str(e)
+                task_status[task_id]["completed_at"] = datetime.now().isoformat()
             print(f"Error processing task {task_id}: {e}")
 
     # Run the transcription in a thread
     background_tasks.add_task(run_transcription)
-    
+
     return TaskResponse(
         task_id=task_id,
         status="pending",
@@ -144,6 +220,87 @@ def start_transcription(request: TranscriptionRequest, background_tasks: Backgro
         model_name=request.model_name,
         created_at=task_status[task_id]["created_at"]
     )
+
+
+@app.websocket("/ws/{task_id}")
+async def websocket_endpoint(websocket: WebSocket, task_id: str):
+    """WebSocket endpoint for real-time task progress updates"""
+    await sio.connect(websocket)
+    try:
+        # Join room for this task
+        await sio.enter_room(task_id)
+        
+        # Send current status
+        if task_id in task_status:
+            await websocket.send_json(task_status[task_id])
+        
+        # Keep connection alive
+        while True:
+            await asyncio.sleep(30)
+            await websocket.send_json({"type": "ping"})
+            
+    except WebSocketDisconnect:
+        await sio.leave_room(task_id)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+
+
+@app.get("/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    """Cancel a transcription task"""
+    if task_id not in task_status:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task_status[task_id]["status"] in ["completed", "failed"]:
+        raise HTTPException(status_code=400, detail="Task already completed")
+    
+    with task_lock:
+        task_status[task_id]["status"] = "cancelled"
+        task_status[task_id]["completed_at"] = datetime.now().isoformat()
+    
+    return {"message": f"Task {task_id} cancelled"}
+
+
+@app.get("/subtitles/{filename}")
+def get_subtitle(filename: str):
+    """Download a subtitle file"""
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+    return FileResponse(file_path, media_type="text/plain", filename=filename)
+
+
+@app.get("/subtitles/list")
+def list_subtitles(source: Optional[str] = None):
+    """List available subtitle files"""
+    subtitles = []
+    if os.path.exists(OUTPUT_DIR):
+        for root, dirs, files in os.walk(OUTPUT_DIR):
+            for file in files:
+                if file.endswith('.srt'):
+                    rel_path = os.path.relpath(os.path.join(root, file), OUTPUT_DIR)
+                    if source is None or source.lower() in rel_path.lower():
+                        subtitles.append({
+                            "filename": file,
+                            "path": rel_path,
+                            "created": datetime.fromtimestamp(os.path.getctime(os.path.join(root, file))).isoformat()
+                        })
+    return sorted(subtitles, key=lambda x: x['created'], reverse=True)
+
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: str):
+    """Delete a completed/failed task from history"""
+    if task_id not in task_status:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task_status[task_id]["status"] not in ["completed", "failed", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Can only delete completed/failed tasks")
+    
+    with task_lock:
+        del task_status[task_id]
+    
+    return {"message": f"Task {task_id} deleted"}
 
 
 @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
@@ -189,10 +346,18 @@ def list_jobs():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    """Health check endpoint with system info"""
+    import psutil
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "cpu_percent": psutil.cpu_percent(),
+        "memory_percent": psutil.virtual_memory().percent,
+        "active_tasks": len([t for t in task_status.values() if t["status"] == "processing"])
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Use socket_app instead of app for Socket.IO support
+    uvicorn.run(socket_app, host="0.0.0.0", port=8000)

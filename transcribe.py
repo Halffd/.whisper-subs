@@ -730,10 +730,12 @@ try:
             if progress_pct > 0:
                 eta = (elapsed / progress_pct * 100) - elapsed
                 speed = segment.end / elapsed
-                print(f"Progress: {progress_pct:.1f}% | "
-                      f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))} | "
-                      f"ETA: {str(datetime.timedelta(seconds=int(eta)))} | "
-                      f"Speed: {speed:.1f}x")
+                print("Progress: %.1f%% | Elapsed: %s | ETA: %s | Speed: %.1fx" % (
+                    progress_pct,
+                    str(datetime.timedelta(seconds=int(elapsed))),
+                    str(datetime.timedelta(seconds=int(eta))),
+                    speed
+                ))
             last_progress = current_time
 
         write_event.wait(timeout=1.0)
@@ -743,7 +745,10 @@ try:
     if audio_duration > 0:
         elapsed = time.time() - start_time
         speed = audio_duration / elapsed
-        print(f"Transcription completed in {str(datetime.timedelta(seconds=int(elapsed)))} ({speed:.1f}x real-time)")
+        print("Transcription completed in %s (%.1fx real-time)" % (
+            str(datetime.timedelta(seconds=int(elapsed))),
+            speed
+        ))
     
     stop_event.set()
     writer_thread.join(timeout=30)

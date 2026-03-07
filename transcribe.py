@@ -703,7 +703,7 @@ try:
         transcribe_kwargs["compression_ratio_threshold"] = 1.4
 
     # Add distil-whisper specific parameters
-    if 'distil' in {current_model}.lower():
+    if 'distil' in '{current_model}'.lower():
         transcribe_kwargs["condition_on_previous_text"] = False
         transcribe_kwargs["max_new_tokens"] = 128
         transcribe_kwargs["beam_size"] = 5

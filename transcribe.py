@@ -667,6 +667,11 @@ writer_thread = threading.Thread(target=write_segments, daemon=True)
 writer_thread.start()
 
 try:
+    # Initialize progress tracking variables early
+    audio_duration = 0
+    start_time = 0
+    last_progress = 0
+    
     print(f"Starting transcription with model {current_model} on device {{device}}")
     print(f"Full log will be written to: {{log_file}}")
 
@@ -693,7 +698,11 @@ try:
     segments, info = model.transcribe(r"{audio_to_transcribe}", **transcribe_kwargs)
     
     # Get audio duration for progress
-    audio_duration = info.duration if hasattr(info, 'duration') else 0
+    try:
+        audio_duration = info.duration if hasattr(info, 'duration') else 0
+    except:
+        pass
+    
     if audio_duration > 0:
         print(f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(audio_duration)))})")
     

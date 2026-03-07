@@ -15,11 +15,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # A single, clear source of truth for all available model names.
 # Ordered by speed (faster models first for better selection)
 MODEL_NAMES: List[str] = [
-    # Distilled/Faster models (recommended for speed)
-    "Systran/faster-distil-large-v3",  # 6x faster than large-v3, similar accuracy
-    "Systran/faster-distil-large-v2",  # 5x faster than large-v2
-    "Systran/faster-distil-medium",    # 4x faster than medium
-    "Systran/faster-distil-small",     # 3x faster than small
+    # Distilled models (faster, good accuracy)
     "distil-whisper/distil-large-v3",  # 4x faster than large-v3
     "distil-whisper/distil-large-v2",  # 3x faster than large-v2
     "distil-whisper/distil-medium.en", # English-only, 2x faster
@@ -37,8 +33,6 @@ MODEL_NAMES: List[str] = [
     "clu-ling/whisper-large-v2-japanese-5k-steps",
     "distil-whisper/distil-base", "distil-whisper/distil-small",
     "distil-whisper/distil-medium", "distil-whisper/distil-large",
-    "Systran/faster-distil-medium", "Systran/faster-distil-large",
-    "Systran/faster-distil-large-v2", "Systran/faster-distil-large-v3",
     "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"
 ]
 

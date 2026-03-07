@@ -725,12 +725,12 @@ try:
         # Progress update every second
         current_time = time.time()
         if current_time - last_progress >= 1.0 and audio_duration > 0:
-            progress = (segment.end / audio_duration) * 100
+            progress_pct = (segment.end / audio_duration) * 100
             elapsed = current_time - start_time
-            if progress > 0:
-                eta = (elapsed / progress * 100) - elapsed
+            if progress_pct > 0:
+                eta = (elapsed / progress_pct * 100) - elapsed
                 speed = segment.end / elapsed
-                print(f"Progress: {progress:.1f}% | "
+                print(f"Progress: {progress_pct:.1f}% | "
                       f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))} | "
                       f"ETA: {str(datetime.timedelta(seconds=int(eta)))} | "
                       f"Speed: {speed:.1f}x")
@@ -738,7 +738,7 @@ try:
 
         write_event.wait(timeout=1.0)
         write_event.clear()
-    
+
     # Final progress
     if audio_duration > 0:
         elapsed = time.time() - start_time

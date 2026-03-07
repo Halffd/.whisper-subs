@@ -573,6 +573,9 @@ def try_transcribe(
         language_param = '\'en\'' if is_english_only else ('None' if language == 'none' else f"'{language}'")
         whisper_log = srt_file.replace('.srt', '.whisper.log')
         
+        # Initialize audio_duration for progress tracking (will be updated after model loads)
+        audio_duration = 0
+
         script = f'''
 import faster_whisper
 import os
@@ -622,6 +625,7 @@ merge_lines = {str(merge_lines).capitalize()}
 mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
 start_offset_seconds = {start_offset_seconds}
 segments_written = 0
+audio_duration = {audio_duration}
 
 def write_segments():
     global segments_written
@@ -667,11 +671,6 @@ writer_thread = threading.Thread(target=write_segments, daemon=True)
 writer_thread.start()
 
 try:
-    # Initialize progress tracking variables early
-    audio_duration = 0
-    start_time = 0
-    last_progress = 0
-    
     print(f"Starting transcription with model {current_model} on device {{device}}")
     print(f"Full log will be written to: {{log_file}}")
 
@@ -697,11 +696,9 @@ try:
     # audio_file is passed as positional argument, not keyword
     segments, info = model.transcribe(r"{audio_to_transcribe}", **transcribe_kwargs)
     
-    # Get audio duration for progress
-    try:
-        audio_duration = info.duration if hasattr(info, 'duration') else 0
-    except:
-        pass
+    # Update audio_duration from info if available
+    if hasattr(info, 'duration'):
+        audio_duration = info.duration
     
     if audio_duration > 0:
         print(f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(audio_duration)))})")

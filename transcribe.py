@@ -266,18 +266,27 @@ def transcribe_audio(
         
         write(f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'})")
 
+        # Check if using distil-whisper model (needs special parameters)
+        is_distil = 'distil' in model_name.lower()
+        
+        # Distil-whisper models need special parameters for best performance
+        transcribe_params = {
+            'audio_file': audio_file,
+            'language': language,
+            'vad_filter': False,
+        }
+        
+        # Add distil-specific parameters
+        if is_distil:
+            transcribe_params.update({
+                'condition_on_previous_text': False,  # Critical for distil models!
+                'max_new_tokens': 128,
+                'beam_size': 5,
+            })
+            write(f"Using distil-whisper optimized parameters")
+
         # Process in smaller chunks with progress tracking
-        result_segments, info = whisper_model.transcribe(
-            audio_file,
-            language=language,
-            vad_filter=False,
-            #vad_parameters=dict(
-            #    threshold=0.3,                 # lower = less chopping
-            #    min_silence_duration_ms=1200,  # stop micro-cuts
-            #    speech_pad_ms=600,             # smoother joins
-            #),
-#            no_speech_threshold=0.4,           # stricter silence rejection
-        )
+        result_segments, info = whisper_model.transcribe(**transcribe_params)
 
         # Convert segments generator to list for post-processing
         segments_list = list(result_segments)
@@ -692,6 +701,13 @@ try:
     if merge_lines:
         transcribe_kwargs["no_speech_threshold"] = 0.6
         transcribe_kwargs["compression_ratio_threshold"] = 1.4
+
+    # Add distil-whisper specific parameters
+    if 'distil' in {current_model}.lower():
+        transcribe_kwargs["condition_on_previous_text"] = False
+        transcribe_kwargs["max_new_tokens"] = 128
+        transcribe_kwargs["beam_size"] = 5
+        print("Using distil-whisper optimized parameters")
 
     # audio_file is passed as positional argument, not keyword
     segments, info = model.transcribe(r"{audio_to_transcribe}", **transcribe_kwargs)

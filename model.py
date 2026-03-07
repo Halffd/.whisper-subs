@@ -13,15 +13,30 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # --- Model Configuration ---
 # A single, clear source of truth for all available model names.
+# Ordered by speed (faster models first for better selection)
 MODEL_NAMES: List[str] = [
-    "tiny", "base", "small", "medium", "large", "large-v2", "large-v3",
-    "tiny.en", "base.en", "small.en", "medium.en",
+    # Distilled/Faster models (recommended for speed)
+    "Systran/faster-distil-large-v3",  # 6x faster than large-v3, similar accuracy
+    "Systran/faster-distil-large-v2",  # 5x faster than large-v2
+    "Systran/faster-distil-medium",    # 4x faster than medium
+    "Systran/faster-distil-small",     # 3x faster than small
+    "distil-whisper/distil-large-v3",  # 4x faster than large-v3
+    "distil-whisper/distil-large-v2",  # 3x faster than large-v2
+    "distil-whisper/distil-medium.en", # English-only, 2x faster
+    "distil-whisper/distil-small.en",  # English-only, fast
+    
+    # Original Whisper models (slower but proven)
+    "large-v3", "large-v2", "large",
+    "medium", "medium.en",
+    "small", "small.en",
+    "base", "base.en",
+    "tiny", "tiny.en",
+    
+    # Specialized models
     "jlondonobo/whisper-medium-pt",
     "clu-ling/whisper-large-v2-japanese-5k-steps",
-    "distil-whisper/distil-medium.en", "distil-whisper/distil-small.en",
     "distil-whisper/distil-base", "distil-whisper/distil-small",
     "distil-whisper/distil-medium", "distil-whisper/distil-large",
-    "distil-whisper/distil-large-v2", "distil-whisper/distil-large-v3",
     "Systran/faster-distil-medium", "Systran/faster-distil-large",
     "Systran/faster-distil-large-v2", "Systran/faster-distil-large-v3",
     "japanese-asr/distil-whisper-large-v3-ja-reazonspeech-large"

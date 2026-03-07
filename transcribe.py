@@ -167,13 +167,54 @@ def merge_segments(
 
     return merged
 
+
+class ProgressTracker:
+    """Track transcription progress with ETA estimation"""
+    
+    def __init__(self, total_duration: float, write: Callable = print):
+        self.total_duration = total_duration
+        self.write = write
+        self.start_time = time.time()
+        self.last_progress_time = 0
+        self.segments_processed = 0
+        self.last_segment_time = 0
+        
+    def update(self, segment_start: float, segment_end: float) -> None:
+        """Update progress with current segment"""
+        self.segments_processed += 1
+        current_time = time.time()
+        
+        # Calculate progress percentage
+        progress = (segment_end / self.total_duration) * 100
+        
+        # Calculate ETA (only update every second to avoid spam)
+        if current_time - self.last_progress_time >= 1.0:
+            elapsed = current_time - self.start_time
+            if progress > 0:
+                estimated_total = elapsed / (progress / 100)
+                remaining = estimated_total - elapsed
+                eta_str = str(datetime.timedelta(seconds=int(remaining)))
+                
+                # Calculate processing speed
+                speed = segment_end / elapsed if elapsed > 0 else 0
+                
+                self.write(f"Progress: {progress:.1f}% | "
+                          f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))} | "
+                          f"ETA: {eta_str} | "
+                          f"Speed: {speed:.1f}x real-time")
+            
+            self.last_progress_time = current_time
+
+
 def transcribe_audio(
     audio_file: str,
     model_name: str,
     srt_file: str = "file.srt",
     language: Optional[str] = None,
     device: str = 'cpu',
-    compute_type: str = 'int8'
+    compute_type: str = 'int8',
+    cpu_threads: Optional[int] = None,
+    write: Callable = print
 ) -> bool:
     """
     Transcribe audio file and generate SRT subtitles with helper files.
@@ -199,19 +240,37 @@ def transcribe_audio(
             print("PyTorch not available, falling back to CPU")
 
     try:
+        # Get audio duration for progress tracking
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
+                capture_output=True, text=True, check=False
+            )
+            total_duration = float(result.stdout.strip()) if result.stdout.strip() else 0
+        except Exception:
+            total_duration = 0
+        
+        # Initialize model with specified CPU threads
         whisper_model = faster_whisper.WhisperModel(
-            model_name, 
-            device=device, 
-            compute_type=compute_type,  # Use the compute_type parameter
+            model_name,
+            device=device,
+            compute_type=compute_type,
             device_index=0,
-            cpu_threads=os.cpu_count()
+            cpu_threads=cpu_threads if cpu_threads else os.cpu_count()
         )
+        
+        # Initialize progress tracker
+        progress = ProgressTracker(total_duration, write) if total_duration > 0 else None
+        
+        write(f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'})")
 
-        # Process in smaller chunks
-        result_segments, _ = whisper_model.transcribe(
+        # Process in smaller chunks with progress tracking
+        result_segments, info = whisper_model.transcribe(
             audio_file,
             language=language,
-            vad_filter=False, #True,
+            vad_filter=False,
             #vad_parameters=dict(
             #    threshold=0.3,                 # lower = less chopping
             #    min_silence_duration_ms=1200,  # stop micro-cuts
@@ -222,13 +281,15 @@ def transcribe_audio(
 
         # Convert segments generator to list for post-processing
         segments_list = list(result_segments)
+        
+        write(f"Transcribed {len(segments_list)} segments, processing...")
 
         # Apply post-processing to remove garbage segments
         segments_list = filter_garbage_segments(segments_list)
         segments_list = merge_adjacent_identical_segments(segments_list)
         #segments_list = merge_segments(segments_list)
 
-        # Write to temporary file first
+        # Write to temporary file first with progress tracking
         with open(temp_srt, "w", encoding="utf-8") as srt:
             for i, segment in enumerate(segments_list, start=1):
                 start_time = format_timestamp(segment.start)
@@ -237,6 +298,16 @@ def transcribe_audio(
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
                 srt.flush()
+                
+                # Update progress tracker
+                if progress:
+                    progress.update(segment.start, segment.end)
+        
+        # Final progress update
+        if progress:
+            elapsed = time.time() - progress.start_time
+            speed = total_duration / elapsed if elapsed > 0 else 0
+            write(f"Transcription completed in {str(datetime.timedelta(seconds=int(elapsed)))} ({speed:.1f}x real-time)")
 
         # Only proceed if the temporary file was created successfully
         if os.path.exists(temp_srt):
@@ -621,8 +692,17 @@ try:
     # audio_file is passed as positional argument, not keyword
     segments, info = model.transcribe(r"{audio_to_transcribe}", **transcribe_kwargs)
     
-    resume_offset = {resume_offset_seconds}
+    # Get audio duration for progress
+    audio_duration = info.duration if hasattr(info, 'duration') else 0
+    if audio_duration > 0:
+        print(f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(audio_duration)))})")
     
+    start_time = time.time()
+    last_progress = 0
+    segments_count = 0
+
+    resume_offset = {resume_offset_seconds}
+
     for segment in segments:
         while segment_queue.full() and not stop_event.is_set():
             time.sleep(0.1)
@@ -634,9 +714,30 @@ try:
             text=segment.text
         )
         segment_queue.put(adjusted_segment)
-        
+        segments_count += 1
+
+        # Progress update every second
+        current_time = time.time()
+        if current_time - last_progress >= 1.0 and audio_duration > 0:
+            progress = (segment.end / audio_duration) * 100
+            elapsed = current_time - start_time
+            if progress > 0:
+                eta = (elapsed / progress * 100) - elapsed
+                speed = segment.end / elapsed
+                print(f"Progress: {progress:.1f}% | "
+                      f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))} | "
+                      f"ETA: {str(datetime.timedelta(seconds=int(eta)))} | "
+                      f"Speed: {speed:.1f}x")
+            last_progress = current_time
+
         write_event.wait(timeout=1.0)
         write_event.clear()
+    
+    # Final progress
+    if audio_duration > 0:
+        elapsed = time.time() - start_time
+        speed = audio_duration / elapsed
+        print(f"Transcription completed in {str(datetime.timedelta(seconds=int(elapsed)))} ({speed:.1f}x real-time)")
     
     stop_event.set()
     writer_thread.join(timeout=30)

@@ -176,7 +176,8 @@ class WhisperSubs:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         mpv_ipc: bool = False,
-        mpv_socket: Optional[str] = None
+        mpv_socket: Optional[str] = None,
+        cpu_threads: Optional[int] = None
     ):
         self.model_name = model_name
         self.device = device
@@ -217,6 +218,8 @@ class WhisperSubs:
         # MPV IPC settings
         self.mpv_ipc = mpv_ipc
         self.mpv_socket = mpv_socket or '/tmp/mpvsocket'
+        # CPU threads setting
+        self.cpu_threads = cpu_threads
 
     def log(self, message: str) -> None:
         message_str = str(message)
@@ -1342,6 +1345,8 @@ Examples:
                              help="Device to use ('cpu', 'cuda', 'mps'). Default: 'cpu'")
     process_group.add_argument('--compute', default='int8', 
                              help="Compute type ('int8', 'float16'). Default: 'int8'")
+    process_group.add_argument('--cpu-threads', type=int, default=None,
+                             help="Number of CPU threads for transcription (default: auto-detect)")
     process_group.add_argument('-f', '--force', action='store_true', 
                              help="Force transcription even if already processed.")
     process_group.add_argument('-r', '--force-retry', action='store_true', help="Force retry transcription even if already completed (ignores existing subtitles).")
@@ -1440,7 +1445,8 @@ Examples:
                     start_time=args.start_time,
                     end_time=args.end_time,
                     mpv_ipc=args.mpv_ipc,
-                    mpv_socket=args.mpv_socket
+                    mpv_socket=args.mpv_socket,
+                    cpu_threads=args.cpu_threads
                 )
                 processor.process(source_info['url'])
                 
@@ -1592,7 +1598,8 @@ Examples:
             start_time=args.start_time,
             end_time=args.end_time,
             mpv_ipc=args.mpv_ipc,
-            mpv_socket=args.mpv_socket
+            mpv_socket=args.mpv_socket,
+            cpu_threads=args.cpu_threads
         )
         processor.process(job_or_source)
 

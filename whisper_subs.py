@@ -1040,7 +1040,35 @@ class WhisperSubs:
             if hasattr(self, 'mpv_ipc') and self.mpv_ipc and mpv_process:
                 reload_thread = self.start_mpv_auto_reload(srt_file, reload_stop_event)
 
-            if _get_transcribe().process_create(file=audio_file, model_name=self.model_name, srt_file=srt_file, device=self.device, compute_type=self.compute_type, write=self.log):
+            # Build VAD parameters if enabled
+            vad_params = None
+            if hasattr(self, 'vad_filter') and self.vad_filter:
+                vad_params = dict(min_silence_duration_ms=self.vad_min_silence_duration) if self.vad_min_silence_duration else None
+
+            # Build diarization parameters if enabled
+            diarization_params = None
+            if hasattr(self, 'diarization') and self.diarization:
+                diarization_params = dict(min_speakers=self.min_speakers, max_speakers=self.max_speakers)
+
+            if _get_transcribe().process_create(
+                file=audio_file,
+                model_name=self.model_name,
+                srt_file=srt_file,
+                device=self.device,
+                compute_type=self.compute_type,
+                force_device=False,
+                auto=True,
+                write=self.log,
+                cpu_threads=getattr(self, 'cpu_threads', None),
+                vad_filter=self.vad_filter if hasattr(self, 'vad_filter') else False,
+                vad_params=vad_params,
+                diarization=self.diarization if hasattr(self, 'diarization') else False,
+                diarization_params=diarization_params,
+                temperature=self.temperature if hasattr(self, 'temperature') else None,
+                merge_lines=self.merge_lines if hasattr(self, 'merge_lines') else False,
+                start_time=getattr(self, 'start_time', None),
+                end_time=getattr(self, 'end_time', None)
+            ):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
                 if os.path.exists(srt_file):

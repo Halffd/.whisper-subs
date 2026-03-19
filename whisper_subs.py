@@ -177,7 +177,9 @@ class WhisperSubs:
         end_time: Optional[str] = None,
         mpv_ipc: bool = False,
         mpv_socket: Optional[str] = None,
-        cpu_threads: Optional[int] = None
+        cpu_threads: Optional[int] = None,
+        save_video: bool = False,
+        save_thumbnail: bool = True
     ):
         self.model_name = model_name
         self.device = device
@@ -190,6 +192,8 @@ class WhisperSubs:
         self.specified_browser = browser
         self.force_cookies = True if browser else False
         self.strict_language_tier = strict_language_tier
+        self.save_video = save_video
+        self.save_thumbnail = save_thumbnail
         self.model = None
         self.log_file = os.path.join(os.path.expanduser("~/.config/WhisperSubs"), 'whisper_subs.log')
         self.info_cache: Dict[str, Tuple[str, str]] = {}  # Cache for video info to avoid re-fetching
@@ -761,13 +765,8 @@ class WhisperSubs:
                     # Download with proper template
                     download_opts = {
                         'outtmpl': f'{expected_base}.%(ext)s',  # Use our format
-                        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'm4a',
-                            'preferredquality': '192',
-                        }],
-                        'writethumbnail': True,
+                        'noplaylist': True,
+                        'writethumbnail': self.save_thumbnail,
                         'quiet': True,
                         'no_warnings': True,
                         'noprogress': False,
@@ -788,6 +787,21 @@ class WhisperSubs:
                         'concurrent_fragment_downloads': 5,
                     }
 
+                    if not self.save_video:
+                        download_opts.update({
+                            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                            'postprocessors': [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'm4a',
+                                'preferredquality': '192',
+                            }]
+                        })
+                    else:
+                        download_opts.update({
+                            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                            'merge_output_format': 'mp4',
+                        })
+
                     if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
                         download_opts['cookiesfrombrowser'] = (self.specified_browser,)
 
@@ -797,7 +811,7 @@ class WhisperSubs:
                         ydl.download([clean_url])
 
                     # Find the downloaded file based on expected name
-                    for ext in ['.m4a', '.mp3', '.webm', '.ogg']:
+                    for ext in ['.m4a', '.mp4', '.mp3', '.webm', '.ogg']:
                         predicted_path = f"{expected_base}{ext}"
                         full_path = os.path.join(output_path, predicted_path)
 
@@ -1358,6 +1372,9 @@ Examples:
                              help="Allow comparison between multilingual and English-only models.")
     process_group.add_argument('-m', '--run', action='store_true', help="Run player in background.")
     process_group.add_argument('--live', action='store_true', help="Transcribe live streams in real-time (for Twitch/YouTube live streams).")
+    process_group.add_argument('--video', action='store_true', help="Save the video file (default: False/audio-only).")
+    process_group.add_argument('--no-thumbnail', action='store_false', dest='save_thumbnail', help="Do not save the video thumbnail.")
+    process_group.set_defaults(save_thumbnail=True)
     
     # Advanced transcription options
     advanced_group = parser.add_argument_group('Advanced Transcription Options')
@@ -1446,7 +1463,9 @@ Examples:
                     end_time=args.end_time,
                     mpv_ipc=args.mpv_ipc,
                     mpv_socket=args.mpv_socket,
-                    cpu_threads=args.cpu_threads
+                    cpu_threads=args.cpu_threads,
+                    save_video=args.video,
+                    save_thumbnail=args.save_thumbnail
                 )
                 processor.process(source_info['url'])
                 
@@ -1599,7 +1618,9 @@ Examples:
             end_time=args.end_time,
             mpv_ipc=args.mpv_ipc,
             mpv_socket=args.mpv_socket,
-            cpu_threads=args.cpu_threads
+            cpu_threads=args.cpu_threads,
+            save_video=args.video,
+            save_thumbnail=args.save_thumbnail
         )
         processor.process(job_or_source)
 

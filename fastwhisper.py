@@ -334,7 +334,7 @@ class TranscriptionThread(QThread):
                 mpv_reload_callback = reload_subtitles
 
             # Use unified transcription module with all settings
-            success = transcribe.process_create(
+            success = _get_transcribe().process_create(
                 file=file_path,
                 model_name=self.model_name,
                 srt_file=srt_file,
@@ -381,20 +381,17 @@ class TranscriptionThread(QThread):
         return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
     def process_url(self, url: str) -> None:
-        """Process a YouTube URL using YoutubeSubs"""
+        """Process a YouTube URL using WhisperSubs"""
         try:
-            yt = YoutubeSubs(
+            yt = WhisperSubs(
                 model_name=self.model_name,
                 device=self.device,
-                compute=self.compute_type,
-                force_device=self.force_device,
-                use_cookies=self.use_cookies,
-                browser=self.browser,
-                cookie_file=self.cookie_file
+                compute_type=self.compute_type,
+                browser=self.browser if self.use_cookies else None
             )
             
             # Process the URL
-            yt.process_single_url(url, callback=lambda msg: self.progress.emit(str(msg)))
+            yt.process(url)
             
         except Exception as e:
             self.error.emit(f"Error processing {url}: {str(e)}")
@@ -438,7 +435,7 @@ class TranscriptionApp(QWidget):
         self.log_file = None
         self.selected_files = []
         self.selected_directory = None
-        self.youtube_subs = None
+        self.whisper_subs_processor = None
         self.last_clipboard = ""
         self.clipboard_monitoring = True
         self.force_device = False
@@ -1412,15 +1409,6 @@ class TranscriptionApp(QWidget):
         urls = [url for url in self.youtube_input.toPlainText().split('\n') if url.strip()]
         if not urls:
             return
-            
-        # Sort by oldest if enabled
-        if self.sort_oldest_check.isChecked():
-            if self.youtube_subs is None:
-                self.youtube_subs = YoutubeSubs(
-                    model_name=self.model_combo.currentText(),
-                    device='cuda'
-                )
-            urls = self.youtube_subs.sort_by_date(urls)
             
         # Reverse if enabled
         if self.reverse_order_check.isChecked():

@@ -1365,16 +1365,21 @@ Examples:
     model_group.add_argument('source', nargs='?',
                            help="URL, local file/directory path, or multiple paths/URLs separated by newlines.")
 
-    # File/Directory argument
-    model_group.add_argument('--file', '-d', dest='file_or_dir',
-                           help="Local file or directory path to transcribe.")
-    
+    # Source type arguments (explicit source specification)
+    source_group = parser.add_argument_group('Source Specification')
+    source_group.add_argument('--url', '-u', dest='url_source',
+                           help="YouTube/Twitch URL to transcribe (overrides positional source)")
+    source_group.add_argument('--file', '-f', dest='file_source',
+                           help="Local audio/video file to transcribe (overrides positional source)")
+    source_group.add_argument('--dir', '-d', dest='dir_source',
+                           help="Local directory to transcribe all media files (overrides positional source)")
+
     # Action arguments
     action_group = parser.add_argument_group('Actions')
     action_group.add_argument('-l', '--list', action='store_true', 
                             help="List all jobs and exit.")
     action_group.add_argument('-c', '--continue', dest='continue_last', 
-                            action='store_true', 
+                            action='store_true',
                             help="Continue the last unfinished job.")
     action_group.add_argument('-p', '--process-file', nargs='?', const=PROCESS_FILE,
                             help="Read sources from a file (one per line). If no file is specified, uses 'Youtube-Subs/process.txt'.")
@@ -1503,17 +1508,37 @@ Examples:
             return 1
     else:
         # Handle normal source input
-        job_or_source = args.source
+        # Priority: --url/--file/--dir > positional source > clipboard
+        job_or_source = None
+        
+        # Check explicit source arguments first
+        if args.url_source:
+            job_or_source = args.url_source
+            print(f"Using URL: {job_or_source}")
+        elif args.file_source:
+            if not os.path.exists(args.file_source):
+                parser.error(f"File not found: {args.file_source}")
+            job_or_source = args.file_source
+            print(f"Using file: {job_or_source}")
+        elif args.dir_source:
+            if not os.path.isdir(args.dir_source):
+                parser.error(f"Directory not found: {args.dir_source}")
+            job_or_source = args.dir_source
+            print(f"Using directory: {job_or_source}")
+        elif args.source:
+            job_or_source = args.source
+        
         model_to_use = args.model
         print(f"Model: {model_to_use} {_get_model().getName(model_to_use)}")
         model_to_use = _get_model().getName(model_to_use)
+        
         # If no source provided, check clipboard
         if not job_or_source:
             try:
                 clipboard_content = pyperclip.paste().strip()
                 if not clipboard_content:
                     parser.error("No source provided and clipboard is empty.")
-                
+
                 # Process clipboard content
                 sources = [line.strip() for line in clipboard_content.split('\n') if line.strip()]
                 if len(sources) == 1:
@@ -1529,7 +1554,7 @@ Examples:
                     job_or_source = '\n'.join(sources)
             except Exception as e:
                 parser.error(f"No source provided and could not read clipboard: {e}")
-    
+
     # Handle model selection
     if args.continue_last:
         model_to_use = _get_model().getName(job['model'])
@@ -1537,8 +1562,8 @@ Examples:
         # For process file, we'll get the model from the file or use default
         # This will be handled in the process file loop
         pass
-    elif not args.model and not any([args.list, args.continue_last, args.file_or_dir]):
-        parser.error("Model argument is required unless using --list, --continue, or --file/-d.")
+    elif not args.model and not any([args.list, args.continue_last, args.url_source, args.file_source, args.dir_source]):
+        parser.error("Model argument is required unless using --list, --continue, --url, --file, or --dir.")
     else:
         model_to_use = _get_model().getName(args.model)
 

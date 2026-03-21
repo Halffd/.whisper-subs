@@ -501,12 +501,18 @@ def try_transcribe(
             ffmpeg_cmd = ['ffmpeg', '-y', '-i', file]
 
             if start_time:
-                # Parse start time (support HH:MM:SS or seconds)
+                # Parse start time (support HH:MM:SS, MM:SS, or seconds)
                 if ':' in str(start_time):
                     ffmpeg_cmd.extend(['-ss', str(start_time)])
                     # Calculate offset for subtitle timestamps
                     parts = str(start_time).split(':')
-                    start_offset_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    if len(parts) == 3:  # HH:MM:SS
+                        start_offset_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    elif len(parts) == 2:  # MM:SS
+                        start_offset_seconds = int(parts[0]) * 60 + float(parts[1])
+                    else:  # Invalid format
+                        start_offset_seconds = 0
+                        write(f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS")
                 else:
                     ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=float(start_time)))])
                     start_offset_seconds = float(start_time)
@@ -514,9 +520,15 @@ def try_transcribe(
             if end_time:
                 # Parse end time and calculate duration
                 if ':' in str(end_time):
-                    # Convert HH:MM:SS to seconds
+                    # Convert HH:MM:SS or MM:SS to seconds
                     parts = str(end_time).split(':')
-                    end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    if len(parts) == 3:  # HH:MM:SS
+                        end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    elif len(parts) == 2:  # MM:SS
+                        end_seconds = int(parts[0]) * 60 + float(parts[1])
+                    else:  # Invalid format
+                        end_seconds = 0
+                        write(f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS")
                 else:
                     end_seconds = float(end_time)
 

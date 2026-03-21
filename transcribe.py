@@ -544,8 +544,15 @@ def try_transcribe(
 
                 ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
 
-            # Audio only - disable video, use AAC codec with software encoding
-            ffmpeg_cmd.extend(['-vn', '-c:a', 'aac', '-b:a', '192k', trimmed_audio_path])
+            # Audio only - optimized for transcription speed
+            ffmpeg_cmd.extend([
+                '-vn',  # No video
+                '-acodec', 'aac',
+                '-b:a', '128k',  # Sufficient for speech
+                '-ac', '1',  # Mono
+                '-ar', '16000',  # Whisper native sample rate
+                trimmed_audio_path
+            ])
 
             write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)

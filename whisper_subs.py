@@ -540,30 +540,41 @@ class WhisperSubs:
         
         # Skip if already exists
         if os.path.exists(audio_path):
-            self.log(f"Using existing audio file: {audio_path}")
+            self.log(f"Using existing audio file: {os.path.basename(audio_path)}")
             return audio_path
         
-        self.log(f"Converting video to audio: {os.path.basename(video_path)}")
+        self.log(f"Extracting audio from {os.path.basename(video_path)}...")
         
-        # Use FFmpeg to extract audio only (no video processing)
+        # Use FFmpeg to extract audio only - optimized for speed
         import subprocess
         ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-i', video_path,
-            '-vn',  # No video
-            '-c:a', 'aac',
-            '-b:a', '192k',
+            '-vn',  # No video processing
+            '-acodec', 'aac',
+            '-b:a', '128k',  # Lower bitrate for faster processing (sufficient for transcription)
+            '-ac', '1',  # Mono (faster, sufficient for speech)
+            '-ar', '16000',  # 16kHz sample rate (Whisper native, faster)
             audio_path
         ]
         
-        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+        # Run with progress output suppressed for cleaner logs
+        result = subprocess.run(
+            ffmpeg_cmd, 
+            capture_output=True, 
+            text=True, 
+            check=False,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL
+        )
         
         if result.returncode == 0 and os.path.exists(audio_path):
-            self.log(f"Audio extraction complete: {audio_path}")
+            self.log(f"Audio extracted: {os.path.basename(audio_path)}")
             return audio_path
         else:
-            self.log(f"Audio extraction failed: {result.stderr[:200] if result.stderr else 'Unknown error'}")
-            return None
+            self.log(f"Audio extraction failed, using original file")
+            # Return original path as fallback
+            return video_path
 
     def check_and_download_subs(self, url, output_dir, title):
         """Check for subs with minimal overhead."""

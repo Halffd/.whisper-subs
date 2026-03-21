@@ -271,6 +271,11 @@ class WhisperSubs:
 
     def get_video_info(self, url: str) -> Tuple[str, str]:
         """Get video title and channel name."""
+        # For local files, just return the filename
+        if self.is_local_file(url):
+            return os.path.basename(url), "local_files"
+        
+        # For YouTube/Twitch, fetch info
         try:
             ydl_opts = {
                 "quiet": True,

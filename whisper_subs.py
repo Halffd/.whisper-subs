@@ -521,6 +521,50 @@ class WhisperSubs:
                 self.log(f"Error getting video info: {e}")
                 yield {"source": source, "status": "pending", "title": os.path.basename(source)}
 
+    def _convert_to_audio(self, video_path: str) -> Optional[str]:
+        """Convert video file to audio-only M4A for transcription.
+        
+        This is needed for time cutting (--start/--end) to work properly,
+        as cutting video files requires video encoding which may fail.
+        """
+        if not os.path.exists(video_path):
+            return None
+        
+        # Only convert video files
+        video_exts = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'}
+        if os.path.splitext(video_path)[1].lower() not in video_exts:
+            # Already an audio file
+            return video_path
+        
+        audio_path = os.path.splitext(video_path)[0] + ".m4a"
+        
+        # Skip if already exists
+        if os.path.exists(audio_path):
+            self.log(f"Using existing audio file: {audio_path}")
+            return audio_path
+        
+        self.log(f"Converting video to audio: {os.path.basename(video_path)}")
+        
+        # Use FFmpeg to extract audio only (no video processing)
+        import subprocess
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-vn',  # No video
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            audio_path
+        ]
+        
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+        
+        if result.returncode == 0 and os.path.exists(audio_path):
+            self.log(f"Audio extraction complete: {audio_path}")
+            return audio_path
+        else:
+            self.log(f"Audio extraction failed: {result.stderr[:200] if result.stderr else 'Unknown error'}")
+            return None
+
     def check_and_download_subs(self, url, output_dir, title):
         """Check for subs with minimal overhead."""
         if self.ignore_subs:
@@ -1004,7 +1048,15 @@ class WhisperSubs:
                 return
 
             # FIX: Just pass the directory, not a template path
-            audio_file = task_source if is_local else self.download_audio(task_source, channel_dir)
+            if is_local:
+                # Convert video to audio if needed (for time cutting to work properly)
+                audio_file = self._convert_to_audio(task_source)
+                if not audio_file:
+                    self.log(f"Failed to convert video to audio: {task_source}")
+                    return
+            else:
+                audio_file = self.download_audio(task_source, channel_dir)
+            
             if not audio_file or not os.path.exists(audio_file):
                 self.log(f"Audio file not found: {audio_file}")
                 return

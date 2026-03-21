@@ -498,11 +498,13 @@ def try_transcribe(
         
         if start_time or end_time:
             trimmed_audio_path = os.path.splitext(file)[0] + ".trimmed.m4a"
-            ffmpeg_cmd = ['ffmpeg', '-y', '-i', file]
+            # Use -ss BEFORE -i for faster seeking, -vn to skip video processing
+            ffmpeg_cmd = ['ffmpeg', '-y']
 
             if start_time:
                 # Parse start time (support HH:MM:SS, MM:SS, or seconds)
                 if ':' in str(start_time):
+                    # Place -ss before -i for fast seeking
                     ffmpeg_cmd.extend(['-ss', str(start_time)])
                     # Calculate offset for subtitle timestamps
                     parts = str(start_time).split(':')
@@ -514,8 +516,10 @@ def try_transcribe(
                         start_offset_seconds = 0
                         write(f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS")
                 else:
-                    ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=float(start_time)))])
                     start_offset_seconds = float(start_time)
+                    ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=start_offset_seconds))])
+
+            ffmpeg_cmd.extend(['-i', file])
 
             if end_time:
                 # Parse end time and calculate duration
@@ -540,7 +544,8 @@ def try_transcribe(
 
                 ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
 
-            ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', '192k', trimmed_audio_path])
+            # Audio only - disable video, use AAC codec with software encoding
+            ffmpeg_cmd.extend(['-vn', '-c:a', 'aac', '-b:a', '192k', trimmed_audio_path])
 
             write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)

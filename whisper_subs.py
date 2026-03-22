@@ -163,7 +163,7 @@ class WhisperSubs:
         ignore_subs: bool = False,
         sub_lang: Optional[str] = None,
         run_mpv: bool = False,
-        browser: str = "brave",
+        browser: str = "chrome",
         strict_language_tier: bool = False,
         force_retry: bool = False,
         vad_filter: Optional[bool] = None,
@@ -418,6 +418,10 @@ class WhisperSubs:
 
         elif self.is_channel_or_playlist_url(source):
             self.log("Source is YouTube channel/playlist (flat extract).")
+            
+            # Load history for filtering
+            processed_count = 0
+            skipped_count = 0
 
             ydl_opts = {
                 "quiet": True,
@@ -442,6 +446,8 @@ class WhisperSubs:
                 for entry in info["entries"]
                 if entry and entry.get("url")
             ]
+            
+            self.log(f"Found {len(urls)} videos in channel/playlist")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = {
@@ -452,18 +458,30 @@ class WhisperSubs:
                 for future in as_completed(futures):
                     url = futures[future]
                     try:
+                        # Skip already processed videos
+                        if self.is_already_processed(url):
+                            processed_count += 1
+                            self.log(f"Skipping already processed: {url}")
+                            continue
+                        
                         title, _ = future.result()
+                        skipped_count += 1
                         yield {
                             "source": url,
                             "status": "pending",
                             "title": self.clean_filename(title),
                         }
                     except Exception:
-                        yield {
-                            "source": url,
-                            "status": "pending",
-                            "title": os.path.basename(url),
-                        }
+                        # Still try to process even if we can't get title
+                        if not self.is_already_processed(url):
+                            yield {
+                                "source": url,
+                                "status": "pending",
+                                "title": os.path.basename(url),
+                            }
+            
+            if processed_count > 0:
+                self.log(f"Skipped {processed_count} already processed videos, processing {skipped_count} new ones")
         # Check for Twitch channel videos page specifically
         elif self.is_twitch(source) and '/videos' in source and '/videos/' not in source:
             # This is a Twitch channel videos page (e.g., twitch.tv/channel/videos)
@@ -490,12 +508,27 @@ class WhisperSubs:
 
                     vods = downloader.get_all_vods(user_id)
                     self.log(f"Found {len(vods)} VODs")
+                    
+                    # Filter already processed VODs
+                    processed_count = 0
+                    skipped_count = 0
 
                     # Yield each VOD as a task
                     for vod in vods:
                         vod_url = f"https://www.twitch.tv/videos/{vod['id']}"
+                        
+                        # Skip already processed VODs
+                        if self.is_already_processed(vod_url):
+                            processed_count += 1
+                            self.log(f"Skipping already processed VOD: {vod_url}")
+                            continue
+                        
+                        skipped_count += 1
                         title = self.clean_filename(vod['title'])
                         yield {"source": vod_url, "status": "pending", "title": title}
+                    
+                    if processed_count > 0:
+                        self.log(f"Skipped {processed_count} already processed VODs, processing {skipped_count} new ones")
 
                     return  # Early exit after yielding all VODs
 
@@ -722,6 +755,7 @@ class WhisperSubs:
 
                 if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
                     ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                print(ydl_opts)
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(clean_url, download=False)
@@ -1031,9 +1065,28 @@ class WhisperSubs:
                 # ==================================
 
         return False
+    
     def mark_as_processed(self, unique_id):
         with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{unique_id} {self.model_name}\n")
+    
+    def is_already_processed(self, url: str) -> bool:
+        """Check if a URL has already been processed by checking history file."""
+        if not os.path.exists(HISTORY_FILE):
+            return False
+        
+        # Clean URL for consistent comparison
+        clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
+        
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                history = set(line.strip().split()[0] for line in f if line.strip())
+            
+            # Check both original and cleaned URL
+            return url in history or clean_url in history
+        except Exception:
+            return False
+    
     def process_task(self, job_id, task):
         task_source = task['source']
         unique_id = self.get_unique_id(task_source)
@@ -1479,8 +1532,8 @@ Examples:
 
     # Advanced transcription options
     advanced_group = parser.add_argument_group('Advanced Transcription Options')
-    advanced_group.add_argument('--vad', action='store_true',
-                              help="Enable Voice Activity Detection (VAD) filter.")
+    advanced_group.add_argument('--vad', action='store_false',
+                              help="Disable Voice Activity Detection (VAD) filter.")
     advanced_group.add_argument('--vad-silence', type=int, default=500,
                               help="VAD minimum silence duration in ms (default: 500).")
     advanced_group.add_argument('--diarization', action='store_true',

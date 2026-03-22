@@ -290,7 +290,7 @@ def transcribe_audio(
 
         # Convert segments generator to list for post-processing
         segments_list = list(result_segments)
-        
+
         write(f"Transcribed {len(segments_list)} segments, processing...")
 
         # Apply post-processing to remove garbage segments
@@ -298,8 +298,27 @@ def transcribe_audio(
         segments_list = merge_adjacent_identical_segments(segments_list)
         #segments_list = merge_segments(segments_list)
 
-        # Write to temporary file first with progress tracking
+        # Write to temporary file first with progress tracking and metadata
         with open(temp_srt, "w", encoding="utf-8") as srt:
+            # Write metadata header as SRT comments
+            srt.write(f"1\n00:00:00,000 --> 00:00:00,000\n")
+            srt.write(f"TRANSCRIPTION METADATA\n")
+            srt.write(f"Model: {model_name}\n")
+            srt.write(f"Date: {datetime.datetime.now().isoformat()}\n")
+            srt.write(f"Source: {os.path.basename(audio_file)}\n")
+            srt.write(f"Duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'}\n")
+            srt.write(f"Language: {language or 'auto-detect'}\n")
+            srt.write(f"Device: {device}\n")
+            srt.write(f"Compute: {compute_type}\n")
+            if vad_filter:
+                srt.write(f"VAD: enabled\n")
+            if temperature:
+                srt.write(f"Temperature: {temperature}\n")
+            if cpu_threads:
+                srt.write(f"CPU Threads: {cpu_threads}\n")
+            srt.write(f"\n")
+            
+            # Write actual subtitle segments
             for i, segment in enumerate(segments_list, start=1):
                 start_time = format_timestamp(segment.start)
                 end_time = format_timestamp(segment.end)
@@ -307,11 +326,11 @@ def transcribe_audio(
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
                 srt.flush()
-                
+
                 # Update progress tracker
                 if progress:
                     progress.update(segment.start, segment.end)
-        
+
         # Final progress update
         if progress:
             elapsed = time.time() - progress.start_time
@@ -322,14 +341,47 @@ def transcribe_audio(
         if os.path.exists(temp_srt):
             # Create directory for the final file if it doesn't exist
             os.makedirs(os.path.dirname(original) or '.', exist_ok=True)
-            
+
             # Remove the old file if it exists
             if os.path.exists(original):
                 os.remove(original)
-                
+
             # Rename the temporary file to the final name
             os.rename(temp_srt, original)
-            
+
+            # Create JSON metadata file
+            metadata_file = os.path.splitext(original)[0] + ".metadata.json"
+            try:
+                metadata = {
+                    "model": model_name,
+                    "date": datetime.datetime.now().isoformat(),
+                    "source_file": os.path.basename(audio_file),
+                    "duration_seconds": total_duration,
+                    "duration_formatted": str(datetime.timedelta(seconds=int(total_duration))) if total_duration else "unknown",
+                    "language": language or "auto-detect",
+                    "device": device,
+                    "compute_type": compute_type,
+                    "cpu_threads": cpu_threads,
+                    "vad_enabled": vad_filter,
+                    "vad_params": vad_params,
+                    "temperature": temperature,
+                    "merge_lines": merge_lines,
+                    "time_range": {
+                        "start": start_time,
+                        "end": end_time
+                    } if start_time or end_time else None,
+                    "segments_count": len(segments_list),
+                    "output_files": {
+                        "srt": original,
+                        "json": metadata_file
+                    }
+                }
+                with open(metadata_file, "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, indent=2, ensure_ascii=False)
+                write(f"Metadata saved to: {metadata_file}")
+            except Exception as e:
+                write(f"Warning: Could not create metadata file: {e}")
+
             # Clean up any temporary helper files
             temp_base = os.path.splitext(temp_srt)[0]
             for ext in ['.sh', '.bat']:
@@ -793,7 +845,7 @@ try:
     
     stop_event.set()
     writer_thread.join(timeout=30)
-    
+
     if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
         if os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
         os.rename(r"{unfinished_srt}", r"{srt_file}")
@@ -801,6 +853,28 @@ try:
         # Recreate helper files for the final SRT file
         import transcribe
         transcribe.make_files(r"{srt_file}")
+        
+        # Create JSON metadata file
+        import json
+        metadata_file = r"{srt_file}".replace('.srt', '.metadata.json')
+        metadata = {{
+            "model": "{current_model}",
+            "date": datetime.datetime.now().isoformat(),
+            "source_file": r"{audio_to_transcribe}",
+            "language": {language_param},
+            "device": "{device}",
+            "compute_type": "{compute_type}",
+            "cpu_threads": {cpu_threads if cpu_threads else 'None'},
+            "vad_enabled": {vad_filter},
+            "temperature": {temperature},
+            "segments_count": segments_count
+        }}
+        try:
+            with open(metadata_file, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            print(f"Metadata saved to: {{metadata_file}}")
+        except Exception as e:
+            print(f"Warning: Could not create metadata file: {{e}}")
 
         print("Transcription completed successfully")
     else:

@@ -1032,6 +1032,12 @@ def create_helper_files(dir_path: str, subtitle_file: str, url: str) -> None:
         print(f"Base name: {base_name}")
         print(f"Dir path: {dir_path}")
         print(f"URL: {url}")
+        
+        # Helper function to escape single quotes for shell scripts
+        def escape_shell_single_quotes(text: str) -> str:
+            """Escape single quotes for use in single-quoted shell strings."""
+            return text.replace("'", "'\\''")
+        
         # HTML redirect (same as before)
         html_file = os.path.join(dir_path, f"{base_name}.htm")
         try:
@@ -1045,12 +1051,15 @@ def create_helper_files(dir_path: str, subtitle_file: str, url: str) -> None:
             print(f"OS error creating HTML file: {e}")
         except Exception as e:
             print(f"Error creating HTML file: {e}")
-        # Shell script (.sh)
+        
+        # Shell script (.sh) - properly escape single quotes in paths
         try:
             sh_file = os.path.join(dir_path, f"{base_name}.sh")
             linux_path = subtitle_file.replace("\\", "/")
+            escaped_url = escape_shell_single_quotes(url)
+            escaped_path = escape_shell_single_quotes(linux_path)
             with open(sh_file, "w", encoding='utf-8') as f:
-                f.write(f'#!/bin/bash\nmpv \'{url}\' --pause --input-ipc-server=/tmp/mpvsocket --sub-file=\'{linux_path}\' $@\n')
+                f.write(f"#!/bin/bash\nmpv '{escaped_url}' --pause --input-ipc-server=/tmp/mpvsocket --sub-file='{escaped_path}' $@\n")
             os.chmod(sh_file, 0o755)
         except OSError as e:
             print(f"OS error creating shell script: {e}")

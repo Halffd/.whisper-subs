@@ -946,7 +946,7 @@ class WhisperSubs:
 
         For YouTube: Just the video ID (11 characters)
         For Twitch: Just the VOD number
-        For local files: Basename
+        For local files: MD5 hash of file content (first 1MB for speed)
         """
         if not source:
             return str(source)
@@ -983,12 +983,31 @@ class WhisperSubs:
             if match:
                 return f"twitch_{match.group(1)}"
 
-        # Handle local files
+        # Handle local files - use file hash for reliable tracking
         if self.is_local_file(clean_source):
-            return f"file_{os.path.basename(clean_source)}"
+            return self._get_file_hash(clean_source)
 
         # Fallback: use a hash of the source string
         return f"hash_{hash(clean_source) & 0xffffffff}"
+    
+    def _get_file_hash(self, file_path: str) -> str:
+        """Generate MD5 hash of file content (first 1MB for speed)."""
+        import hashlib
+        
+        if not os.path.exists(file_path):
+            return f"file_{os.path.basename(file_path)}"
+        
+        try:
+            md5 = hashlib.md5()
+            # Read first 1MB for speed - enough to detect same file
+            with open(file_path, 'rb') as f:
+                chunk = f.read(1024 * 1024)  # 1MB
+                md5.update(chunk)
+            return f"file_{md5.hexdigest()[:16]}"  # Use first 16 chars of hash
+        except Exception as e:
+            self.log(f"Warning: Could not hash file {file_path}: {e}")
+            # Fallback to basename if hashing fails
+            return f"file_{os.path.basename(file_path)}"
 
 
     def is_processed(self, unique_id):
@@ -1138,6 +1157,12 @@ class WhisperSubs:
                 local_files_dir = os.path.join(OUTPUT_DIR, "local_files")
                 os.makedirs(local_files_dir, exist_ok=True)
                 srt_file_secondary = os.path.join(local_files_dir, f"{base_name}.srt")
+                
+                # Check for existing unfinished transcription to resume
+                unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+                if os.path.exists(unfinished_srt) and os.path.getsize(unfinished_srt) > 10:
+                    self.log(f"Found unfinished transcription: {unfinished_srt}")
+                    self.log("Will resume from where it left off...")
             else:
                 channel_dir = os.path.join(OUTPUT_DIR, self.clean_filename(self.channel_name))
                 os.makedirs(channel_dir, exist_ok=True)

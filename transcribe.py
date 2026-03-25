@@ -48,40 +48,67 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     """
     Parses an SRT file to find the last segment's number and end time.
     Returns (last_end_time_seconds, last_segment_number).
+    
+    Enhanced to handle:
+    - Metadata headers (skip lines starting with numbers followed by newline)
+    - Malformed segments
+    - Partial writes (incomplete last segment)
+    - Corrupted files
     """
     if not os.path.exists(srt_path) or os.path.getsize(srt_path) < 10:
         return 0.0, 0
 
     last_segment_number = 0
     last_end_time = 0.0
-    
+    valid_segments_found = 0
+
     try:
         with open(srt_path, 'r', encoding='utf-8') as f:
             content = f.read().strip()
-            
+
         segments = content.split('\n\n')
         if not segments:
             return 0.0, 0
-        
-        # Iterate backwards to find the last valid segment block
+
+        # Iterate backwards to find the last COMPLETE valid segment block
         for segment_block in reversed(segments):
             lines = segment_block.strip().split('\n')
-            if len(lines) >= 2:
+            if len(lines) >= 3:  # Need: number, timestamp, text
                 try:
+                    # First line should be segment number
                     current_segment_number = int(lines[0])
+                    
+                    # Second line should be timestamp
                     time_line = lines[1]
                     match = re.search(r'\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
                     if match:
                         end_time_str = match.group(1)
                         last_end_time = srt_time_to_seconds(end_time_str)
                         last_segment_number = current_segment_number
-                        # Found a valid segment, break the loop
-                        return last_end_time, last_segment_number
+                        valid_segments_found += 1
+                        
+                        # Need at least 2 valid segments to be confident
+                        if valid_segments_found >= 2:
+                            return last_end_time, last_segment_number
                 except (ValueError, IndexError):
-                    # This block was malformed, continue to the previous one
+                    # This block is malformed, continue to the previous one
                     continue
+            elif len(lines) == 2:
+                # Might be incomplete last segment - check if it has timestamp
+                try:
+                    time_line = lines[1] if lines[0].isdigit() else lines[0]
+                    match = re.search(r'\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
+                    if match:
+                        # Incomplete segment - don't use this, use previous
+                        continue
+                except:
+                    pass
+
+        # If we found at least one valid segment, use it
+        if valid_segments_found >= 1:
+            return last_end_time, last_segment_number
         
-        return 0.0, 0 # Return defaults if no valid segment was found
+        return 0.0, 0  # No valid segments found
     except Exception as e:
         print(f"Could not parse SRT for resume info: {e}")
         return 0.0, 0
@@ -623,32 +650,64 @@ def try_transcribe(
         start_index = 0
         open_mode = 'w'
 
-        last_end_time, last_segment_number = get_srt_resume_info(unfinished_srt)
-
-        if last_end_time > 0.1:  # Resume if there's more than 0.1s transcribed
-            write(f"Found unfinished transcription. Resuming from {last_end_time:.2f} seconds.")
-            resume_offset_seconds = last_end_time
-            start_index = last_segment_number
-            open_mode = 'a'
-            resume_audio_path = os.path.splitext(audio_to_transcribe)[0] + ".resume.m4a"
-
+        # Check if metadata file exists and validate settings match
+        metadata_file = os.path.splitext(unfinished_srt)[0].replace('.unfinished', '') + '.metadata.json'
+        can_resume = True
+        
+        if os.path.exists(metadata_file):
             try:
-                ss_time = str(datetime.timedelta(seconds=resume_offset_seconds))
-                ffmpeg_command = ['/bin/ffmpeg', '-y', '-ss', ss_time, '-i', audio_to_transcribe, '-c:a', 'aac', '-b:a', '192k', resume_audio_path]
-                write(f"Creating partial audio file for resume...")
-
-                result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
-                if result.returncode != 0:
-                    raise Exception(f"FFmpeg failed to create resume audio file: {result.stderr}")
-
-                audio_to_transcribe = resume_audio_path
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                
+                # Validate key settings match
+                if metadata.get('model') != model_name:
+                    write(f"⚠️  Model changed ({metadata.get('model')} → {model_name}), starting fresh")
+                    can_resume = False
+                elif metadata.get('language') != (language or 'auto-detect'):
+                    write(f"⚠️  Language changed, starting fresh")
+                    can_resume = False
             except Exception as e:
-                write(f"Could not create resume audio file: {e}. Starting from beginning.")
-                resume_offset_seconds, start_index, open_mode = 0.0, 0, 'w'
-                audio_to_transcribe = file
-                with open(unfinished_srt, 'w', encoding='utf-8') as f: f.write('')
+                write(f"⚠️  Could not read metadata: {e}")
+        
+        if can_resume:
+            last_end_time, last_segment_number = get_srt_resume_info(unfinished_srt)
+
+            if last_end_time > 0.1:  # Resume if there's more than 0.1s transcribed
+                write(f"✓ Found unfinished transcription: {last_segment_number} segments, resuming from {last_end_time:.2f}s")
+                resume_offset_seconds = last_end_time
+                start_index = last_segment_number
+                open_mode = 'a'
+                resume_audio_path = os.path.splitext(audio_to_transcribe)[0] + ".resume.m4a"
+
+                try:
+                    ss_time = str(datetime.timedelta(seconds=resume_offset_seconds))
+                    ffmpeg_command = ['/bin/ffmpeg', '-y', '-ss', ss_time, '-i', audio_to_transcribe, '-c:a', 'aac', '-b:a', '128k', '-ac', '1', '-ar', '16000', resume_audio_path]
+                    write(f"✂️  Creating partial audio file for resume (from {ss_time})...")
+
+                    result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
+                    if result.returncode != 0:
+                        raise Exception(f"FFmpeg failed: {result.stderr[:200] if result.stderr else 'Unknown error'}")
+
+                    audio_to_transcribe = resume_audio_path
+                    write(f"✓ Resume audio created successfully")
+                except Exception as e:
+                    write(f"⚠️  Could not create resume audio: {e}")
+                    write(f"→ Starting from beginning (clearing unfinished file)")
+                    resume_offset_seconds, start_index, open_mode = 0.0, 0, 'w'
+                    audio_to_transcribe = file
+                    try:
+                        with open(unfinished_srt, 'w', encoding='utf-8') as f:
+                            f.write('')
+                    except:
+                        pass
+            else:
+                # No valid resume point - start fresh
+                with open(unfinished_srt, 'w', encoding='utf-8') as f:
+                    f.write('')
         else:
-            with open(unfinished_srt, 'w', encoding='utf-8') as f: f.write('')
+            # Can't resume due to settings change - start fresh
+            with open(unfinished_srt, 'w', encoding='utf-8') as f:
+                f.write('')
         # --- END RESUME LOGIC ---
 
         # Create helper files for the unfinished SRT file

@@ -590,17 +590,16 @@ class WhisperSubs:
             '-ar', '16000',  # 16kHz sample rate (Whisper native, faster)
             audio_path
         ]
-        
+
         # Run with progress output suppressed for cleaner logs
         result = subprocess.run(
-            ffmpeg_cmd, 
-            capture_output=True, 
-            text=True, 
-            check=False,
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL
+            text=True,
+            check=False
         )
-        
+
         if result.returncode == 0 and os.path.exists(audio_path):
             self.log(f"Audio extracted: {os.path.basename(audio_path)}")
             return audio_path

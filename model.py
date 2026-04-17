@@ -59,8 +59,11 @@ def list_available_models() -> None:
 def getName(value: str) -> Optional[str]:
     """
     Custom argparse type to validate and convert a model identifier (name or index)
-    into a valid model name string.
+    into a valid model name string. Supports API model identifiers (e.g., 'groq:...', 'hf:...').
     """
+    # Allow API model identifiers to pass through without validation
+    if ':' in value:
+        return value
     try:
         if value in MODEL_NAMES:
             return value

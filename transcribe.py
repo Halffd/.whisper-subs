@@ -1,7 +1,7 @@
 """
 WhisperSubs Transcribe Module
 
-Core transcription functionality using faster-whisper.
+Core transcription functionality using faster-whisper and API-based services.
 """
 import model as _model_module
 import faster_whisper
@@ -20,6 +20,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from whisper_model_chooser import WhisperModelChooser
+import requests
 
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
@@ -29,6 +30,277 @@ cudnn.benchmark = False
 cudnn.deterministic = True
 logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
+
+# ============ API CLIENT FUNCTIONS ============
+
+def transcribe_with_groq(
+    audio_file: str,
+    model: str,
+    language: Optional[str] = None,
+    write: Callable = print,
+    temperature: float = 0.0
+) -> Tuple[List[Segment], Any]:
+    """
+    Transcribe audio using Groq's Whisper API.
+
+    Args:
+        audio_file: Path to the audio file
+        model: Groq model name (e.g., 'whisper-large-v3')
+        language: Language code (e.g., 'en', 'ja') or None for auto-detect
+        write: Output function for logging
+        temperature: Sampling temperature (0.0 to 1.0)
+
+    Returns:
+        Tuple of (list of Segment objects, info object)
+    """
+    api_key = os.environ.get('GROQ_API_KEY')
+    if not api_key:
+        raise ValueError("GROQ_API_KEY environment variable is required")
+
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # Prepare the audio file
+    with open(audio_file, 'rb') as f:
+        files = {'file': (os.path.basename(audio_file), f)}
+        data = {'model': model}
+        if language and language != 'none':
+            data['language'] = language
+        if temperature != 0.0:
+            data['temperature'] = temperature
+
+        write(f"Transcribing with Groq API using model: {model}")
+        response = requests.post(url, headers=headers, files=files, data=data, timeout=300)
+
+    if response.status_code != 200:
+        raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+
+    result = response.json()
+    text = result.get('text', '')
+
+    # Groq returns a single text segment; create a Segment object
+    segment = Segment(start=0.0, end=0.0, text=text)
+    info = type('Info', (), {'duration': 0.0, 'language': result.get('language', language)})()
+    return [segment], info
+
+
+def transcribe_with_huggingface(
+    audio_file: str,
+    model: str,
+    language: Optional[str] = None,
+    write: Callable = print,
+    temperature: float = 0.0  # Ignored, HuggingFace API doesn't support temperature for Whisper
+) -> Tuple[List[Segment], Any]:
+    """
+    Transcribe audio using HuggingFace Inference API.
+
+    Args:
+        audio_file: Path to the audio file
+        model: HuggingFace model ID (e.g., 'openai/whisper-large-v3')
+        language: Language code (e.g., 'en', 'ja') or None for auto-detect
+        write: Output function for logging
+        temperature: Ignored for HuggingFace
+
+    Returns:
+        Tuple of (list of Segment objects, info object)
+    """
+    api_key = os.environ.get('HF_API_KEY')
+    if not api_key:
+        raise ValueError("HF_API_KEY environment variable is required")
+
+    # HuggingFace Inference API endpoint
+    url = f"https://api-inference.huggingface.co/models/{model}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # Read audio file
+    with open(audio_file, 'rb') as f:
+        audio_data = f.read()
+
+    write(f"Transcribing with HuggingFace API using model: {model}")
+
+    # Send request
+    response = requests.post(
+        url,
+        headers=headers,
+        data=audio_data,
+        timeout=300
+    )
+
+    if response.status_code != 200:
+        error_msg = response.json().get('error', response.text) if response.headers.get('content-type', '').startswith('application/json') else response.text
+        raise Exception(f"HuggingFace API error: {response.status_code} - {error_msg}")
+
+    result = response.json()
+
+    # HuggingFace can return different formats
+    # For Whisper models, it usually returns {'text': '...'} or {'segments': [...]}
+    segments = []
+
+    if 'segments' in result and isinstance(result['segments'], list):
+        # Some implementations return detailed segments
+        for seg_data in result['segments']:
+            segments.append(Segment(
+                start=seg_data.get('start', 0.0),
+                end=seg_data.get('end', 0.0),
+                text=seg_data.get('text', '')
+            ))
+    else:
+        # Single text response
+        text = result.get('text', '')
+        # Since HuggingFace might not provide timing, create a single segment
+        segments = [Segment(start=0.0, end=0.0, text=text)]
+
+    info = type('Info', (), {'duration': 0.0, 'language': result.get('language', language)})()
+    return segments, info
+
+
+def is_api_model(model_name: str) -> Tuple[bool, str, str]:
+    """
+    Check if a model name refers to an API-based service.
+
+    Returns:
+        Tuple of (is_api, provider, actual_model_name)
+        provider: 'groq', 'huggingface', or ''
+    """
+    if model_name.startswith('groq:'):
+        return True, 'groq', model_name[5:]
+    elif model_name.startswith('hf:'):
+        return True, 'huggingface', model_name[3:]
+    return False, '', model_name
+
+
+def _transcribe_with_api(
+    audio_file: str,
+    api_model_name: str,
+    provider: str,
+    srt_file: str,
+    language: Optional[str] = None,
+    start_offset_seconds: float = 0.0,
+    temperature: float = 0.0,
+    write: Callable = print,
+    mpv_ipc_reload: Optional[Callable] = None
+) -> bool:
+    """
+    Internal function to handle API-based transcription.
+
+    Args:
+        audio_file: Path to the input audio file (possibly trimmed)
+        api_model_name: Actual model name without prefix
+        provider: 'groq' or 'huggingface'
+        srt_file: Output SRT file path
+        language: Language code or None
+        start_offset_seconds: Time offset to add to segment timestamps (for trimmed audio)
+        temperature: Sampling temperature (for supported APIs)
+        write: Output function
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    temp_srt = srt_file.replace('.srt', '.unfinished.srt')
+
+    try:
+        # Convert audio to a compatible format if needed
+        # APIs typically prefer WAV or MP3
+        converted_audio = audio_file
+        if not audio_file.lower().endswith(('.wav', '.mp3', '.m4a')):
+            converted_audio = audio_file + '.converted.wav'
+            write(f"Converting audio to WAV format for {provider} API...")
+            cmd = [
+                'ffmpeg', '-y', '-i', audio_file,
+                '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000',
+                converted_audio
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f"Audio conversion failed: {result.stderr}")
+
+        # Call the appropriate API client
+        if provider == 'groq':
+            segments, info = transcribe_with_groq(
+                converted_audio, api_model_name, language, write, temperature
+            )
+        elif provider == 'huggingface':
+            segments, info = transcribe_with_huggingface(
+                converted_audio, api_model_name, language, write, temperature
+            )
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+
+        # Clean up converted file if it's different
+        if converted_audio != audio_file and os.path.exists(converted_audio):
+            os.remove(converted_audio)
+
+        # Apply time offset if audio was trimmed
+        if start_offset_seconds > 0:
+            for seg in segments:
+                seg.start += start_offset_seconds
+                seg.end += start_offset_seconds
+
+        # Write segments to temporary SRT file
+        with open(temp_srt, 'w', encoding='utf-8') as srt:
+            # Write metadata header
+            srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
+            srt.write("TRANSCRIPTION METADATA\n")
+            srt.write(f"Model: {api_model_name}\n")
+            srt.write(f"Provider: {provider}\n")
+            srt.write(f"Date: {datetime.datetime.now().isoformat()}\n")
+            srt.write(f"Source: {os.path.basename(audio_file)}\n")
+            srt.write("\n")
+
+            # Write actual subtitle segments
+            for i, segment in enumerate(segments, start=1):
+                start_time = format_timestamp(segment.start if segment.start > 0 else 0)
+                end_time = format_timestamp(segment.end if segment.end > 0 else 0)
+                srt.write(f"{i}\n")
+                srt.write(f"{start_time} --> {end_time}\n")
+                srt.write(f"{segment.text}\n\n")
+
+        # Create metadata JSON
+        metadata_file = os.path.splitext(srt_file)[0] + ".metadata.json"
+        try:
+            metadata = {
+                "model": api_model_name,
+                "provider": provider,
+                "date": datetime.datetime.now().isoformat(),
+                "source_file": os.path.basename(audio_file),
+                "language": language or "auto-detect",
+                "segments_count": len(segments),
+                "start_offset_seconds": start_offset_seconds
+            }
+            with open(metadata_file, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            write(f"Metadata saved to: {metadata_file}")
+        except Exception as e:
+            write(f"Warning: Could not create metadata file: {e}")
+
+        # Rename temporary file to final name
+        if os.path.exists(temp_srt):
+            if os.path.exists(srt_file):
+                os.remove(srt_file)
+            os.rename(temp_srt, srt_file)
+            write(f"Successfully created {srt_file}")
+            
+            # Trigger MPV IPC reload if callback provided
+            if mpv_ipc_reload is not None:
+                try:
+                    mpv_ipc_reload()
+                except Exception as e:
+                    write(f"MPV IPC reload failed: {e}")
+            
+            return True
+        else:
+            write("Error: Temporary output file not found")
+            return False
+
+    except Exception as e:
+        write(f"Error during {provider} transcription: {e}")
+        if os.path.exists(temp_srt):
+            try:
+                os.remove(temp_srt)
+            except:
+                pass
+        return False
+
 
 @dataclass
 class Segment:
@@ -241,11 +513,21 @@ def transcribe_audio(
     device: str = 'cpu',
     compute_type: str = 'int8',
     cpu_threads: Optional[int] = None,
-    write: Callable = print
+    write: Callable = print,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    temperature: float = 0.0,
+    merge_lines: bool = False,
+    # Parameters for compatibility; ignored for API
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    mpv_ipc_reload: Optional[Callable] = None,
+    **kwargs
 ) -> bool:
     """
     Transcribe audio file and generate SRT subtitles with helper files.
     Creates helper files for both in-progress and completed transcriptions.
+    Supports both local (faster-whisper) and API-based (Groq, HuggingFace) models.
     """
     original = srt_file
     temp_srt = srt_file.replace('.srt','.unfinished.srt')
@@ -253,6 +535,21 @@ def transcribe_audio(
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(temp_srt) or '.', exist_ok=True)
 
+    # Check if this is an API-based model
+    is_api, provider, api_model_name = is_api_model(model_name)
+
+    if is_api:
+        return _transcribe_with_api(
+            audio_file=audio_file,
+            model_name=model_name,
+            api_model_name=api_model_name,
+            provider=provider,
+            srt_file=srt_file,
+            language=language,
+            write=write
+        )
+
+    # Local transcription with faster-whisper
     # Automatically switch to CPU if CUDA is not available
     if device == 'cuda':
         try:
@@ -265,6 +562,83 @@ def transcribe_audio(
             device = 'cpu'
             compute_type = 'int8'
             print("PyTorch not available, falling back to CPU")
+
+    # Check if using API-based service (Groq or HuggingFace)
+    is_api, provider, api_model_name = is_api_model(model_name)
+    if is_api:
+        write(f"Using {provider} API for transcription with model {model_name}")
+        audio_to_transcribe = audio_file
+        start_offset_seconds = 0.0
+
+        # Handle audio trimming if time range is specified
+        if start_time or end_time:
+            trimmed_audio_path = os.path.splitext(audio_file)[0] + ".trimmed.m4a"
+            ffmpeg_cmd = ['ffmpeg', '-y']
+
+            if start_time:
+                if ':' in str(start_time):
+                    parts = str(start_time).split(':')
+                    if len(parts) == 3:
+                        start_offset_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    elif len(parts) == 2:
+                        start_offset_seconds = int(parts[0]) * 60 + float(parts[1])
+                    else:
+                        start_offset_seconds = 0
+                        write(f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS")
+                    ffmpeg_cmd.extend(['-ss', str(start_time)])
+                else:
+                    start_offset_seconds = float(start_time)
+                    ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=start_offset_seconds))])
+
+            ffmpeg_cmd.extend(['-i', audio_file])
+
+            if end_time:
+                if ':' in str(end_time):
+                    parts = str(end_time).split(':')
+                    if len(parts) == 3:
+                        end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    elif len(parts) == 2:
+                        end_seconds = int(parts[0]) * 60 + float(parts[1])
+                    else:
+                        end_seconds = 0
+                        write(f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS")
+                else:
+                    end_seconds = float(end_time)
+                if start_time:
+                    duration = end_seconds - start_offset_seconds
+                else:
+                    duration = end_seconds
+                ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
+
+            ffmpeg_cmd.extend(['-vn', '-acodec', 'aac', '-b:a', '128k', '-ac', '1', '-ar', '16000', trimmed_audio_path])
+            write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                audio_to_transcribe = trimmed_audio_path
+                write(f"Created trimmed audio: {trimmed_audio_path}")
+            else:
+                write(f"Warning: FFmpeg trimming failed: {result.stderr}, using original file")
+                start_offset_seconds = 0.0
+
+        try:
+            return _transcribe_with_api(
+                audio_file=audio_to_transcribe,
+                api_model_name=api_model_name,
+                provider=provider,
+                srt_file=srt_file,
+                language=language,
+                start_offset_seconds=start_offset_seconds,
+                temperature=temperature,
+                write=write,
+                mpv_ipc_reload=mpv_ipc_reload
+            )
+        finally:
+            # Clean up trimmed file if it was created and not the original
+            if audio_to_transcribe != audio_file and os.path.exists(audio_to_transcribe):
+                try:
+                    os.remove(audio_to_transcribe)
+                except Exception as e:
+                    write(f"Warning: Could not remove trimmed audio file: {e}")
 
     try:
         # Get audio duration for progress tracking
@@ -495,6 +869,28 @@ def process_create(
     """Creates a new process to retry the transcription."""
     if file is None:
         raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
+
+    # Check for API-based models (Groq, HuggingFace)
+    is_api, provider, _ = is_api_model(model_name)
+    if is_api:
+        write(f"Using {provider} API for transcription (bypassing subprocess)")
+        # API models don't use device or compute_type; use CPU for consistency
+        return transcribe_audio(
+            audio_file=file,
+            model_name=model_name,
+            srt_file=srt_file,
+            language=language,
+            device='cpu',
+            compute_type='int8',
+            cpu_threads=cpu_threads,
+            write=write,
+            start_time=start_time,
+            end_time=end_time,
+            temperature=temperature,
+            merge_lines=merge_lines,
+            vad_filter=vad_filter,
+            vad_params=vad_params
+        )
 
     # Only switch to CPU if not forcing device
     if not force_device and device == 'cpu':

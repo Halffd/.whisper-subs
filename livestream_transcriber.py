@@ -21,12 +21,13 @@ class LiveStreamTranscriber:
     """Handles real-time transcription of live streams."""
     
     def __init__(self, model_name='base.en', device='cpu', compute_type='int8', 
-                 output_dir=None, log_func=print):
+                 output_dir=None, log_func=print, mpv_ipc_reload=None):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
         self.output_dir = output_dir or os.path.expanduser("~/Documents/Youtube-Subs")
         self.log_func = log_func
+        self.mpv_ipc_reload = mpv_ipc_reload
         self.download_process = None
         self.transcription_process = None
         self.is_running = False
@@ -90,7 +91,8 @@ class LiveStreamTranscriber:
                 device=self.device,
                 compute_type=self.compute_type,
                 force_device=False,
-                write=self.log
+                write=self.log,
+                mpv_ipc_reload=self.mpv_ipc_reload
             )
             
             if not success:
@@ -123,7 +125,8 @@ class LiveStreamTranscriber:
                         device=self.device,
                         compute_type=self.compute_type,
                         force_device=False,
-                        write=self.log
+                        write=self.log,
+                        mpv_ipc_reload=self.mpv_ipc_reload
                     )
                     
                     if success:
@@ -220,19 +223,38 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Live Stream Transcription")
     parser.add_argument("url", help="URL of the live stream")
-    parser.add_argument("--model", default="base.en", help="Whisper model to use")
-    parser.add_argument("--device", default="cpu", help="Device to use (cpu, cuda, mps)")
-    parser.add_argument("--compute", default="int8", help="Compute type (int8, float16)")
+    parser.add_argument("--model", default="base.en", help="Whisper model to use (e.g., 'base.en', 'groq:whisper-large-v3', 'hf:openai/whisper-large-v3')")
+    parser.add_argument("--device", default="cpu", help="Device to use (cpu, cuda, mps) - ignored for API models")
+    parser.add_argument("--compute", default="int8", help="Compute type (int8, float16) - ignored for API models")
     parser.add_argument("--output-dir", help="Output directory for subtitles")
+    parser.add_argument("--mpv-ipc", help="MPV IPC socket path for live subtitle reload (e.g., /tmp/mpvsocket)")
     
     args = parser.parse_args()
     
+    # Setup MPV IPC reload callback if socket provided
+    mpv_ipc_reload = None
+    if args.mpv_ipc:
+        def mpv_reload():
+            try:
+                import socket
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.connect(args.mpv_ipc)
+                # Send IPC command to reload subtitles
+                cmd = '{"command": ["sub-reload"]}\n'
+                sock.send(cmd.encode())
+                sock.close()
+                print("MPV IPC: subtitles reloaded")
+            except Exception as e:
+                print(f"MPV IPC failed: {e}")
+        mpv_ipc_reload = mpv_reload
+
     transcriber = LiveStreamTranscriber(
         model_name=args.model,
         device=args.device,
         compute_type=args.compute,
         output_dir=args.output_dir,
-        log_func=print
+        log_func=print,
+        mpv_ipc_reload=mpv_ipc_reload
     )
     
     try:

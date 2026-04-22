@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 WhisperSubs Transcribe Module
 
@@ -17,6 +19,7 @@ import json
 import threading
 import re
 import datetime
+import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from whisper_model_chooser import WhisperModelChooser
@@ -38,8 +41,9 @@ def transcribe_with_groq(
     model: str,
     language: Optional[str] = None,
     write: Callable = print,
-    temperature: float = 0.0
-) -> Tuple[List[Segment], Any]:
+    temperature: float = 0.0,
+    chunk_seconds: float = 0.0
+) -> Tuple[List["Segment"], Any]:
     """
     Transcribe audio using Groq's Whisper API.
 
@@ -90,7 +94,7 @@ def transcribe_with_huggingface(
     language: Optional[str] = None,
     write: Callable = print,
     temperature: float = 0.0  # Ignored, HuggingFace API doesn't support temperature for Whisper
-) -> Tuple[List[Segment], Any]:
+) -> Tuple[List["Segment"], Any]:
     """
     Transcribe audio using HuggingFace Inference API.
 
@@ -196,7 +200,7 @@ def _transcribe_with_api(
     Returns:
         bool: True if successful, False otherwise
     """
-    temp_srt = srt_file.replace('.srt', '.unfinished.srt')
+    real_srt = srt_file + '.unfinished'
 
     try:
         # Convert audio to a compatible format if needed
@@ -236,9 +240,7 @@ def _transcribe_with_api(
                 seg.start += start_offset_seconds
                 seg.end += start_offset_seconds
 
-        # Write segments to temporary SRT file
-        with open(temp_srt, 'w', encoding='utf-8') as srt:
-            # Write metadata header
+        with open(real_srt, 'w', encoding='utf-8') as srt:
             srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write("TRANSCRIPTION METADATA\n")
             srt.write(f"Model: {api_model_name}\n")
@@ -247,7 +249,6 @@ def _transcribe_with_api(
             srt.write(f"Source: {os.path.basename(audio_file)}\n")
             srt.write("\n")
 
-            # Write actual subtitle segments
             for i, segment in enumerate(segments, start=1):
                 start_time = format_timestamp(segment.start if segment.start > 0 else 0)
                 end_time = format_timestamp(segment.end if segment.end > 0 else 0)
@@ -273,30 +274,49 @@ def _transcribe_with_api(
         except Exception as e:
             write(f"Warning: Could not create metadata file: {e}")
 
-        # Rename temporary file to final name
-        if os.path.exists(temp_srt):
-            if os.path.exists(srt_file):
-                os.remove(srt_file)
-            os.rename(temp_srt, srt_file)
-            write(f"Successfully created {srt_file}")
-            
-            # Trigger MPV IPC reload if callback provided
-            if mpv_ipc_reload is not None:
-                try:
-                    mpv_ipc_reload()
-                except Exception as e:
-                    write(f"MPV IPC reload failed: {e}")
-            
-            return True
-        else:
-            write("Error: Temporary output file not found")
-            return False
+        if os.path.exists(srt_file) or os.path.islink(srt_file):
+            os.remove(srt_file)
+        try:
+            os.symlink(os.path.basename(real_srt), srt_file)
+            write(f"Created symlink: {srt_file} -> {os.path.basename(real_srt)}")
+        except OSError:
+            write(f"Could not create symlink, copying instead")
+            shutil.copy2(real_srt, srt_file)
+
+        write(f"Transcription in progress: {srt_file}")
+        make_files(srt_file)
+
+        if mpv_ipc_reload is not None:
+            try:
+                mpv_ipc_reload()
+            except Exception as e:
+                write(f"MPV IPC reload failed: {e}")
+
+        if os.path.islink(srt_file):
+            os.remove(srt_file)
+        if os.path.exists(real_srt):
+            os.rename(real_srt, srt_file)
+        write(f"Successfully finalized: {srt_file}")
+        make_files(srt_file)
+
+        if mpv_ipc_reload is not None:
+            try:
+                mpv_ipc_reload()
+            except Exception as e:
+                write(f"MPV IPC reload failed: {e}")
+
+        return True
 
     except Exception as e:
         write(f"Error during {provider} transcription: {e}")
-        if os.path.exists(temp_srt):
+        if os.path.exists(real_srt):
             try:
-                os.remove(temp_srt)
+                os.remove(real_srt)
+            except:
+                pass
+        if os.path.islink(srt_file):
+            try:
+                os.remove(srt_file)
             except:
                 pass
         return False
@@ -541,7 +561,6 @@ def transcribe_audio(
     if is_api:
         return _transcribe_with_api(
             audio_file=audio_file,
-            model_name=model_name,
             api_model_name=api_model_name,
             provider=provider,
             srt_file=srt_file,
@@ -799,7 +818,23 @@ def transcribe_audio(
     except RuntimeError as e:
         if 'CUDA' in str(e) or 'cuDNN' in str(e):
             print("CUDA/cuDNN error detected, falling back to CPU...")
-            return transcribe_audio(audio_file, model_name, srt_file, language, 'cpu', compute_type)
+            return transcribe_audio(
+                audio_file=audio_file,
+                model_name=model_name,
+                srt_file=srt_file,
+                language=language,
+                device='cpu',
+                compute_type=compute_type,
+                cpu_threads=cpu_threads,
+                write=write,
+                start_time=start_time,
+                end_time=end_time,
+                temperature=temperature,
+                merge_lines=merge_lines,
+                vad_filter=vad_filter,
+                vad_params=vad_params,
+                mpv_ipc_reload=mpv_ipc_reload
+            )
         else:
             print(f"Error during transcription: {e}", file=sys.stderr)
             if os.path.exists(temp_srt):
@@ -889,7 +924,8 @@ def process_create(
             temperature=temperature,
             merge_lines=merge_lines,
             vad_filter=vad_filter,
-            vad_params=vad_params
+            vad_params=vad_params,
+            mpv_ipc_reload=mpv_ipc_reload
         )
 
     # Only switch to CPU if not forcing device

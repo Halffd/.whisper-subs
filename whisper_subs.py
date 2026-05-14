@@ -14,6 +14,7 @@ import subprocess
 import time
 import shutil
 import threading
+import glob
 import pyperclip
 import yt_dlp
 import hashlib
@@ -225,6 +226,20 @@ class WhisperSubs:
         # CPU threads setting
         self.cpu_threads = cpu_threads
 
+    def _get_ytdlp_base_opts(self, **extra_opts) -> Dict[str, Any]:
+        """Get base yt-dlp options with cookies from browser (required for YouTube)."""
+        base_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 10,
+            'no_check_certificate': True,
+        }
+        # Always include cookies from browser for YouTube (now required)
+        if self.specified_browser:
+            base_opts['cookiesfrombrowser'] = (self.specified_browser,)
+        base_opts.update(extra_opts)
+        return base_opts
+
     def log(self, message: str) -> None:
         message_str = str(message)
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -277,16 +292,7 @@ class WhisperSubs:
         
         # For YouTube/Twitch, fetch info
         try:
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "socket_timeout": 10,
-                "no_check_certificate": True,
-            }
-
-            if self.specified_browser:
-                ydl_opts["cookiesfrombrowser"] = (self.specified_browser,)
+            ydl_opts = self._get_ytdlp_base_opts(skip_download=True)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -423,17 +429,7 @@ class WhisperSubs:
             processed_count = 0
             skipped_count = 0
 
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": True,
-                "skip_download": True,
-                "socket_timeout": 10,
-                "no_check_certificate": True,
-            }
-
-            if self.specified_browser:
-                ydl_opts["cookiesfrombrowser"] = (self.specified_browser,)
+            ydl_opts = self._get_ytdlp_base_opts(extract_flat=True, skip_download=True)
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(source, download=False)
@@ -617,15 +613,11 @@ class WhisperSubs:
 
         try:
             # Ultra-minimal options for just checking subs
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'writesubtitles': False,  # Don't write yet
-                'listsubtitles': False,   # Don't list all available subtitles
-                'socket_timeout': 10,
-                'no_check_certificate': True,
-            }
+            ydl_opts = self._get_ytdlp_base_opts(
+                skip_download=True,
+                writesubtitles=False,
+                listsubtitles=False,
+            )
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -661,22 +653,18 @@ class WhisperSubs:
                 date_time = datetime.datetime.fromtimestamp(timestamp)
                 timeday = date_time.strftime('%Y-%m-%d_%H-%M')
             else:
-                timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
+                timeday = ''
 
-            safe_title = f"{timeday}_{self.clean_filename(title)}"
+            safe_title = f"{timeday}_{self.clean_filename(title)}" if timeday else self.clean_filename(title)
             sub_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
 
-            ydl_opts_dl = {
-                'quiet': True,
-                'no_warnings': True,
-                'writesubtitles': True,
-                'subtitleslangs': [best_sub_lang],
-                'subtitlesformat': 'srt',
-                'skip_download': True,
-                'outtmpl': sub_template,
-                'socket_timeout': 10,
-                'no_check_certificate': True,
-            }
+            ydl_opts_dl = self._get_ytdlp_base_opts(
+                skip_download=True,
+                writesubtitles=True,
+                subtitleslangs=[best_sub_lang],
+                subtitlesformat='srt',
+                outtmpl=sub_template,
+            )
 
             with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
                 ydl.download([url])
@@ -701,6 +689,7 @@ class WhisperSubs:
         """Download audio and return the actual file path."""
         self.log(f"Downloading audio from {url}...")
 
+        expected_base = None
         os.makedirs(output_path, exist_ok=True)
 
         # Clean the URL first
@@ -744,17 +733,10 @@ class WhisperSubs:
         # === STEP 1: Check for existing files (fast) ===
         if not self.force:
             try:
-                ydl_opts = {
-                    'quiet': True,
-                    'no_warnings': True,
-                    'skip_download': True,
-                    'socket_timeout': 5,
-                    'no_check_certificate': True,
-                }
-
-                if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
-                    ydl_opts['cookiesfrombrowser'] = (self.specified_browser,)
-                print(ydl_opts)
+                ydl_opts = self._get_ytdlp_base_opts(
+                    skip_download=True,
+                    socket_timeout=5,
+                )
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(clean_url, download=False)
@@ -765,12 +747,12 @@ class WhisperSubs:
                             date_time = datetime.datetime.fromtimestamp(timestamp)
                             timeday = date_time.strftime('%Y-%m-%d_%H-%M')
                         else:
-                            timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
+                            timeday = ''
 
                         clean_title = self.clean_filename(info.get('title', 'unknown'))
                         # Strip any existing model suffix to avoid duplicate model names
                         title_without_model = self._strip_model_from_filename(clean_title)
-                        base_title = f"{timeday}_{title_without_model}"
+                        base_title = f"{timeday}_{title_without_model}" if timeday else title_without_model
 
                         # Check for existing files with current model name only
                         for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
@@ -814,33 +796,21 @@ class WhisperSubs:
         try:
             attempt = 0
             max_attempts = 3
+            fallback_format = None
 
             while attempt < max_attempts:
                 attempt += 1
 
                 try:
                     # Get video info once
-                    info_opts = {
-                        'quiet': True,
-                        'no_warnings': True,
-                        'skip_download': True,
-                        'socket_timeout': 10,
-                        'no_check_certificate': True,
-                    }
-
-                    if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
-                        info_opts['cookiesfrombrowser'] = (self.specified_browser,)
+                    info_opts = self._get_ytdlp_base_opts(skip_download=True)
 
                     with yt_dlp.YoutubeDL(info_opts) as ydl:
                         info = ydl.extract_info(clean_url, download=False)
 
-                        if info is None:
-                            self.log(f"Failed to get video info for {clean_url}")
-                            return None
-
-                        # Check if the requested format is available
-                        # If not, update the format to a more flexible one
-                        # Note: formats may not be available in extract_flat mode, so we'll rely on error handling primarily
+                    if info is None:
+                        self.log(f"Failed to get video info for {clean_url}")
+                        return None
 
                     # Build filename
                     timestamp = info.get('timestamp', '')
@@ -848,39 +818,38 @@ class WhisperSubs:
                         date_time = datetime.datetime.fromtimestamp(timestamp)
                         timeday = date_time.strftime('%Y-%m-%d_%H-%M')
                     else:
-                        timeday = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
+                        timeday = ''
 
                     clean_title = self.clean_filename(info.get('title', 'unknown'))
                     # Strip any existing model suffix to avoid duplicate model names
                     title_without_model = self._strip_model_from_filename(clean_title)
-                    expected_base = f"{timeday}_{title_without_model}.{self.model_name}"
+                    expected_base = f"{timeday}_{title_without_model}.{self.model_name}" if timeday else f"{title_without_model}.{self.model_name}"
 
                     # Download with proper template
-                    download_opts = {
-                        'outtmpl': f'{expected_base}.%(ext)s',  # Use our format
-                        'noplaylist': True,
-                        'writethumbnail': self.save_thumbnail,
-                        'quiet': True,
-                        'no_warnings': True,
-                        'noprogress': False,
-                        'retries': 5,
-                        'continuedl': True,
-                        'progress_hooks': [progress_hook],
-                        'ignoreerrors': False,
-                        'socket_timeout': 30,
-                        'no_check_certificate': True,
-                        'extractor_retries': 3,
-                        'fragment_retries': 3,
-                        'extractor_args': {
+                    download_opts = self._get_ytdlp_base_opts(
+                        outtmpl=f'{expected_base}.%(ext)s',
+                        noplaylist=True,
+                        writethumbnail=self.save_thumbnail,
+                        noprogress=False,
+                        retries=5,
+                        continuedl=True,
+                        progress_hooks=[progress_hook],
+                        ignoreerrors=False,
+                        socket_timeout=30,
+                        extractor_retries=3,
+                        fragment_retries=3,
+                        extractor_args={
                             'youtube': {
                                 'player_client': ['android', 'web']
                             }
                         },
-                        'http_chunk_size': 10485760,
-                        'concurrent_fragment_downloads': 5,
-                    }
+                        http_chunk_size=10485760,
+                        concurrent_fragment_downloads=5,
+                    )
 
-                    if not self.save_video:
+                    if fallback_format:
+                        download_opts['format'] = fallback_format
+                    elif not self.save_video:
                         download_opts.update({
                             'format': 'bestaudio[ext=m4a]/bestaudio/best',
                             'postprocessors': [{
@@ -895,11 +864,7 @@ class WhisperSubs:
                             'merge_output_format': 'mp4',
                         })
 
-                    if self.specified_browser and hasattr(self, 'force_cookies') and self.force_cookies:
-                        download_opts['cookiesfrombrowser'] = (self.specified_browser,)
-
                     self.log(f"Starting download (attempt {attempt}/{max_attempts})...")
-                    print(download_opts)
                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                         ydl.download([clean_url])
 
@@ -907,7 +872,6 @@ class WhisperSubs:
                     for ext in ['.m4a', '.mp4', '.mp3', '.webm', '.ogg']:
                         predicted_path = f"{expected_base}{ext}"
                         full_path = os.path.join(output_path, predicted_path)
-
                         if os.path.exists(full_path):
                             self.log(f"Successfully downloaded: {full_path}")
                             return full_path
@@ -918,22 +882,19 @@ class WhisperSubs:
                 except Exception as e:
                     error_str = str(e).lower()
 
-                    # Handle rate limiting with exponential backoff
                     if ('rate' in error_str or 'unavailable' in error_str or '429' in error_str) and attempt < max_attempts:
-                        delay = min(30 * (2 ** attempt), 3600)  # 30s, 60s, 120s...
+                        delay = min(30 * (2 ** attempt), 3600)
                         self.log(f"Rate limited. Retrying in {delay}s... (attempt {attempt}/{max_attempts})")
                         time.sleep(delay)
                         continue
-                    # Handle format not available errors
                     elif ('requested format is not available' in error_str or 'format not available' in error_str) and attempt < max_attempts:
                         self.log(f"Format not available. Trying fallback format... (attempt {attempt}/{max_attempts})")
-                        # Use a more flexible format for the next attempt
                         if attempt == 1:
-                            download_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+                            fallback_format = 'bestaudio[ext=m4a]/bestaudio/best'
                         elif attempt == 2:
-                            download_opts['format'] = 'bestaudio/best'
+                            fallback_format = 'bestaudio/best'
                         else:
-                            download_opts['format'] = 'best'
+                            fallback_format = 'best'
                         continue
                     else:
                         self.log(f"Download failed: {e}")
@@ -941,6 +902,23 @@ class WhisperSubs:
 
         finally:
             os.chdir(original_cwd)
+            # Clean up leftover .part files from interrupted/failed downloads
+            if expected_base:
+                for part_file in glob.glob(os.path.join(output_path, f"{expected_base}*.part")):
+                    try:
+                        os.remove(part_file)
+                        self.log(f"Cleaned up partial download: {os.path.basename(part_file)}")
+                    except OSError:
+                        pass
+                # Clean up thumbnails unless saving video
+                if not self.save_video:
+                    for thumb_ext in ['.webp', '.jpg', '.jpeg', '.png']:
+                        thumb_path = os.path.join(output_path, f"{expected_base}{thumb_ext}")
+                        if os.path.exists(thumb_path):
+                            try:
+                                os.remove(thumb_path)
+                            except OSError:
+                                pass
     def get_unique_id(self, source):
         """Extract a unique identifier from various source types.
 
@@ -1252,11 +1230,14 @@ class WhisperSubs:
 
         finally:
             if audio_file and not is_local and os.path.exists(audio_file):
-                try:
-                    self.log(f"Removing temp audio: {audio_file}")
-                    os.remove(audio_file)
-                except OSError as e:
-                    self.log(f"Error removing temp file: {e}")
+                if not self.save_video:
+                    try:
+                        self.log(f"Removing temp audio: {audio_file}")
+                        os.remove(audio_file)
+                    except OSError as e:
+                        self.log(f"Error removing temp file: {e}")
+                else:
+                    self.log(f"Keeping media file: {audio_file}")
 
     def launch_mpv(self, audio_file, srt_file, task_source):
         """Launch mpv with the audio file, subtitles, and --pause flag."""

@@ -617,7 +617,7 @@ class WhisperSubs:
         else:
             self.log(f"Audio extraction failed, using original file")
             return video_path
-        
+
     def check_and_download_subs(self, url, output_dir, title):
         """Check for subs with minimal overhead."""
         if self.ignore_subs:
@@ -777,6 +777,22 @@ class WhisperSubs:
                                 return existing_file
             except Exception as e:
                 self.log(f"Quick check failed: {e}")
+
+        # === STEP 1.5: Check audio cache ===
+        if not self.force:
+            try:
+                import audio_cache
+                cached = audio_cache.get(clean_url)
+                if cached and os.path.exists(cached):
+                    self.log(f"Using cached audio: {cached}")
+                    dest = os.path.join(output_path, os.path.basename(cached))
+                    if dest != cached and not os.path.exists(dest):
+                        import shutil
+                        shutil.copy2(cached, dest)
+                        return dest
+                    return cached
+            except Exception as e:
+                self.log(f"Cache lookup failed: {e}")
 
         # === STEP 1.5: Check audio cache ===
         if not self.force:

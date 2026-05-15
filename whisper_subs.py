@@ -266,7 +266,7 @@ class WhisperSubs:
         import model
         title = filename
         # Go through all model names and remove them if they appear in the filename
-        for model_name in _get_model().MODEL_NAMES:
+        for model_name in _get_model().ALL_MODEL_NAMES:
             # Remove model name if it appears at the end (after the last dot) or with a dot before
             title = re.sub(rf'\.{re.escape(model_name)}(?=\.\w+$|$)', '', title)
         return title

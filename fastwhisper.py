@@ -1,5 +1,5 @@
 """
-Backward-compat stub - the PyQt5 GUI has been refactored to ui.pyqt_app.
+Backward-compat stub - the PyQt6 GUI has been refactored to ui.pyqt_app.
 
 This file re-exports everything so that existing callers and
 `python fastwhisper.py` continue to work unchanged.

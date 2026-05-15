@@ -1,5 +1,5 @@
 """
-WhisperSubs PyQt5 GUI - Desktop Application
+WhisperSubs PyQt6 GUI - Desktop Application
 
 Graphical interface for audio/video transcription using Whisper AI.
 Supports all adapter backends via provider:model syntax.
@@ -12,15 +12,15 @@ import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Union, Callable
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox,
-    QRadioButton, QGroupBox, QGridLayout, QSystemTrayIcon, QMenu, QAction,
+    QRadioButton, QGroupBox, QGridLayout, QSystemTrayIcon, QMenu,
     QListWidget, QAbstractItemView, QSlider, QStyledItemDelegate, QStyleOptionViewItem,
-    QStyle,
 )
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt, QModelIndex
-from PyQt5 import QtGui, QtCore
+from PyQt6.QtGui import QAction, QIcon, QPixmap, QColor, QPalette
+from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QModelIndex, qInstallMessageHandler
+from PyQt6.QtWidgets import QStyle
 import pymkv
 import time
 from whisper_subs import WhisperSubs
@@ -38,30 +38,23 @@ def _get_transcribe():
 
 
 def qt_message_handler(mode, context, message):
-    if mode == QtCore.QtWarningMsg and 'propagateSizeHints' in message:
+    if mode == Qt.MsgType.QtWarningMsg and 'propagateSizeHints' in message:
         return
-    if mode == QtCore.QtInfoMsg:
-        mode = 'INFO'
-    elif mode == QtCore.QtWarningMsg:
-        mode = 'WARNING'
-    elif mode == QtCore.QtCriticalMsg:
-        mode = 'CRITICAL'
-    elif mode == QtCore.QtFatalMsg:
-        mode = 'FATAL'
+    if mode == Qt.MsgType.QtInfoMsg:
+        mode_str = 'INFO'
+    elif mode == Qt.MsgType.QtWarningMsg:
+        mode_str = 'WARNING'
+    elif mode == Qt.MsgType.QtCriticalMsg:
+        mode_str = 'CRITICAL'
+    elif mode == Qt.MsgType.QtFatalMsg:
+        mode_str = 'FATAL'
     else:
-        mode = 'DEBUG'
+        mode_str = 'DEBUG'
     print('qt_message_handler: line: %d, func: %s(), file: %s' % (
         context.line, context.function, context.file))
-    print('  %s: %s\n' % (mode, message))
+    print('  %s: %s\n' % (mode_str, message))
 
-QtCore.qInstallMessageHandler(qt_message_handler)
-
-if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-if hasattr(QtCore.Qt, 'AA_ShareOpenGLContexts'):
-    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts, True)
+qInstallMessageHandler(qt_message_handler)
 
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
 os.environ["QT_SCALE_FACTOR"] = "1"
@@ -71,24 +64,24 @@ class SeparatorDelegate(QStyledItemDelegate):
     """Makes group-separator items non-selectable and visually distinct."""
 
     def paint(self, painter, option, index):
-        text = index.data(Qt.DisplayRole)
+        text = index.data(Qt.ItemDataRole.DisplayRole)
         if _is_sep(text):
             option = QStyleOptionViewItem(option)
-            option.state &= ~QStyle.State_Enabled
-            option.displayAlignment = Qt.AlignCenter
+            option.state &= ~QStyle.StateFlag.State_Enabled
+            option.displayAlignment = Qt.AlignmentFlag.AlignCenter
             font = option.font
             font.setBold(True)
             option.font = font
             option.palette.setColor(
-                Qt.TextColorRole,
-                option.palette.color(QStyle.Disabled, QStyle.Text)
+                QPalette.ColorRole.Text,
+                option.palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text)
             )
-        super().paint(painter, option, index)
+            super().paint(painter, option, index)
 
-    def itemFlags(self, index):
-        text = index.data(Qt.DisplayRole)
+    def flags(self, index):
+        text = index.data(Qt.ItemDataRole.DisplayRole)
         if _is_sep(text):
-            return Qt.NoItemFlags
+            return Qt.ItemFlag.NoItemFlags
         return super().flags(index)
 
 
@@ -421,7 +414,7 @@ class TranscriptionApp(QWidget):
         screen = QApplication.primaryScreen()
         screen_geometry = screen.availableGeometry()
         self.setGeometry(screen_geometry)
-        self.setWindowState(QtCore.Qt.WindowMaximized)
+        self.setWindowState(Qt.WindowState.WindowMaximized)
 
         self.initUI()
         self.load_settings()
@@ -766,7 +759,7 @@ class TranscriptionApp(QWidget):
         temp_slider_layout = QHBoxLayout()
         temp_slider_layout.addWidget(QLabel("Temperature:"))
 
-        self.temperature_slider = QSlider(QtCore.Qt.Horizontal)
+        self.temperature_slider = QSlider(Qt.Orientation.Horizontal)
         self.temperature_slider.setMinimum(0)
         self.temperature_slider.setMaximum(10)
         self.temperature_slider.setValue(3)
@@ -859,8 +852,8 @@ class TranscriptionApp(QWidget):
 
         file_list_layout = QHBoxLayout()
         self.file_list_widget = QListWidget()
-        self.file_list_widget.setDragDropMode(QAbstractItemView.InternalMove)
-        self.file_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.file_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.file_list_widget.setMinimumHeight(150)
         self.file_list_widget.itemSelectionChanged.connect(self.update_file_buttons_state)
         file_list_layout.addWidget(self.file_list_widget, stretch=1)
@@ -934,11 +927,11 @@ class TranscriptionApp(QWidget):
     def setup_system_tray(self):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon = QSystemTrayIcon(self)
-            app_icon = QtGui.QIcon.fromTheme("audio-x-generic")
-            if app_icon.isNull():
-                pixmap = QtGui.QPixmap(32, 32)
-                pixmap.fill(QtGui.QColor(59, 66, 82))
-                app_icon = QtGui.QIcon(pixmap)
+        app_icon = QIcon.fromTheme("audio-x-generic")
+        if app_icon.isNull():
+            pixmap = QPixmap(32, 32)
+            pixmap.fill(QColor(59, 66, 82))
+            app_icon = QIcon(pixmap)
             self.tray_icon.setIcon(app_icon)
 
             tray_menu = QMenu()
@@ -957,11 +950,12 @@ class TranscriptionApp(QWidget):
             tray_menu.addAction(quit_action)
 
             self.tray_icon.setContextMenu(tray_menu)
-            self.tray_icon.activated.connect(self.tray_icon_activated)
-            self.tray_icon.show()
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+
+        self.tray_icon.show()
 
     def tray_icon_activated(self, reason):
-        if reason == QSystemTrayIcon.DoubleClick:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.show_normal()
 
     def show_normal(self):
@@ -988,19 +982,19 @@ class TranscriptionApp(QWidget):
                     self,
                     'Minimize to Tray',
                     'No transcription is currently running. Would you like to minimize to tray instead of closing?',
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
                 )
 
-                if reply == QMessageBox.Yes:
+                if reply == QMessageBox.StandardButton.Yes:
                     self.hide()
                     event.ignore()
                 else:
                     self.save_settings()
-                    event.accept()
+                    super().closeEvent(event)
         else:
             self.save_settings()
-            event.accept()
+            super().closeEvent(event)
 
     def selectFiles(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -1198,7 +1192,7 @@ class TranscriptionApp(QWidget):
         if hasattr(self, 'auto_hide_check') and self.auto_hide_check.isChecked():
             self.hide()
 
-        self.transcription_thread.start(QThread.LowPriority)
+        self.transcription_thread.start(QThread.Priority.LowPriority)
 
     def on_transcription_finished(self):
         self.log("Transcription process completed!")
@@ -1459,10 +1453,6 @@ class TranscriptionApp(QWidget):
         except Exception as e:
             self.log(f"Error loading settings: {str(e)}")
 
-    def closeEvent(self, event):
-        self.save_settings()
-        super().closeEvent(event)
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -1473,4 +1463,4 @@ if __name__ == "__main__":
 
     window = TranscriptionApp()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

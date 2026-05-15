@@ -8,7 +8,7 @@ Transcribe YouTube videos, local audio/video files, and live streams to subtitle
 - **Unified model syntax**: Use `provider:model` (e.g. `groq:whisper-large-v3`) or bare names for local models
 - **YouTube transcription**: Download and transcribe videos/channels via `yt-dlp`
 - **MKV/file selector**: GUI for selecting and transcribing local files
-- **Live captioner**: Real-time captioning with PyQt5/GTK4/tkinter interfaces
+- **Live captioner**: Real-time captioning with PyQt6/GTK4/tkinter interfaces
 - **API server**: FastAPI/Flask transcription endpoints
 - **Auto-adapter discovery**: Only adapters with installed dependencies appear as available
 - **Provider-grouped model lists**: GUI dropdowns organized by provider with separator headers
@@ -151,7 +151,7 @@ pip install deepgram-sdk
 ### GUI dependencies
 
 ```bash
-pip install -r requirements_gui.txt   # PyQt5 GUI
+pip install -r requirements_gui.txt # PyQt6 GUI
 # For GTK4: system packages (python-gobject, gtk4)
 # For tkinter: usually included with Python
 ```
@@ -187,7 +187,7 @@ pip install -r requirements_api.txt
 ├── ui/                      # GUI applications
 │   ├── __init__.py
 │   ├── models.py            # Shared provider-grouped model list for GUIs
-│   ├── pyqt_app.py          # PyQt5 file selector GUI
+│ ├── pyqt_app.py # PyQt6 file selector GUI
 │   ├── gtk_app.py           # GTK4 file selector GUI
 │   └── tk_app.py            # tkinter file selector GUI
 ├── fastwhisper.py           # Backward-compat stub → ui.pyqt_app
@@ -265,7 +265,7 @@ Adapters are registered via the `@register_adapter` class decorator and auto-imp
 Three GUI frontends with provider-grouped model dropdowns:
 
 ```bash
-# PyQt5 (recommended)
+# PyQt6 (recommended)
 python fastwhisper.py
 
 # GTK4

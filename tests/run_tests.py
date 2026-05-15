@@ -107,13 +107,22 @@ class TestRunner:
         try:
             ctx = TranscriptionContext()
             ctx._ensure_initialized()
+            tested = 0
             for prefix, adapter in ctx._adapter_map.items():
+                if not adapter.is_available():
+                    try:
+                        ctx.resolve(f"{prefix}:test")
+                        assert False, "Should have raised ValueError"
+                    except ValueError:
+                        pass
+                    continue
                 models = adapter.get_model_names()
                 if models:
                     a, m = ctx.resolve(f"{prefix}:{models[0]}")
                     assert a is adapter
+                    tested += 1
             self._record("Context.resolve() prefixed", "PASS",
-                         f"tested {len(ctx._adapter_map)} adapters")
+                f"tested {tested} available adapters, {len(ctx._adapter_map) - tested} unavailable correctly rejected")
         except Exception as e:
             self._record("Context.resolve() prefixed", "FAIL", str(e))
 

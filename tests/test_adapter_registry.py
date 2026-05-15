@@ -36,14 +36,23 @@ def test_context_resolve_prefixed():
     ctx = TranscriptionContext()
     ctx._ensure_initialized()
 
+    tested = 0
     for prefix, adapter in ctx._adapter_map.items():
+        if not adapter.is_available():
+            try:
+                ctx.resolve(f"{prefix}:test")
+                assert False, "Should have raised ValueError for unavailable adapter"
+            except ValueError:
+                pass
+            continue
         models = adapter.get_model_names()
         if models:
             model_name = f"{prefix}:{models[0]}"
             resolved_adapter, resolved_model = ctx.resolve(model_name)
             assert resolved_adapter is adapter
             assert resolved_model == models[0]
-    print(f"  [PASS] Context.resolve() for all available adapters")
+            tested += 1
+    print(f" [PASS] Context.resolve() for {tested} available adapters, {len(ctx._adapter_map) - tested} unavailable correctly rejected")
 
 
 def test_context_resolve_bare():

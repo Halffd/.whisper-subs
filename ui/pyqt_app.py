@@ -12,6 +12,10 @@ import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Union, Callable
 
+
+def _safe_model_filename(model_name: str) -> str:
+    return model_name.replace(':', '_')
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QFileDialog, QMessageBox, QTextEdit, QComboBox, QHBoxLayout, QCheckBox,
@@ -278,12 +282,13 @@ class TranscriptionThread(QThread):
             dir_path = os.path.dirname(file_path)
             base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-            srt_file = os.path.join(dir_path, f"{base_name}.{self.model_name}.srt")
+            safe_model = _safe_model_filename(self.model_name)
+            srt_file = os.path.join(dir_path, f"{base_name}.{safe_model}.srt")
 
             output_dir = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
             local_files_dir = os.path.join(output_dir, "local_files")
             os.makedirs(local_files_dir, exist_ok=True)
-            srt_file_secondary = os.path.join(local_files_dir, f"{base_name}.{self.model_name}.srt")
+            srt_file_secondary = os.path.join(local_files_dir, f"{base_name}.{safe_model}.srt")
 
             vad_params = None
             if self.vad_enabled is True:

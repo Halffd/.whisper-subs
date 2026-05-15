@@ -260,14 +260,17 @@ class WhisperSubs:
     def is_local_dir(self, path: str) -> bool:
         return bool(path and os.path.isdir(path))
 
+    def _safe_model_filename(self) -> str:
+        """Return model name sanitized for use in filenames (colons -> underscores)."""
+        return self.model_name.replace(':', '_')
+
     def _strip_model_from_filename(self, filename: str) -> str:
         """Strip any existing model name from filename to prevent duplicate model suffixes."""
-        # Import model module to access MODEL_NAMES
         import model
         title = filename
-        # Go through all model names and remove them if they appear in the filename
         for model_name in _get_model().ALL_MODEL_NAMES:
-            # Remove model name if it appears at the end (after the last dot) or with a dot before
+            safe_name = model_name.replace(':', '_')
+            title = re.sub(rf'\.{re.escape(safe_name)}(?=\.\w+$|$)', '', title)
             title = re.sub(rf'\.{re.escape(model_name)}(?=\.\w+$|$)', '', title)
         return title
 
@@ -552,42 +555,48 @@ class WhisperSubs:
 
     def _convert_to_audio(self, video_path: str) -> Optional[str]:
         """Convert video file to audio-only M4A for transcription.
-        
+
         This is needed for time cutting (--start/--end) to work properly,
         as cutting video files requires video encoding which may fail.
         """
         if not os.path.exists(video_path):
             return None
-        
-        # Only convert video files
+
         video_exts = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'}
         if os.path.splitext(video_path)[1].lower() not in video_exts:
-            # Already an audio file
             return video_path
-        
+
         audio_path = os.path.splitext(video_path)[0] + ".m4a"
-        
-        # Skip if already exists
+
         if os.path.exists(audio_path):
             self.log(f"Using existing audio file: {os.path.basename(audio_path)}")
             return audio_path
-        
+
+        try:
+            import audio_cache
+            cached = audio_cache.get(video_path)
+            if cached and os.path.exists(cached):
+                import shutil
+                shutil.copy2(cached, audio_path)
+                self.log(f"Using cached conversion: {os.path.basename(audio_path)}")
+                return audio_path
+        except Exception:
+            pass
+
         self.log(f"Extracting audio from {os.path.basename(video_path)}...")
-        
-        # Use FFmpeg to extract audio only - optimized for speed
+
         import subprocess
         ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-i', video_path,
-            '-vn',  # No video processing
+            '-vn',
             '-acodec', 'aac',
-            '-b:a', '128k',  # Lower bitrate for faster processing (sufficient for transcription)
-            '-ac', '1',  # Mono (faster, sufficient for speech)
-            '-ar', '16000',  # 16kHz sample rate (Whisper native, faster)
+            '-b:a', '128k',
+            '-ac', '1',
+            '-ar', '16000',
             audio_path
         ]
 
-        # Run with progress output suppressed for cleaner logs
         result = subprocess.run(
             ffmpeg_cmd,
             stdout=subprocess.DEVNULL,
@@ -598,12 +607,17 @@ class WhisperSubs:
 
         if result.returncode == 0 and os.path.exists(audio_path):
             self.log(f"Audio extracted: {os.path.basename(audio_path)}")
+            try:
+                import audio_cache
+                audio_cache.put(video_path, audio_path)
+                audio_path = audio_cache.get(video_path) or audio_path
+            except Exception:
+                pass
             return audio_path
         else:
             self.log(f"Audio extraction failed, using original file")
-            # Return original path as fallback
             return video_path
-
+        
     def check_and_download_subs(self, url, output_dir, title):
         """Check for subs with minimal overhead."""
         if self.ignore_subs:
@@ -756,13 +770,29 @@ class WhisperSubs:
 
                         # Check for existing files with current model name only
                         for ext in ['.mp3', '.m4a', '.webm', '.ogg']:
-                            pattern = f"{base_title}.{self.model_name}{ext}"
+                            pattern = f"{base_title}.{self._safe_model_filename()}{ext}"
                             existing_file = os.path.join(output_path, pattern)
                             if os.path.exists(existing_file):
                                 self.log(f"File already exists: {existing_file}")
                                 return existing_file
             except Exception as e:
                 self.log(f"Quick check failed: {e}")
+
+        # === STEP 1.5: Check audio cache ===
+        if not self.force:
+            try:
+                import audio_cache
+                cached = audio_cache.get(clean_url)
+                if cached and os.path.exists(cached):
+                    self.log(f"Using cached audio: {cached}")
+                    dest = os.path.join(output_path, os.path.basename(cached))
+                    if dest != cached and not os.path.exists(dest):
+                        import shutil
+                        shutil.copy2(cached, dest)
+                        return dest
+                    return cached
+            except Exception as e:
+                self.log(f"Cache lookup failed: {e}")
 
         # === STEP 2: Download the file ===
         original_cwd = os.getcwd()
@@ -823,7 +853,7 @@ class WhisperSubs:
                     clean_title = self.clean_filename(info.get('title', 'unknown'))
                     # Strip any existing model suffix to avoid duplicate model names
                     title_without_model = self._strip_model_from_filename(clean_title)
-                    expected_base = f"{timeday}_{title_without_model}.{self.model_name}" if timeday else f"{title_without_model}.{self.model_name}"
+                    expected_base = f"{timeday}_{title_without_model}.{self._safe_model_filename()}" if timeday else f"{title_without_model}.{self._safe_model_filename()}"
 
                     # Download with proper template
                     download_opts = self._get_ytdlp_base_opts(
@@ -1124,8 +1154,9 @@ class WhisperSubs:
             update_task_status(job_id, task_source, 'transcribing')
             # Get base filename without extension and ensure it includes the model name
             base_name = os.path.splitext(os.path.basename(audio_file))[0]
-            if not base_name.endswith(f".{self.model_name}"):
-                base_name = f"{base_name}.{self.model_name}"
+            safe_model = self._safe_model_filename()
+            if not base_name.endswith(f".{safe_model}"):
+                base_name = f"{base_name}.{safe_model}"
 
             # Write to both locations: video folder AND Documents/Youtube-Subs/local_files
             if is_local:
@@ -1232,10 +1263,15 @@ class WhisperSubs:
             if audio_file and not is_local and os.path.exists(audio_file):
                 if not self.save_video:
                     try:
-                        self.log(f"Removing temp audio: {audio_file}")
-                        os.remove(audio_file)
+                        import audio_cache
+                        cached_path = audio_cache.put(task_source, audio_file)
+                        if cached_path:
+                            self.log(f"Cached audio: {cached_path}")
+                        else:
+                            os.remove(audio_file)
+                            self.log(f"Removed temp audio (cache failed): {audio_file}")
                     except OSError as e:
-                        self.log(f"Error removing temp file: {e}")
+                        self.log(f"Error handling temp file: {e}")
                 else:
                     self.log(f"Keeping media file: {audio_file}")
 

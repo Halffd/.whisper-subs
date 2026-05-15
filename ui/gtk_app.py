@@ -8,6 +8,10 @@ import os
 import sys
 import datetime
 import subprocess
+
+
+def _safe_model_filename(model_name: str) -> str:
+    return model_name.replace(':', '_')
 from pathlib import Path
 import gi
 gi.require_version('Gtk', '4.0')
@@ -108,8 +112,9 @@ class TranscriptionThread(threading.Thread):
                     GLib.idle_add(self.log_callback, f"Error reading HTML file: {str(e)}")
 
             file_suffix = f"_{video_id}" if video_id else ""
-            srt_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.srt")
-            log_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.log")
+            safe_model = _safe_model_filename(model_name)
+            srt_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{safe_model}.srt")
+            log_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{safe_model}.log")
 
             device = 'cuda' if self.gpu_radio.get_active() else 'cpu'
             compute_type = self.compute_combo.get_active_text().split(' ')[0]
@@ -239,13 +244,13 @@ finally:
     writer_thread.join(timeout=5)
 '''
 
-            sh_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.sh")
+            sh_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{safe_model}.sh")
             with open(sh_file, 'w', encoding='utf-8') as f:
                 f.write('#!/bin/bash\n')
                 f.write(f'python3 -c """{script_content}"""\n')
             os.chmod(sh_file, 0o755)
 
-            bat_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{model_name}.bat")
+            bat_file = os.path.join(dir_path, f"{base_name}{file_suffix}.{safe_model}.bat")
             with open(bat_file, 'w', encoding='utf-8') as f:
                 win_script = script_content.replace('/', '\\')
                 win_script = win_script.replace(r'\\', r'\\\\')

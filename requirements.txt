@@ -18,3 +18,10 @@ transformers
 tqdm
 PyQt6
 scikit-learn
+
+# Adapter backends (install what you need)
+nemo_toolkit
+moonshine
+whisperx
+deepgram-sdk
+google-cloud-speech

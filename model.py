@@ -71,19 +71,18 @@ def register_adapter(cls: Type[TranscriptionAdapter]) -> Type[TranscriptionAdapt
     return cls
 
 def get_adapter_instances() -> List[TranscriptionAdapter]:
-    """Instantiate all registered adapters (lazy, filters unavailable)."""
+    """Instantiate all registered adapters (filters only those that crash on init)."""
     instances = []
     for cls in _ADAPTER_CLASSES:
         try:
             inst = cls()
-            if inst.is_available():
-                instances.append(inst)
+            instances.append(inst)
         except Exception:
             pass
     return instances
 
 def build_adapter_map() -> Dict[str, TranscriptionAdapter]:
-    """Build prefix -> adapter instance map for routing."""
+    """Build prefix -> adapter instance map for routing (includes unavailable adapters)."""
     adapter_map: Dict[str, TranscriptionAdapter] = {}
     for adapter in get_adapter_instances():
         p = adapter.prefix
@@ -121,9 +120,14 @@ class TranscriptionContext:
             prefix, rest = model_name.split(':', 1)
             adapter = self._adapter_map.get(prefix)
             if adapter is None:
-                available = list(self._adapter_map.keys())
+                all_prefixes = list(self._adapter_map.keys())
                 raise ValueError(
-                    f"Unknown adapter prefix '{prefix}'. Available: {available}"
+                    f"Unknown adapter prefix '{prefix}'. Available: {all_prefixes}"
+                )
+            if not adapter.is_available():
+                raise ValueError(
+                    f"Adapter '{prefix}' ({adapter.display_name}) is not available. "
+                    f"Install its dependencies to enable it."
                 )
             return adapter, rest
         if self._default_adapter and self._default_adapter.is_available():
@@ -163,22 +167,22 @@ class TranscriptionContext:
         return False, '', model_name
 
     def list_available_adapters(self) -> List[Dict[str, Any]]:
-        """List all available adapters and their models."""
+        """List all registered adapters and their models (including unavailable)."""
         self._ensure_initialized()
         result = []
-        seen_prefixes = set()
-        for prefix, adapter in self._adapter_map.items():
-            seen_prefixes.add(prefix)
-            result.append({
-                'prefix': prefix,
-                'name': adapter.display_name,
-                'models': adapter.get_model_names(),
-            })
-        if self._default_adapter and self._default_adapter.is_available():
+        if self._default_adapter:
             result.insert(0, {
                 'prefix': '(local/faster-whisper)',
                 'name': self._default_adapter.display_name,
                 'models': self._default_adapter.get_model_names(),
+                'available': self._default_adapter.is_available(),
+            })
+        for prefix, adapter in self._adapter_map.items():
+            result.append({
+                'prefix': prefix,
+                'name': adapter.display_name,
+                'models': adapter.get_model_names(),
+                'available': adapter.is_available(),
             })
         return result
 

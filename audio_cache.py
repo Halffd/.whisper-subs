@@ -76,7 +76,8 @@ def _evict(index: Dict[str, Any]):
 def put(source: str, audio_path: str) -> Optional[str]:
     """Cache an audio file, returning the cached path (or None on failure).
 
-    Moves the file into the cache directory and records it in the index.
+    Copies the file into the cache directory and records it in the index.
+    The original file is NOT removed — the caller decides when to delete it.
     """
     if not audio_path or not os.path.exists(audio_path):
         return None
@@ -89,6 +90,9 @@ def put(source: str, audio_path: str) -> Optional[str]:
     cached_name = f"{key}{ext}"
     cached_path = os.path.join(CACHE_DIR, cached_name)
 
+    if os.path.exists(cached_path) and os.path.getsize(cached_path) == os.path.getsize(audio_path):
+        return cached_path
+
     old_entry = index["entries"].get(key)
     if old_entry:
         old_path = old_entry.get("path", "")
@@ -100,14 +104,9 @@ def put(source: str, audio_path: str) -> Optional[str]:
 
     try:
         import shutil
-        shutil.move(audio_path, cached_path)
+        shutil.copy2(audio_path, cached_path)
     except OSError:
-        try:
-            import shutil
-            shutil.copy2(audio_path, cached_path)
-            os.remove(audio_path)
-        except OSError:
-            return None
+        return None
 
     index["entries"][key] = {
         "path": cached_path,

@@ -19,7 +19,7 @@ class CanaryAdapter(TranscriptionAdapter):
 
     def is_available(self) -> bool:
         try:
-            import nemo
+            import nemo.collections.asr as nemo_asr
             return True
         except ImportError:
             return False

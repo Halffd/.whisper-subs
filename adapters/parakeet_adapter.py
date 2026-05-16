@@ -8,7 +8,7 @@ from model import Segment, TranscriptionAdapter, register_adapter
 
 @register_adapter
 class ParakeetAdapter(TranscriptionAdapter):
-    """Transcription via NVIDIA NeMo Parakeet models (CTC/RNNT)."""
+    """Transcription via NVIDIA NeMo Parakeet models (TDT/CTC/RNNT)."""
 
     @property
     def prefix(self) -> str:
@@ -20,13 +20,15 @@ class ParakeetAdapter(TranscriptionAdapter):
 
     def is_available(self) -> bool:
         try:
-            import nemo
+            import nemo.collections.asr as nemo_asr
             return True
         except ImportError:
             return False
 
     def get_model_names(self) -> List[str]:
         return [
+            "parakeet-tdt-0.6b-v2",
+            "parakeet-tdt-0.6b-v3",
             "parakeet-ctc-1.1b",
             "parakeet-rnnt-1.1b",
             "parakeet-ctc-0.6b",
@@ -45,6 +47,8 @@ class ParakeetAdapter(TranscriptionAdapter):
         import nemo.collections.asr as nemo_asr
 
         nemo_model_map = {
+            'parakeet-tdt-0.6b-v2': 'nvidia/parakeet-tdt-0.6b-v2',
+            'parakeet-tdt-0.6b-v3': 'nvidia/parakeet-tdt-0.6b-v3',
             'parakeet-ctc-1.1b': 'nvidia/parakeet-ctc-1.1b-asr',
             'parakeet-rnnt-1.1b': 'nvidia/parakeet-rnnt-1.1b-asr',
             'parakeet-ctc-0.6b': 'nvidia/parakeet-ctc-0.6b-asr',
@@ -53,28 +57,43 @@ class ParakeetAdapter(TranscriptionAdapter):
         nemo_id = nemo_model_map.get(model, model)
 
         write(f"Loading Parakeet model: {nemo_id}")
-        asr_model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.from_pretrained(
+        asr_model = nemo_asr.models.ASRModel.from_pretrained(
             model_name=nemo_id,
         )
 
         write("Transcribing with Parakeet...")
-        results = asr_model.transcribe([audio_file], return_hypotheses=True)
+        output = asr_model.transcribe([audio_file], timestamps=True)
 
         segments: List[Segment] = []
-        for hyp in results:
-            if hasattr(hyp, 'timestamp') and hyp.timestamp:
-                for ts in hyp.timestamp:
+        if output and hasattr(output, 'timestamp') and output.timestamp:
+            seg_timestamps = output.timestamp.get('segment', [])
+            if seg_timestamps:
+                for stamp in seg_timestamps:
                     segments.append(Segment(
-                        start=ts.get('start', 0.0),
-                        end=ts.get('end', 0.0),
-                        text=ts.get('word', ''),
+                        start=float(stamp.get('start', 0.0)),
+                        end=float(stamp.get('end', 0.0)),
+                        text=stamp.get('segment', stamp.get('word', '')).strip(),
                     ))
             else:
-                text = hyp.text if hasattr(hyp, 'text') else str(hyp)
-                segments.append(Segment(start=0.0, end=0.0, text=text))
+                word_timestamps = output.timestamp.get('word', [])
+                for stamp in word_timestamps:
+                    segments.append(Segment(
+                        start=float(stamp.get('start', 0.0)),
+                        end=float(stamp.get('end', 0.0)),
+                        text=stamp.get('word', stamp.get('text', '')).strip(),
+                    ))
+
+        if not segments:
+            text = ''
+            if isinstance(output, list) and output:
+                entry = output[0]
+                text = entry.text if hasattr(entry, 'text') else str(entry)
+            elif hasattr(output, 'text'):
+                text = output.text
+            segments = [Segment(start=0.0, end=0.0, text=text)]
 
         info = type('Info', (), {
             'duration': segments[-1].end if segments else 0.0,
-            'language': 'en',
+            'language': language or 'en',
         })()
         return segments, info

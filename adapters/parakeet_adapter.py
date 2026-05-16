@@ -57,45 +57,80 @@ class ParakeetAdapter(TranscriptionAdapter):
         nemo_model_map = {
             'parakeet-tdt-0.6b-v2': 'nvidia/parakeet-tdt-0.6b-v2',
             'parakeet-tdt-0.6b-v3': 'nvidia/parakeet-tdt-0.6b-v3',
-            'parakeet-ctc-1.1b': 'nvidia/parakeet-ctc-1.1b-asr',
-            'parakeet-rnnt-1.1b': 'nvidia/parakeet-rnnt-1.1b-asr',
-            'parakeet-ctc-0.6b': 'nvidia/parakeet-ctc-0.6b-asr',
-            'parakeet-rnnt-0.6b': 'nvidia/parakeet-rnnt-0.6b-asr',
+            'parakeet-ctc-1.1b': 'nvidia/parakeet-ctc-1.1b',
+            'parakeet-rnnt-1.1b': 'nvidia/parakeet-rnnt-1.1b',
+            'parakeet-ctc-0.6b': 'nvidia/parakeet-ctc-0.6b',
+            'parakeet-rnnt-0.6b': 'nvidia/parakeet-rnnt-0.6b',
         }
         nemo_id = nemo_model_map.get(model, model)
 
         write(f"Loading Parakeet model: {nemo_id}")
-        asr_model = nemo_asr.models.ASRModel.from_pretrained(
-            model_name=nemo_id,
-        )
+        try:
+            asr_model = nemo_asr.models.ASRModel.from_pretrained(
+                model_name=nemo_id,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if '401' in err_msg or 'Unauthorized' in err_msg or 'Repository Not Found' in err_msg:
+                raise RuntimeError(
+                    f"Cannot access '{nemo_id}' on HuggingFace (gated model). "
+                    f"You need to:\n"
+                    f"  1. Request access at https://huggingface.co/{nemo_id}\n"
+                    f"  2. Set your HF token: huggingface-cli login\n"
+                    f"     or: export HF_TOKEN=your_token\n"
+                    f"Original error: {e}"
+                ) from e
+            raise
 
         write("Transcribing with Parakeet...")
         output = asr_model.transcribe([audio_file], timestamps=True)
 
         segments: List[Segment] = []
-        if output and hasattr(output, 'timestamp') and output.timestamp:
-            seg_timestamps = output.timestamp.get('segment', [])
-            if seg_timestamps:
-                for stamp in seg_timestamps:
-                    segments.append(Segment(
-                        start=float(stamp.get('start', 0.0)),
-                        end=float(stamp.get('end', 0.0)),
-                        text=stamp.get('segment', stamp.get('word', '')).strip(),
-                    ))
-            else:
-                word_timestamps = output.timestamp.get('word', [])
-                for stamp in word_timestamps:
-                    segments.append(Segment(
-                        start=float(stamp.get('start', 0.0)),
-                        end=float(stamp.get('end', 0.0)),
-                        text=stamp.get('word', stamp.get('text', '')).strip(),
-                    ))
+        if output and isinstance(output, list) and len(output) > 0:
+            result = output[0]
+            ts = None
+            if hasattr(result, 'timestamp') and result.timestamp:
+                ts = result.timestamp
+            elif isinstance(result, dict) and 'timestamp' in result:
+                ts = result['timestamp']
+
+            if ts:
+                seg_timestamps = ts.get('segment', []) if isinstance(ts, dict) else []
+                if seg_timestamps:
+                    for stamp in seg_timestamps:
+                        if isinstance(stamp, dict):
+                            segments.append(Segment(
+                                start=float(stamp.get('start', 0.0)),
+                                end=float(stamp.get('end', 0.0)),
+                                text=stamp.get('segment', stamp.get('word', '')).strip(),
+                            ))
+                        else:
+                            segments.append(Segment(
+                                start=float(getattr(stamp, 'start', 0.0)),
+                                end=float(getattr(stamp, 'end', 0.0)),
+                                text=getattr(stamp, 'segment', getattr(stamp, 'word', '')).strip(),
+                            ))
+                if not segments:
+                    word_timestamps = ts.get('word', []) if isinstance(ts, dict) else []
+                    for stamp in word_timestamps:
+                        if isinstance(stamp, dict):
+                            segments.append(Segment(
+                                start=float(stamp.get('start', 0.0)),
+                                end=float(stamp.get('end', 0.0)),
+                                text=stamp.get('word', stamp.get('text', '')).strip(),
+                            ))
+                        else:
+                            segments.append(Segment(
+                                start=float(getattr(stamp, 'start', 0.0)),
+                                end=float(getattr(stamp, 'end', 0.0)),
+                                text=getattr(stamp, 'word', getattr(stamp, 'text', '')).strip(),
+                            ))
 
         if not segments:
             text = ''
-            if isinstance(output, list) and output:
-                entry = output[0]
-                text = entry.text if hasattr(entry, 'text') else str(entry)
+            if output and isinstance(output, list) and len(output) > 0:
+                result = output[0]
+                text = result.text if hasattr(result, 'text') else str(result)
             elif hasattr(output, 'text'):
                 text = output.text
             segments = [Segment(start=0.0, end=0.0, text=text)]

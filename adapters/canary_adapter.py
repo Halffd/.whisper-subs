@@ -53,9 +53,22 @@ class CanaryAdapter(TranscriptionAdapter):
         nemo_id = nemo_model_map.get(model, model)
 
         write(f"Loading Canary model: {nemo_id}")
-        asr_model = nemo_asr.models.EncDecMultiTaskModel.from_pretrained(
-            model_name=nemo_id,
-        )
+        try:
+            asr_model = nemo_asr.models.EncDecMultiTaskModel.from_pretrained(
+                model_name=nemo_id,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if '401' in err_msg or 'Unauthorized' in err_msg or 'Repository Not Found' in err_msg:
+                raise RuntimeError(
+                    f"Cannot access '{nemo_id}' on HuggingFace (gated model). "
+                    f"You need to:\n"
+                    f"  1. Request access at https://huggingface.co/{nemo_id}\n"
+                    f"  2. Set your HF token: huggingface-cli login\n"
+                    f"     or: export HF_TOKEN=your_token\n"
+                    f"Original error: {e}"
+                ) from e
+            raise
 
         src_lang = language or 'en'
         tgt_lang = src_lang

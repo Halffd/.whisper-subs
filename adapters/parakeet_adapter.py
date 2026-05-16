@@ -20,7 +20,9 @@ class ParakeetAdapter(TranscriptionAdapter):
 
     def is_available(self) -> bool:
         try:
-            import nemo.collections.asr as nemo_asr
+            import nemo
+            import hydra
+            import fiddle
             return True
         except ImportError:
             return False
@@ -44,7 +46,13 @@ class ParakeetAdapter(TranscriptionAdapter):
         temperature: float = 0.0,
         **kwargs,
     ) -> Tuple[List[Segment], Any]:
-        import nemo.collections.asr as nemo_asr
+        try:
+            import nemo.collections.asr as nemo_asr
+        except ImportError as e:
+            raise ImportError(
+                f"NeMo ASR dependencies not available: {e}. "
+                f"Install with: pip install nemo-toolkit[asr] hydra-core fiddle"
+            ) from e
 
         nemo_model_map = {
             'parakeet-tdt-0.6b-v2': 'nvidia/parakeet-tdt-0.6b-v2',

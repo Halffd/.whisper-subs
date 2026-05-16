@@ -539,8 +539,34 @@ def register_user(username: str = Form(...), password: str = Form(...)):
 
 @app.get("/models", response_model=List[str])
 def get_available_models():
-    """Get list of available Whisper models"""
+    """Get list of all available models (local + adapter)"""
+    return model.ALL_MODEL_NAMES
+
+
+@app.get("/models/local", response_model=List[str])
+def get_local_models():
+    """Get list of local Whisper models"""
     return model.MODEL_NAMES
+
+
+@app.get("/models/adapters", response_model=List[str])
+def get_adapter_models():
+    """Get list of adapter-backed models"""
+    return model.ADAPTER_MODEL_NAMES
+
+
+@app.get("/adapters")
+def get_adapters():
+    """Get list of registered adapters with availability info"""
+    ctx = model.TranscriptionContext()
+    return ctx.list_available_adapters()
+
+
+@app.get("/cache/stats")
+def get_cache_stats():
+    """Get audio cache statistics"""
+    import audio_cache
+    return audio_cache.stats()
 
 
 @app.post("/transcribe", response_model=TaskResponse)
@@ -551,10 +577,10 @@ async def start_transcription(
 ):
     """Start a new transcription task with advanced options"""
     # Validate model name
-    if request.model_name not in model.MODEL_NAMES:
+    if request.model_name not in model.ALL_MODEL_NAMES:
         valid_model_name = model.getName(request.model_name)
-        if not valid_model_name or valid_model_name not in model.MODEL_NAMES:
-            raise HTTPException(status_code=400, detail=f"Invalid model name. Valid models: {model.MODEL_NAMES}")
+        if not valid_model_name or valid_model_name not in model.ALL_MODEL_NAMES:
+            raise HTTPException(status_code=400, detail=f"Invalid model name. Valid models: {model.ALL_MODEL_NAMES}")
         request.model_name = valid_model_name
 
     # Generate a unique task ID

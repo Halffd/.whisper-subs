@@ -987,6 +987,15 @@ def try_transcribe(
         # Create helper files for the unfinished SRT file
         make_files(unfinished_srt)
 
+        # Create symlink from srt_file -> unfinished_srt so players see in-progress transcription
+        if os.path.exists(srt_file) or os.path.islink(srt_file):
+            os.remove(srt_file)
+        try:
+            os.symlink(os.path.basename(unfinished_srt), srt_file)
+            write(f"Created symlink: {srt_file} -> {os.path.basename(unfinished_srt)}")
+        except OSError:
+            write(f"Could not create symlink, skipping")
+
         is_english_only = '.en' in current_model
         language_param = '\'en\'' if is_english_only else ('None' if language == 'none' else f"'{language}'")
         whisper_log = srt_file.replace('.srt', '.whisper.log')
@@ -1179,9 +1188,10 @@ try:
     stop_event.set()
     writer_thread.join(timeout=30)
 
-    if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
-        if os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
-        os.rename(r"{unfinished_srt}", r"{srt_file}")
+            if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
+                if os.path.islink(r"{srt_file}"): os.remove(r"{srt_file}")
+                elif os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
+                os.rename(r"{unfinished_srt}", r"{srt_file}")
 
         # Recreate helper files for the final SRT file
         import transcribe
@@ -1261,7 +1271,7 @@ finally:
     except Exception as e:
         write(f"An error occurred: {e}")
         return False
-            
+
     finally:
         try:
             if script_path and os.path.exists(script_path): os.unlink(script_path)
@@ -1271,6 +1281,10 @@ finally:
             if trimmed_audio_path and os.path.exists(trimmed_audio_path):
                 os.unlink(trimmed_audio_path)
                 write("Removed temporary trimmed audio file.")
+            if os.path.islink(srt_file):
+                os.remove(srt_file)
+                if os.path.exists(unfinished_srt):
+                    os.rename(unfinished_srt, srt_file)
         except Exception as e:
             write(f"Warning: Could not remove temporary file: {e}")
 

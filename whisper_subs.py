@@ -610,7 +610,6 @@ class WhisperSubs:
             try:
                 import audio_cache
                 audio_cache.put(video_path, audio_path)
-                audio_path = audio_cache.get(video_path) or audio_path
             except Exception:
                 pass
             return audio_path
@@ -777,22 +776,6 @@ class WhisperSubs:
                                 return existing_file
             except Exception as e:
                 self.log(f"Quick check failed: {e}")
-
-        # === STEP 1.5: Check audio cache ===
-        if not self.force:
-            try:
-                import audio_cache
-                cached = audio_cache.get(clean_url)
-                if cached and os.path.exists(cached):
-                    self.log(f"Using cached audio: {cached}")
-                    dest = os.path.join(output_path, os.path.basename(cached))
-                    if dest != cached and not os.path.exists(dest):
-                        import shutil
-                        shutil.copy2(cached, dest)
-                        return dest
-                    return cached
-            except Exception as e:
-                self.log(f"Cache lookup failed: {e}")
 
         # === STEP 1.5: Check audio cache ===
         if not self.force:
@@ -1195,7 +1178,16 @@ class WhisperSubs:
                 srt_file_secondary = None
 
             # Create helper files (bash, bat, thumbnail) before transcription
-            _get_transcribe().make_files(srt_file.replace('.srt', '.unfinished.srt'), url=task_source)
+            unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+            _get_transcribe().make_files(unfinished_srt, url=task_source)
+
+            # Create symlink from srt_file -> unfinished_srt so players see in-progress transcription
+            try:
+                if os.path.exists(srt_file) or os.path.islink(srt_file):
+                    os.remove(srt_file)
+                os.symlink(os.path.basename(unfinished_srt), srt_file)
+            except OSError:
+                pass
 
             # Launch mpv FIRST if --run option is specified (before transcription starts)
             mpv_process = None
@@ -1283,11 +1275,12 @@ class WhisperSubs:
                         cached_path = audio_cache.put(task_source, audio_file)
                         if cached_path:
                             self.log(f"Cached audio: {cached_path}")
-                        else:
-                            os.remove(audio_file)
-                            self.log(f"Removed temp audio (cache failed): {audio_file}")
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(audio_file)
                     except OSError as e:
-                        self.log(f"Error handling temp file: {e}")
+                        self.log(f"Error removing temp audio: {e}")
                 else:
                     self.log(f"Keeping media file: {audio_file}")
 

@@ -205,8 +205,10 @@ try:
     writer_thread.join(timeout=30)
 
     if os.path.exists(unfinished_srt) and os.path.getsize(unfinished_srt) > 10:
-        if os.path.exists(r"{srt_file}"):
-            os.remove(r"{srt_file}")
+            if os.path.islink(r"{srt_file}"):
+                os.remove(r"{srt_file}")
+            elif os.path.exists(r"{srt_file}"):
+                os.remove(r"{srt_file}")
         os.rename(unfinished_srt, r"{srt_file}")
         log_message("Transcription completed successfully")
 
@@ -263,6 +265,16 @@ finally:
             with open(script_file, "w", encoding="utf-8") as f:
                 f.write(script_content)
 
+
+            unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+            try:
+                if os.path.exists(srt_file) or os.path.islink(srt_file):
+                    os.remove(srt_file)
+                os.symlink(os.path.basename(unfinished_srt), srt_file)
+                GLib.idle_add(self.log_callback, f"Created symlink: {srt_file} -> {os.path.basename(unfinished_srt)}")
+            except OSError:
+                GLib.idle_add(self.log_callback, f"Could not create symlink, skipping")
+
             try:
                 GLib.idle_add(self.log_callback, f"Starting transcription of {file_path}...")
                 process = subprocess.Popen(
@@ -312,6 +324,18 @@ finally:
                 return False
 
             finally:
+                if os.path.islink(srt_file):
+                    try:
+                        os.remove(srt_file)
+                    except OSError:
+                        pass
+                    unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
+                    if os.path.exists(unfinished_srt):
+                        try:
+                            os.rename(unfinished_srt, srt_file)
+                            GLib.idle_add(self.log_callback, f"Renamed {unfinished_srt} to {srt_file}")
+                        except OSError:
+                            pass
                 try:
                     os.remove(script_file)
                 except:
@@ -320,6 +344,7 @@ finally:
         except Exception as e:
             GLib.idle_add(self.log_callback, f"Error processing {file_path}: {str(e)}")
             return False
+
 
 
 class TranscriptionApp(Gtk.ApplicationWindow):

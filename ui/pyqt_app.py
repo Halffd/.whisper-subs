@@ -33,6 +33,21 @@ import json
 
 from ui.models import get_flat_display_list, is_separator as _is_sep
 
+_PROVIDER_LABELS = {
+    "groq": "Groq",
+    "hf": "HuggingFace",
+    "whisperx": "WhisperX",
+    "whispercpp": "whisper.cpp",
+    "moonshine": "Moonshine",
+    "deepgram": "Deepgram",
+    "chirp": "Google Chirp",
+    "voxtral": "Voxtral (Mistral)",
+    "parakeet": "Parakeet (NVIDIA NeMo)",
+    "canary": "Canary (NVIDIA NeMo)",
+    "vibevoice": "VibeVoice",
+    "whisperturbo": "Whisper Turbo",
+}
+
 _transcribe_module = None
 def _get_transcribe():
     global _transcribe_module
@@ -511,10 +526,24 @@ class TranscriptionApp(QWidget):
 
         model_layout = QVBoxLayout()
         model_label = QLabel("Model:")
+
+        adapter_model_row = QHBoxLayout()
+        self.adapter_combo = QComboBox()
+        self._populate_adapter_combo()
+        self.adapter_combo.currentIndexChanged.connect(self._on_adapter_filter_changed)
+        adapter_model_row.addWidget(QLabel("Provider:"))
+        adapter_model_row.addWidget(self.adapter_combo, 1)
+
         self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._populate_model_combo()
+        self.model_combo.setItemDelegate(SeparatorDelegate(self.model_combo))
+        self.model_combo.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseSensitive)
+        adapter_model_row.addWidget(self.model_combo, 3)
+
         model_layout.addWidget(model_label)
-        model_layout.addWidget(self.model_combo)
+        model_layout.addLayout(adapter_model_row)
         model_lang_layout.addLayout(model_layout)
 
         lang_layout = QVBoxLayout()
@@ -838,6 +867,62 @@ class TranscriptionApp(QWidget):
         youtube_settings_layout.addWidget(youtube_settings_group)
 
         device_group.addLayout(youtube_settings_layout)
+
+        # API Keys configuration
+        api_keys_group = QGroupBox("API Keys")
+        api_keys_group.setStyleSheet("""
+        QGroupBox {
+            border: 1px solid #5E81AC;
+            margin-top: 0.5em;
+            padding-top: 0.5em;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 3px 0 3px;
+        }
+        """)
+        api_keys_layout = QVBoxLayout()
+
+        self._api_key_fields = {}
+        api_key_defs = [
+            ("GROQ_API_KEY", "Groq API Key:"),
+            ("HF_API_KEY", "HuggingFace API Key:"),
+            ("HF_TOKEN", "HuggingFace Token (NeMo/WhisperX):"),
+            ("DEEPGRAM_API_KEY", "Deepgram API Key:"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", "Google Credentials JSON Path:"),
+        ]
+
+        for env_var, label_text in api_key_defs:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label_text))
+            field = QLineEdit()
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setPlaceholderText(f"Set {env_var}")
+            existing = os.environ.get(env_var, "")
+            if existing:
+                field.setText(existing)
+            row.addWidget(field, 1)
+
+            toggle_btn = QPushButton("Show")
+            toggle_btn.setFixedWidth(50)
+            toggle_btn.setCheckable(True)
+            toggle_btn.toggled.connect(lambda checked, f=field: f.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            ))
+            toggle_btn.toggled.connect(lambda checked, b=toggle_btn: b.setText("Hide" if checked else "Show"))
+            row.addWidget(toggle_btn)
+
+            set_btn = QPushButton("Set")
+            set_btn.setFixedWidth(40)
+            set_btn.clicked.connect(lambda _, ev=env_var, f=field: self._set_env_key(ev, f.text()))
+            row.addWidget(set_btn)
+
+            api_keys_layout.addLayout(row)
+            self._api_key_fields[env_var] = field
+
+        api_keys_group.setLayout(api_keys_layout)
+        device_group.addWidget(api_keys_group)
         layout.addLayout(device_group)
 
         # YouTube URL input
@@ -911,12 +996,65 @@ class TranscriptionApp(QWidget):
         self.setLayout(layout)
         self.setWindowTitle('WhisperSubs - Transcription App')
 
+    def _populate_adapter_combo(self):
+        """Populate adapter/provider filter combo."""
+        self._all_adapter_items = ["All Providers"]
+        try:
+            import model as _m
+            ctx = _m.get_context()
+            for info in ctx.list_available_adapters():
+                prefix = info['prefix']
+                if prefix == '(local/faster-whisper)':
+                    self._all_adapter_items.append("Local (faster-whisper)")
+                else:
+                    label = _PROVIDER_LABELS.get(prefix, prefix.upper())
+                    avail = " [unavailable]" if not info['available'] else ""
+                    self._all_adapter_items.append(f"{label}{avail}")
+        except Exception:
+            self._all_adapter_items.extend(["Local (faster-whisper)", "Groq", "HuggingFace", "Deepgram"])
+        self.adapter_combo.addItems(self._all_adapter_items)
+
+    def _on_adapter_filter_changed(self):
+        """Re-populate model combo when adapter filter changes."""
+        self._populate_model_combo()
+
     def _populate_model_combo(self):
-        """Populate model combo with grouped providers and separator headers."""
-        items = get_flat_display_list()
-        self.model_combo.addItems(items)
+        """Populate model combo with grouped providers, optionally filtered."""
+        current = self.model_combo.currentText()
+        self.model_combo.clear()
+
+        filter_index = self.adapter_combo.currentIndex()
+        show_all = filter_index == 0
+
+        grouped = get_flat_display_list()
+        if show_all:
+            self.model_combo.addItems(grouped)
+        else:
+            adapter_name = self._all_adapter_items[filter_index] if filter_index < len(self._all_adapter_items) else ""
+            adapter_name_clean = adapter_name.replace(" [unavailable]", "")
+            in_section = False
+            for item in grouped:
+                if _is_sep(item):
+                    in_section = adapter_name_clean in item
+                    if in_section:
+                        self.model_combo.addItems([item])
+                    continue
+                if in_section:
+                    self.model_combo.addItems([item])
+
         self.model_combo.setItemDelegate(SeparatorDelegate(self.model_combo))
-        self.model_combo.setCurrentIndex(1) if len(items) > 1 else None
+
+        if current:
+            idx = self.model_combo.findText(current)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            elif not _is_sep(current):
+                self.model_combo.setCurrentText(current)
+        elif self.model_combo.count() > 1:
+            for i in range(self.model_combo.count()):
+                if not _is_sep(self.model_combo.itemText(i)):
+                    self.model_combo.setCurrentIndex(i)
+                    break
 
     def _get_selected_model(self) -> str:
         """Get the currently selected model, skipping separators."""
@@ -1286,9 +1424,14 @@ class TranscriptionApp(QWidget):
             self.cookie_file_path.setText(cookie_file)
             self.use_cookies_check.setChecked(True)
 
+    def _set_env_key(self, env_var: str, value: str):
+        os.environ[env_var] = value
+        self.log(f"Set {env_var} ({'****' if value else 'empty'})")
+
     def save_settings(self):
         settings = {
             'model': self._get_selected_model(),
+            'adapter_filter': self.adapter_combo.currentIndex(),
             'language': self.lang_combo.currentText(),
             'device': 'cuda' if self.gpu_radio.isChecked() else 'cpu',
             'compute_type': self.compute_combo.currentText(),
@@ -1320,7 +1463,8 @@ class TranscriptionApp(QWidget):
             'force': self.force_check.isChecked(),
             'replace_subs': self.replace_subs_check.isChecked(),
             'backup_subs': self.backup_subs_check.isChecked(),
-            'retry': self.retry_check.isChecked()
+            'retry': self.retry_check.isChecked(),
+            'api_keys': {k: v.text() for k, v in self._api_key_fields.items()},
         }
 
         try:
@@ -1334,126 +1478,141 @@ class TranscriptionApp(QWidget):
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
+            else:
+                return
 
-                if 'model' in settings:
-                    index = self.model_combo.findText(settings['model'])
-                    if index >= 0:
-                        self.model_combo.setCurrentIndex(index)
+            if 'model' in settings:
+                index = self.model_combo.findText(settings['model'])
+                if index >= 0:
+                    self.model_combo.setCurrentIndex(index)
+                elif settings['model']:
+                    self.model_combo.setCurrentText(settings['model'])
 
-                if 'language' in settings:
-                    index = self.lang_combo.findText(settings['language'])
-                    if index >= 0:
-                        self.lang_combo.setCurrentIndex(index)
+            if 'adapter_filter' in settings:
+                idx = settings['adapter_filter']
+                if 0 <= idx < self.adapter_combo.count():
+                    self.adapter_combo.setCurrentIndex(idx)
 
-                if 'device' in settings:
-                    self.gpu_radio.setChecked(settings['device'] == 'cuda')
-                    self.cpu_radio.setChecked(settings['device'] == 'cpu')
+            if 'language' in settings:
+                index = self.lang_combo.findText(settings['language'])
+                if index >= 0:
+                    self.lang_combo.setCurrentIndex(index)
 
-                if 'compute_type' in settings:
-                    index = self.compute_combo.findText(settings['compute_type'])
-                    if index >= 0:
-                        self.compute_combo.setCurrentIndex(index)
+            if 'device' in settings:
+                self.gpu_radio.setChecked(settings['device'] == 'cuda')
+                self.cpu_radio.setChecked(settings['device'] == 'cpu')
 
-                if 'force_device' in settings:
-                    self.force_device_check.setChecked(settings['force_device'])
+            if 'compute_type' in settings:
+                index = self.compute_combo.findText(settings['compute_type'])
+                if index >= 0:
+                    self.compute_combo.setCurrentIndex(index)
 
-                if 'use_whisper' in settings:
-                    self.whisper_radio.setChecked(settings['use_whisper'])
-                    self.faster_whisper_radio.setChecked(not settings['use_whisper'])
+            if 'force_device' in settings:
+                self.force_device_check.setChecked(settings['force_device'])
 
-                if 'vad_enabled' in settings:
-                    self.vad_enabled.setChecked(settings['vad_enabled'])
+            if 'use_whisper' in settings:
+                self.whisper_radio.setChecked(settings['use_whisper'])
+                self.faster_whisper_radio.setChecked(not settings['use_whisper'])
 
-                if 'vad_silence_duration' in settings:
-                    self.vad_silence_duration.setText(settings['vad_silence_duration'])
+            if 'vad_enabled' in settings:
+                self.vad_enabled.setChecked(settings['vad_enabled'])
 
-                if 'diarization_enabled' in settings:
-                    self.diarization_enabled.setChecked(settings['diarization_enabled'])
+            if 'vad_silence_duration' in settings:
+                self.vad_silence_duration.setText(settings['vad_silence_duration'])
 
-                if 'min_speakers' in settings:
-                    self.min_speakers.setText(settings['min_speakers'])
+            if 'diarization_enabled' in settings:
+                self.diarization_enabled.setChecked(settings['diarization_enabled'])
 
-                if 'max_speakers' in settings:
-                    self.max_speakers.setText(settings['max_speakers'])
+            if 'min_speakers' in settings:
+                self.min_speakers.setText(settings['min_speakers'])
 
-                if 'start_time' in settings:
-                    self.start_time.setText(settings['start_time'])
+            if 'max_speakers' in settings:
+                self.max_speakers.setText(settings['max_speakers'])
 
-                if 'end_time' in settings:
-                    self.end_time.setText(settings['end_time'])
+            if 'start_time' in settings:
+                self.start_time.setText(settings['start_time'])
 
-                if 'enable_logging' in settings:
-                    self.enable_logging_check.setChecked(settings['enable_logging'])
+            if 'end_time' in settings:
+                self.end_time.setText(settings['end_time'])
 
-                if 'clipboard_monitoring' in settings:
-                    self.clipboard_monitoring = settings['clipboard_monitoring']
-                    self.clipboard_toggle.setChecked(settings['clipboard_monitoring'])
-                    self.clipboard_toggle.setText(f'Clipboard Monitoring: {"ON" if settings["clipboard_monitoring"] else "OFF"}')
+            if 'enable_logging' in settings:
+                self.enable_logging_check.setChecked(settings['enable_logging'])
 
-                if 'sort_oldest' in settings:
-                    self.sort_oldest_check.setChecked(settings['sort_oldest'])
+            if 'clipboard_monitoring' in settings:
+                self.clipboard_monitoring = settings['clipboard_monitoring']
+                self.clipboard_toggle.setChecked(settings['clipboard_monitoring'])
+                self.clipboard_toggle.setText(f'Clipboard Monitoring: {"ON" if settings["clipboard_monitoring"] else "OFF"}')
 
-                if 'reverse_order' in settings:
-                    self.reverse_order_check.setChecked(settings['reverse_order'])
+            if 'sort_oldest' in settings:
+                self.sort_oldest_check.setChecked(settings['sort_oldest'])
 
-                if 'youtube_urls' in settings:
-                    self.youtube_input.setPlainText(settings['youtube_urls'])
+            if 'reverse_order' in settings:
+                self.reverse_order_check.setChecked(settings['reverse_order'])
 
-                if 'selected_directory' in settings and settings['selected_directory']:
-                    self.selected_directory = settings['selected_directory']
-                    self.dir_label.setText(f"Selected directory: {self.selected_directory}")
+            if 'youtube_urls' in settings:
+                self.youtube_input.setPlainText(settings['youtube_urls'])
 
-                if 'selected_files' in settings:
-                    self.selected_files = settings['selected_files']
-                    self.file_list_widget.clear()
-                    for file in self.selected_files:
-                        self.file_list_widget.addItem(file)
-                    self.update_file_label()
-                    self.update_file_buttons_state()
+            if 'selected_directory' in settings and settings['selected_directory']:
+                self.selected_directory = settings['selected_directory']
+                self.dir_label.setText(f"Selected directory: {self.selected_directory}")
 
-                if 'use_cookies' in settings:
-                    self.use_cookies_check.setChecked(settings['use_cookies'])
+            if 'selected_files' in settings:
+                self.selected_files = settings['selected_files']
+                self.file_list_widget.clear()
+                for file in self.selected_files:
+                    self.file_list_widget.addItem(file)
+                self.update_file_label()
+                self.update_file_buttons_state()
 
-                if 'browser' in settings:
-                    index = self.browser_combo.findText(settings['browser'])
-                    if index >= 0:
-                        self.browser_combo.setCurrentIndex(index)
+            if 'use_cookies' in settings:
+                self.use_cookies_check.setChecked(settings['use_cookies'])
 
-                if 'cookie_file' in settings:
-                    self.cookie_file_path.setText(settings['cookie_file'])
+            if 'browser' in settings:
+                index = self.browser_combo.findText(settings['browser'])
+                if index >= 0:
+                    self.browser_combo.setCurrentIndex(index)
 
-                if 'enable_tray' in settings:
-                    self.enable_tray_check.setChecked(settings['enable_tray'])
+            if 'cookie_file' in settings:
+                self.cookie_file_path.setText(settings['cookie_file'])
 
-                if 'auto_hide' in settings:
-                    self.auto_hide_check.setChecked(settings['auto_hide'])
+            if 'enable_tray' in settings:
+                self.enable_tray_check.setChecked(settings['enable_tray'])
 
-                if 'cpu_threads' in settings:
-                    index = self.thread_combo.findText(settings['cpu_threads'])
-                    if index >= 0:
-                        self.thread_combo.setCurrentIndex(index)
+            if 'auto_hide' in settings:
+                self.auto_hide_check.setChecked(settings['auto_hide'])
 
-                if 'process_priority' in settings:
-                    index = self.priority_combo.findText(settings['process_priority'])
-                    if index >= 0:
-                        self.priority_combo.setCurrentIndex(index)
+            if 'cpu_threads' in settings:
+                index = self.thread_combo.findText(settings['cpu_threads'])
+                if index >= 0:
+                    self.thread_combo.setCurrentIndex(index)
 
-                if 'temperature_auto' in settings:
-                    self.temperature_auto_check.setChecked(settings['temperature_auto'])
-                if 'temperature_value' in settings:
-                    self.temperature_slider.setValue(settings['temperature_value'])
-                    temp = settings['temperature_value'] / 10.0
-                    self.temperature_value_label.setText(f"{temp:.1f}")
-                    self.toggle_temperature_slider(None)
+            if 'process_priority' in settings:
+                index = self.priority_combo.findText(settings['process_priority'])
+                if index >= 0:
+                    self.priority_combo.setCurrentIndex(index)
 
-                if 'force' in settings:
-                    self.force_check.setChecked(settings['force'])
-                if 'replace_subs' in settings:
-                    self.replace_subs_check.setChecked(settings['replace_subs'])
-                if 'backup_subs' in settings:
-                    self.backup_subs_check.setChecked(settings['backup_subs'])
-                if 'retry' in settings:
-                    self.retry_check.setChecked(settings['retry'])
+            if 'temperature_auto' in settings:
+                self.temperature_auto_check.setChecked(settings['temperature_auto'])
+            if 'temperature_value' in settings:
+                self.temperature_slider.setValue(settings['temperature_value'])
+                temp = settings['temperature_value'] / 10.0
+                self.temperature_value_label.setText(f"{temp:.1f}")
+                self.toggle_temperature_slider(None)
+
+            if 'force' in settings:
+                self.force_check.setChecked(settings['force'])
+            if 'replace_subs' in settings:
+                self.replace_subs_check.setChecked(settings['replace_subs'])
+            if 'backup_subs' in settings:
+                self.backup_subs_check.setChecked(settings['backup_subs'])
+            if 'retry' in settings:
+                self.retry_check.setChecked(settings['retry'])
+
+            if 'api_keys' in settings:
+                for env_var, value in settings['api_keys'].items():
+                    if env_var in self._api_key_fields and value:
+                        self._api_key_fields[env_var].setText(value)
+                        os.environ[env_var] = value
 
         except Exception as e:
             self.log(f"Error loading settings: {str(e)}")

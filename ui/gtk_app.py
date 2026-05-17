@@ -153,8 +153,14 @@ unfinished_srt = r"{srt_file}.unfinished.srt"
 segment_queue = queue.Queue(maxsize=100)
 write_event = threading.Event()
 stop_event = threading.Event()
+loop_window = []
+loop_threshold_seconds = 60.0
+loop_consecutive_required = 5
+loop_detected = False
+loop_detect_file = unfinished_srt.replace(".srt", ".loop_detect")
 
 def write_segments():
+    global loop_detected
     current_index = 1
     with open(unfinished_srt, "w", encoding="utf-8") as f:
         while not stop_event.is_set() or not segment_queue.empty():
@@ -162,6 +168,25 @@ def write_segments():
                 segment = segment_queue.get(timeout=0.5)
                 start_time = format_timestamp(segment.start)
                 end_time = format_timestamp(segment.end)
+
+                text_normalized = segment.text.strip().lower()
+                if text_normalized:
+                    loop_window.append((text_normalized, segment.end))
+                    while len(loop_window) > loop_consecutive_required * 2:
+                        loop_window.pop(0)
+
+                    if len(loop_window) >= loop_consecutive_required:
+                        recent = loop_window[-loop_consecutive_required:]
+                        if all(t == recent[0][0] for t, _ in recent):
+                            first_ts = recent[0][1]
+                            last_ts = recent[-1][1]
+                            if last_ts - first_ts >= loop_threshold_seconds:
+                                loop_detected = True
+                                log_message(f"LOOP DETECTED: same text repeated for {{last_ts - first_ts:.1f}}s from {{first_ts:.1f}}s")
+                                with open(loop_detect_file, "w") as lf:
+                                    lf.write(str(first_ts))
+                                stop_event.set()
+                                break
 
                 f.write(f"{{current_index}}\\n")
                 f.write(f"{{start_time}} --> {{end_time}}\\n")
@@ -203,6 +228,10 @@ try:
 
     stop_event.set()
     writer_thread.join(timeout=30)
+
+    if loop_detected:
+        log_message("Loop detected — stopping transcription. Restart to resume from loop point.")
+        exit(42)
 
     if os.path.exists(unfinished_srt) and os.path.getsize(unfinished_srt) > 10:
             if os.path.islink(r"{srt_file}"):

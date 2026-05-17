@@ -40,6 +40,12 @@ logging.basicConfig()
 logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
 
 
+class LoopDetectedError(Exception):
+    def __init__(self, timestamp: float, message: str = ""):
+        self.timestamp = timestamp
+        super().__init__(message or f"Transcription loop detected at {timestamp:.1f}s")
+
+
 # ============ ADAPTER-BASED TRANSCRIPTION (for prefixed models) ============
 
 def _transcribe_with_adapter(
@@ -91,6 +97,12 @@ def _transcribe_with_adapter(
                 seg.start += start_offset_seconds
                 seg.end += start_offset_seconds
 
+        loop_window = []
+        loop_threshold_seconds = 60.0
+        loop_consecutive_required = 5
+        loop_detected = False
+        loop_timestamp = 0.0
+
         with open(real_srt, 'w', encoding='utf-8') as srt:
             srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write("TRANSCRIPTION METADATA\n")
@@ -101,11 +113,33 @@ def _transcribe_with_adapter(
             srt.write("\n")
 
             for i, segment in enumerate(segments, start=1):
+                text_normalized = segment.text.strip().lower()
+                if text_normalized:
+                    loop_window.append((text_normalized, segment.end))
+                    while len(loop_window) > loop_consecutive_required * 2:
+                        loop_window.pop(0)
+                    if len(loop_window) >= loop_consecutive_required:
+                        recent = loop_window[-loop_consecutive_required:]
+                        if all(t == recent[0][0] for t, _ in recent):
+                            first_ts = recent[0][1]
+                            last_ts = recent[-1][1]
+                            if last_ts - first_ts >= loop_threshold_seconds:
+                                loop_detected = True
+                                loop_timestamp = first_ts
+                                write(f"Loop detected: same text repeated for {last_ts - first_ts:.1f}s from {first_ts:.1f}s")
+                                break
+
                 start_time = format_timestamp(segment.start if segment.start > 0 else 0)
                 end_time = format_timestamp(segment.end if segment.end > 0 else 0)
                 srt.write(f"{i}\n")
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
+
+        if loop_detected:
+            write(f"Loop detected at {loop_timestamp:.1f}s, stopping. SRT saved up to loop point.")
+            _trim_srt_to_timestamp(real_srt, loop_timestamp)
+            segments = [s for s in segments if s.end <= loop_timestamp]
+            raise LoopDetectedError(loop_timestamp, f"Loop detected at {loop_timestamp:.1f}s during adapter transcription")
 
         metadata_file = os.path.splitext(srt_file)[0] + ".metadata.json"
         try:
@@ -257,6 +291,35 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     except Exception as e:
         print(f"Could not parse SRT for resume info: {e}")
         return 0.0, 0
+
+
+def _trim_srt_to_timestamp(srt_path: str, max_end_seconds: float):
+    if not os.path.exists(srt_path):
+        return
+    try:
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        blocks = content.split('\n\n')
+        kept = []
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 2:
+                time_line = lines[1]
+                match = re.search(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
+                if match:
+                    end_str = match.group(2)
+                    end_sec = srt_time_to_seconds(end_str)
+                    if end_sec <= max_end_seconds:
+                        kept.append(block)
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            for i, block in enumerate(kept, start=1):
+                lines = block.strip().split('\n')
+                if lines and lines[0].strip().isdigit():
+                    lines[0] = str(i)
+                f.write('\n'.join(lines) + '\n\n')
+    except Exception as e:
+        print(f"Warning: Could not trim SRT file: {e}")
+
 
 def dict_to_segment(data: Dict[str, Any]) -> Segment:
     """Convert a dictionary to a Segment dataclass instance."""
@@ -481,6 +544,9 @@ def transcribe_audio(
                 vad_params=vad_params,
                 mpv_ipc_reload=mpv_ipc_reload,
             )
+        except LoopDetectedError as e:
+            write(f"Loop detected at {e.timestamp:.1f}s — partial SRT saved. Try a different model.")
+            return False
         finally:
             if audio_to_transcribe != audio_file and os.path.exists(audio_to_transcribe):
                 try:
@@ -649,11 +715,11 @@ def transcribe_audio(
             temp_base = os.path.splitext(temp_srt)[0]
             for ext in ['.sh', '.bat']:
                 temp_helper = f"{temp_base}{ext}"
-                if os.path.exists(temp_helper):
-                    try:
-                        os.remove(temp_helper)
-                    except Exception as e:
-                        print(f"Warning: Could not remove temporary file {temp_helper}: {e}")
+            if os.path.exists(temp_helper):
+                try:
+                    os.remove(temp_helper)
+                except Exception as e:
+                    print(f"Warning: Could not remove temporary file {temp_helper}: {e}")
             
             return True
 
@@ -818,24 +884,14 @@ def process_create(
     return False
 
 def try_transcribe(
-    file: str,
-    current_model: str,
-    srt_file: str,
-    language: str,
-    device: str,
-    compute_type: str,
-    force_device: bool,
-    write: Callable,
-    cpu_threads: Optional[int] = None,
-    vad_filter: bool = False,
-    vad_params: Optional[Dict[str, Any]] = None,
-    diarization: bool = False,
-    diarization_params: Optional[Dict[str, Any]] = None,
-    temperature: float = 0,
-    merge_lines: bool = False,
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    mpv_ipc_reload: Optional[Callable] = None
+    file: str, current_model: str, srt_file: str, language: str,
+    device: str, compute_type: str, force_device: bool, write: Callable,
+    cpu_threads: Optional[int] = None, vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None, diarization: bool = False,
+    diarization_params: Optional[Dict[str, Any]] = None, temperature: float = 0,
+    merge_lines: bool = False, start_time: Optional[str] = None,
+    end_time: Optional[str] = None, mpv_ipc_reload: Optional[Callable] = None,
+    _loop_retry_count: int = 0
 ) -> bool:
     """Try transcription with given parameters, supporting resume."""
     script_path = None
@@ -1054,6 +1110,10 @@ mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
 start_offset_seconds = {start_offset_seconds}
 segments_written = 0
 audio_duration = {audio_duration}
+loop_detect_file = r"{unfinished_srt}".replace(".srt", ".loop_detect")
+loop_window = []
+loop_threshold_seconds = 60.0
+loop_consecutive_required = 5
 
 def write_segments():
     global segments_written
@@ -1080,6 +1140,23 @@ def write_segments():
                 segments_written += 1
                 segment_queue.task_done()
                 write_event.set()
+
+                text_normalized = segment.text.strip().lower()
+                if text_normalized:
+                    loop_window.append((text_normalized, adjusted_end))
+                    while len(loop_window) > loop_consecutive_required * 2:
+                        loop_window.pop(0)
+                    if len(loop_window) >= loop_consecutive_required:
+                        recent = loop_window[-loop_consecutive_required:]
+                        if all(t == recent[0][0] for t, _ in recent):
+                            first_ts = recent[0][1]
+                            last_ts = recent[-1][1]
+                            if last_ts - first_ts >= loop_threshold_seconds:
+                                print(f"Loop detected: same text repeated for {{last_ts - first_ts:.1f}}s from {{first_ts:.1f}}s")
+                                with open(loop_detect_file, "w") as lf:
+                                    lf.write(str(first_ts))
+                                stop_event.set()
+                                os._exit(42)
 
                 # Reload subtitles in MPV via IPC every 10 segments
                 if segments_written % 10 == 0 and mpv_ipc_reload is not None:
@@ -1257,9 +1334,45 @@ finally:
         stdout_thread.start(); stderr_thread.start()
         
         exit_code = process.wait()
-        
+
         stdout_thread.join(timeout=5); stderr_thread.join(timeout=5)
-        
+
+        if exit_code == 42:
+            loop_detect_file = unfinished_srt.replace('.srt', '.loop_detect')
+            loop_timestamp = 0.0
+            if os.path.exists(loop_detect_file):
+                try:
+                    with open(loop_detect_file, 'r') as lf:
+                        loop_timestamp = float(lf.read().strip())
+                    os.remove(loop_detect_file)
+                except Exception as e:
+                    write(f"Warning: Could not read loop detect file: {e}")
+
+            if loop_timestamp > 0:
+                write(f"Loop detected at {loop_timestamp:.1f}s, trimming SRT and retrying...")
+                _trim_srt_to_timestamp(unfinished_srt, loop_timestamp)
+
+            if _loop_retry_count < 2:
+                write(f"Retrying transcription (attempt {_loop_retry_count + 1}/2)...")
+                return try_transcribe(
+                    file, current_model, srt_file, language, device, compute_type,
+                    force_device, write, cpu_threads, vad_filter, vad_params,
+                    diarization, diarization_params, temperature, merge_lines,
+                    start_time, end_time, mpv_ipc_reload,
+                    _loop_retry_count=_loop_retry_count + 1
+                )
+            else:
+                write("Max loop retries reached, keeping partial SRT")
+                if os.path.exists(unfinished_srt) and os.path.getsize(unfinished_srt) > 10:
+                    if os.path.islink(srt_file):
+                        os.remove(srt_file)
+                    if os.path.exists(srt_file):
+                        os.remove(srt_file)
+                    os.rename(unfinished_srt, srt_file)
+                    make_files(srt_file)
+                    return True
+                return False
+
         if exit_code == 0 and os.path.exists(srt_file) and os.path.getsize(srt_file) > 10:
             write(f"Successfully created {srt_file}")
             make_files(srt_file)

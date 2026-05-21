@@ -98,8 +98,8 @@ def _transcribe_with_adapter(
                 seg.end += start_offset_seconds
 
         loop_window = []
-        loop_threshold_seconds = 60.0
-        loop_consecutive_required = 5
+        loop_consecutive_required = 10
+        loop_threshold_seconds = 10.0
         loop_detected = False
         loop_timestamp = 0.0
 
@@ -112,22 +112,22 @@ def _transcribe_with_adapter(
             srt.write(f"Source: {os.path.basename(audio_file)}\n")
             srt.write("\n")
 
-            for i, segment in enumerate(segments, start=1):
-                text_normalized = segment.text.strip().lower()
-                if text_normalized:
-                    loop_window.append((text_normalized, segment.end))
-                    while len(loop_window) > loop_consecutive_required * 2:
-                        loop_window.pop(0)
-                    if len(loop_window) >= loop_consecutive_required:
-                        recent = loop_window[-loop_consecutive_required:]
-                        if all(t == recent[0][0] for t, _ in recent):
-                            first_ts = recent[0][1]
-                            last_ts = recent[-1][1]
-                            if last_ts - first_ts >= loop_threshold_seconds:
-                                loop_detected = True
-                                loop_timestamp = first_ts
-                                write(f"Loop detected: same text repeated for {last_ts - first_ts:.1f}s from {first_ts:.1f}s")
-                                break
+        for i, segment in enumerate(segments, start=1):
+            text_normalized = segment.text.strip().lower()
+            if text_normalized:
+                loop_window.append((text_normalized, segment.end))
+                while len(loop_window) > loop_consecutive_required * 2:
+                    loop_window.pop(0)
+                if len(loop_window) >= loop_consecutive_required:
+                    recent = loop_window[-loop_consecutive_required:]
+                    if all(t == recent[0][0] for t, _ in recent):
+                        first_ts = recent[0][1]
+                        last_ts = recent[-1][1]
+                        if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
+                            loop_detected = True
+                            loop_timestamp = first_ts
+                            write(f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s")
+                            break
 
                 start_time = format_timestamp(segment.start if segment.start > 0 else 0)
                 end_time = format_timestamp(segment.end if segment.end > 0 else 0)
@@ -617,19 +617,17 @@ def transcribe_audio(
         # Process in smaller chunks with progress tracking
         result_segments, info = whisper_model.transcribe(**transcribe_params)
 
-        # Convert segments generator to list for post-processing
-        segments_list = list(result_segments)
+        # Stream segments with real-time loop/hallucination detection
+        loop_window = []
+        loop_consecutive_required = 10
+        loop_threshold_seconds = 10.0
+        loop_detected = False
+        loop_timestamp = 0.0
+        segments_list = []
+        compression_fail_streak = 0
+        compression_fail_max = 50
 
-        write(f"Transcribed {len(segments_list)} segments, processing...")
-
-        # Apply post-processing to remove garbage segments
-        segments_list = filter_garbage_segments(segments_list)
-        segments_list = merge_adjacent_identical_segments(segments_list)
-        #segments_list = merge_segments(segments_list)
-
-        # Write to temporary file first with progress tracking and metadata
         with open(temp_srt, "w", encoding="utf-8") as srt:
-            # Write metadata header as SRT comments
             srt.write(f"1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write(f"TRANSCRIPTION METADATA\n")
             srt.write(f"Model: {model_name}\n")
@@ -646,19 +644,75 @@ def transcribe_audio(
             if cpu_threads:
                 srt.write(f"CPU Threads: {cpu_threads}\n")
             srt.write(f"\n")
-            
-            # Write actual subtitle segments
-            for i, segment in enumerate(segments_list, start=1):
-                start_time = format_timestamp(segment.start)
-                end_time = format_timestamp(segment.end)
-                srt.write(f"{i}\n")
-                srt.write(f"{start_time} --> {end_time}\n")
+
+            seg_idx = 0
+            for segment in result_segments:
+                # Track compression ratio failures from faster-whisper segments
+                if hasattr(segment, 'compression_ratio') and segment.compression_ratio > 2.4:
+                    compression_fail_streak += 1
+                else:
+                    compression_fail_streak = 0
+
+                # Apply garbage filter per-segment before writing
+                if is_garbage(segment):
+                    continue
+
+                # Merge with previous if identical text
+                if segments_list and segment.text.strip() == segments_list[-1].text.strip():
+                    segments_list[-1].end = segment.end
+                    continue
+
+                segments_list.append(segment)
+                seg_idx = len(segments_list)
+
+                # Real-time loop detection
+                text_normalized = segment.text.strip().lower()
+                if text_normalized:
+                    loop_window.append((text_normalized, segment.end))
+                    while len(loop_window) > loop_consecutive_required * 2:
+                        loop_window.pop(0)
+                    if len(loop_window) >= loop_consecutive_required:
+                        recent = loop_window[-loop_consecutive_required:]
+                        if all(t == recent[0][0] for t, _ in recent):
+                            first_ts = recent[0][1]
+                            last_ts = recent[-1][1]
+                            if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
+                                loop_detected = True
+                                loop_timestamp = first_ts
+                                write(f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s")
+                                break
+
+                # Also detect via compression ratio streak
+                if compression_fail_streak >= compression_fail_max:
+                    loop_detected = True
+                    loop_timestamp = segment.start
+                    write(f"Hallucination detected: {compression_fail_streak} consecutive compression ratio failures from {segment.start:.1f}s")
+                    break
+
+                start_ts = format_timestamp(segment.start)
+                end_ts = format_timestamp(segment.end)
+                srt.write(f"{seg_idx}\n")
+                srt.write(f"{start_ts} --> {end_ts}\n")
                 srt.write(f"{segment.text}\n\n")
                 srt.flush()
 
-                # Update progress tracker
                 if progress:
                     progress.update(segment.start, segment.end)
+
+        write(f"Transcribed {len(segments_list)} segments, processing...")
+
+        if loop_detected:
+            write(f"Loop/hallucination detected at {loop_timestamp:.1f}s — trimming SRT to that point")
+            _trim_srt_to_timestamp(temp_srt, loop_timestamp)
+            segments_list = [s for s in segments_list if s.end <= loop_timestamp]
+            # Save partial SRT before raising
+            if os.path.exists(temp_srt):
+                os.makedirs(os.path.dirname(original) or '.', exist_ok=True)
+                if os.path.exists(original):
+                    os.remove(original)
+                os.rename(temp_srt, original)
+                make_files(original)
+            raise LoopDetectedError(loop_timestamp, f"Loop/hallucination detected at {loop_timestamp:.1f}s during local transcription with {model_name}")
 
         # Final progress update
         if progress:
@@ -749,6 +803,11 @@ def transcribe_audio(
             if os.path.exists(temp_srt):
                 os.remove(temp_srt)
             return False
+
+    except LoopDetectedError as e:
+        write(f"Loop/hallucination detected at {e.timestamp:.1f}s — partial SRT saved up to loop point.")
+        make_files(original)
+        return False
 
 def format_timestamp(timestamp):
     """
@@ -1087,6 +1146,7 @@ class Segment:
     start: float
     end: float
     text: str
+    compression_ratio: float = 0.0
 
 def format_timestamp(seconds):
     hours = int(seconds // 3600)
@@ -1112,8 +1172,10 @@ segments_written = 0
 audio_duration = {audio_duration}
 loop_detect_file = r"{unfinished_srt}".replace(".srt", ".loop_detect")
 loop_window = []
-loop_threshold_seconds = 60.0
-loop_consecutive_required = 5
+loop_threshold_seconds = 10.0
+loop_consecutive_required = 10
+compression_fail_streak = 0
+compression_fail_max = 50
 
 def write_segments():
     global segments_written
@@ -1141,22 +1203,22 @@ def write_segments():
                 segment_queue.task_done()
                 write_event.set()
 
-                text_normalized = segment.text.strip().lower()
-                if text_normalized:
-                    loop_window.append((text_normalized, adjusted_end))
-                    while len(loop_window) > loop_consecutive_required * 2:
-                        loop_window.pop(0)
-                    if len(loop_window) >= loop_consecutive_required:
-                        recent = loop_window[-loop_consecutive_required:]
-                        if all(t == recent[0][0] for t, _ in recent):
-                            first_ts = recent[0][1]
-                            last_ts = recent[-1][1]
-                            if last_ts - first_ts >= loop_threshold_seconds:
-                                print(f"Loop detected: same text repeated for {{last_ts - first_ts:.1f}}s from {{first_ts:.1f}}s")
-                                with open(loop_detect_file, "w") as lf:
-                                    lf.write(str(first_ts))
-                                stop_event.set()
-                                os._exit(42)
+            text_normalized = segment.text.strip().lower()
+            if text_normalized:
+                loop_window.append((text_normalized, adjusted_end))
+                while len(loop_window) > loop_consecutive_required * 2:
+                    loop_window.pop(0)
+                if len(loop_window) >= loop_consecutive_required:
+                    recent = loop_window[-loop_consecutive_required:]
+                    if all(t == recent[0][0] for t, _ in recent):
+                        first_ts = recent[0][1]
+                        last_ts = recent[-1][1]
+                        if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
+                            print(f"Loop detected: '{{recent[0][0][:40]}}' repeated {{loop_consecutive_required}}+ times from {{first_ts:.1f}}s")
+                            with open(loop_detect_file, "w") as lf:
+                                lf.write(str(first_ts))
+                            stop_event.set()
+                            os._exit(42)
 
                 # Reload subtitles in MPV via IPC every 10 segments
                 if segments_written % 10 == 0 and mpv_ipc_reload is not None:
@@ -1221,16 +1283,31 @@ try:
 
     resume_offset = {resume_offset_seconds}
 
-    for segment in segments:
-        while segment_queue.full() and not stop_event.is_set():
-            time.sleep(0.1)
-        if stop_event.is_set(): break
+        for segment in segments:
+            while segment_queue.full() and not stop_event.is_set():
+                time.sleep(0.1)
+            if stop_event.is_set(): break
 
-        adjusted_segment = Segment(
-            start=segment.start + resume_offset,
-            end=segment.end + resume_offset,
-            text=segment.text
-        )
+            # Track compression ratio failures for hallucination detection
+            seg_cr = getattr(segment, 'compression_ratio', 0.0) or 0.0
+            if seg_cr > 2.4:
+                compression_fail_streak += 1
+            else:
+                compression_fail_streak = 0
+
+            if compression_fail_streak >= compression_fail_max:
+                print(f"Hallucination detected: {{compression_fail_streak}} consecutive compression ratio failures from {{segment.start:.1f}}s")
+                with open(loop_detect_file, "w") as lf:
+                    lf.write(str(segment.start + resume_offset))
+                stop_event.set()
+                os._exit(42)
+
+            adjusted_segment = Segment(
+                start=segment.start + resume_offset,
+                end=segment.end + resume_offset,
+                text=segment.text,
+                compression_ratio=seg_cr
+            )
         segment_queue.put(adjusted_segment)
         segments_count += 1
 
@@ -1265,10 +1342,10 @@ try:
     stop_event.set()
     writer_thread.join(timeout=30)
 
-            if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
-                if os.path.islink(r"{srt_file}"): os.remove(r"{srt_file}")
-                elif os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
-                os.rename(r"{unfinished_srt}", r"{srt_file}")
+    if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
+        if os.path.islink(r"{srt_file}"): os.remove(r"{srt_file}")
+        elif os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
+        os.rename(r"{unfinished_srt}", r"{srt_file}")
 
         # Recreate helper files for the final SRT file
         import transcribe

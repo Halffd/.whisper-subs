@@ -15,6 +15,7 @@ import time
 import shutil
 import threading
 import glob
+import random
 import pyperclip
 import yt_dlp
 import hashlib
@@ -1446,11 +1447,12 @@ def read_sources_from_file(filename):
     Read sources from a file, one per line, with optional model specifications.
 
     Format:
-    <url> [model_name_or_index]
+    <url_or_path> [model_name_or_index]
 
     Example:
     https://www.youtube.com/watch?v=example1 large-v3
     https://www.youtube.com/watch?v=example2 10
+    /path/to/local/audio.mp3 base
     https://www.youtube.com/watch?v=example3
     """
     try:
@@ -1461,18 +1463,17 @@ def read_sources_from_file(filename):
                 if not line or line.startswith('#'):
                     continue
 
-                # Split on whitespace, but keep URLs with spaces together
                 parts = line.split()
                 if not parts:
                     continue
 
-                # The first part is the URL, the rest is optional model name
                 url = parts[0]
                 model = parts[1] if len(parts) > 1 else None
 
-                # Basic URL validation
-                if not (url.startswith('http') or url.startswith('www.')):
-                    print(f"Warning: Line {i} doesn't appear to be a valid URL: {url}", file=sys.stderr)
+                is_url = url.startswith('http') or url.startswith('www.')
+                is_local = os.path.exists(os.path.expanduser(url))
+                if not is_url and not is_local:
+                    print(f"Warning: Line {i} doesn't appear to be a valid URL or local path: {url}", file=sys.stderr)
                     continue
 
                 sources.append({
@@ -1553,7 +1554,11 @@ Examples:
                             action='store_true',
                             help="Continue the last unfinished job.")
     action_group.add_argument('-p', '--process-file', nargs='?', const=PROCESS_FILE,
-                            help="Read sources from a file (one per line). If no file is specified, uses 'Youtube-Subs/process.txt'.")
+        help="Read sources from a file (one per line). If no file is specified, uses 'Youtube-Subs/process.txt'.")
+    action_group.add_argument('--shuffle', action='store_true',
+        help="Shuffle the input URLs/files randomly before processing.")
+    action_group.add_argument('--shift', action='store_true',
+        help="Create a shifted queue file (.shift suffix) when using -p. Rerunning shifts/updates that file.")
 
     # Processing options
     process_group = parser.add_argument_group('Processing Options')
@@ -1630,17 +1635,37 @@ Examples:
         job_or_source = job
     elif args.process_file is not None:
         try:
-            # Expand ~ in the file path
             process_file = os.path.expanduser(args.process_file)
             print(f"Reading sources from file: {process_file}")
-            sources = read_sources_from_file(process_file)
+
+            shift_file = None
+            if args.shift:
+                shift_file = process_file + '.shift'
+                if os.path.exists(shift_file):
+                    print(f"Resuming from shift file: {shift_file}")
+                    sources = read_sources_from_file(shift_file)
+                else:
+                    sources = read_sources_from_file(process_file)
+            else:
+                sources = read_sources_from_file(process_file)
             if not sources:
                 print(f"No valid sources found in {process_file}", file=sys.stderr)
                 return 1
 
-            # For process files, handle each source individually with its model
-            for source_info in sources:
-                # Use the model from source_info if present, otherwise use the default args.model
+            if args.shuffle:
+                random.shuffle(sources)
+                print(f"Shuffled {len(sources)} sources")
+
+            if args.shift and shift_file is not None:
+                with open(shift_file, 'w', encoding='utf-8') as sf:
+                    for s in sources:
+                        line = s['url']
+                        if s['model']:
+                            line += f" {s['model']}"
+                        sf.write(line + '\n')
+                print(f"Shift file written: {shift_file}")
+
+            for i, source_info in enumerate(sources):
                 source_model = source_info['model'] or args.model
                 if source_model is None:
                     print("Error: No model specified for source and no default model provided. Either specify a model in your process file or provide a model argument (e.g., 'wsub large -p').", file=sys.stderr)
@@ -1673,7 +1698,21 @@ Examples:
                 )
                 processor.process(source_info['url'])
 
-            return 0  # Exit early since we processed all files
+                if args.shift and shift_file is not None:
+                    remaining = sources[i + 1:]
+                    with open(shift_file, 'w', encoding='utf-8') as sf:
+                        for s in remaining:
+                            line = s['url']
+                            if s['model']:
+                                line += f" {s['model']}"
+                            sf.write(line + '\n')
+                    if remaining:
+                        print(f"Shifted queue: {len(remaining)} sources remaining")
+                    else:
+                        print("Shift queue empty, removing shift file")
+                        os.remove(shift_file)
+
+            return 0
         except Exception as e:
             print(f"Error reading process file: {e}", file=sys.stderr)
             return 1
@@ -1712,6 +1751,9 @@ Examples:
 
                 # Process clipboard content
                 sources = [line.strip() for line in clipboard_content.split('\n') if line.strip()]
+                if args.shuffle and len(sources) > 1:
+                    random.shuffle(sources)
+                    print(f"Shuffled {len(sources)} clipboard sources")
                 if len(sources) == 1:
                     print(f"Using source from clipboard: {sources[0]}")
                     job_or_source = sources[0]
@@ -1783,6 +1825,13 @@ Examples:
 
     # Only create processor for non-process-file cases (file processing handled in loop above)
     if not args.process_file:
+        # Shuffle multi-source input if requested
+        if args.shuffle and isinstance(job_or_source, str) and '\n' in job_or_source:
+            source_list = [l.strip() for l in job_or_source.split('\n') if l.strip()]
+            random.shuffle(source_list)
+            job_or_source = '\n'.join(source_list)
+            print(f"Shuffled {len(source_list)} sources")
+
         processor = WhisperSubs(
             model_name=model_to_use,
             device='cuda' if args.gpu else args.device,

@@ -625,7 +625,8 @@ def transcribe_audio(
         loop_timestamp = 0.0
         segments_list = []
         compression_fail_streak = 0
-        compression_fail_max = 50
+        compression_fail_first_ts = 0.0
+        compression_fail_max = 20
 
         with open(temp_srt, "w", encoding="utf-8") as srt:
             srt.write(f"1\n00:00:00,000 --> 00:00:00,000\n")
@@ -649,6 +650,8 @@ def transcribe_audio(
             for segment in result_segments:
                 # Track compression ratio failures from faster-whisper segments
                 if hasattr(segment, 'compression_ratio') and segment.compression_ratio > 2.4:
+                    if compression_fail_streak == 0:
+                        compression_fail_first_ts = segment.start
                     compression_fail_streak += 1
                 else:
                     compression_fail_streak = 0
@@ -685,8 +688,8 @@ def transcribe_audio(
                 # Also detect via compression ratio streak
                 if compression_fail_streak >= compression_fail_max:
                     loop_detected = True
-                    loop_timestamp = segment.start
-                    write(f"Hallucination detected: {compression_fail_streak} consecutive compression ratio failures from {segment.start:.1f}s")
+                    loop_timestamp = compression_fail_first_ts
+                    write(f"Hallucination detected: {compression_fail_streak} consecutive compression ratio failures starting from {compression_fail_first_ts:.1f}s")
                     break
 
                 start_ts = format_timestamp(segment.start)
@@ -1175,7 +1178,8 @@ loop_window = []
 loop_threshold_seconds = 10.0
 loop_consecutive_required = 10
 compression_fail_streak = 0
-compression_fail_max = 50
+compression_fail_first_ts = 0.0
+compression_fail_max = 20
 
 def write_segments():
     global segments_written
@@ -1291,14 +1295,16 @@ try:
             # Track compression ratio failures for hallucination detection
             seg_cr = getattr(segment, 'compression_ratio', 0.0) or 0.0
             if seg_cr > 2.4:
+                if compression_fail_streak == 0:
+                    compression_fail_first_ts = segment.start
                 compression_fail_streak += 1
             else:
                 compression_fail_streak = 0
 
             if compression_fail_streak >= compression_fail_max:
-                print(f"Hallucination detected: {{compression_fail_streak}} consecutive compression ratio failures from {{segment.start:.1f}}s")
+                print(f"Hallucination detected: {{compression_fail_streak}} consecutive compression ratio failures starting from {{compression_fail_first_ts:.1f}}s")
                 with open(loop_detect_file, "w") as lf:
-                    lf.write(str(segment.start + resume_offset))
+                    lf.write(str(compression_fail_first_ts + resume_offset))
                 stop_event.set()
                 os._exit(42)
 

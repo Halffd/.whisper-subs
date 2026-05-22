@@ -1207,32 +1207,32 @@ def write_segments():
                 segment_queue.task_done()
                 write_event.set()
 
-            text_normalized = segment.text.strip().lower()
-            if text_normalized:
-                loop_window.append((text_normalized, adjusted_end))
-                while len(loop_window) > loop_consecutive_required * 2:
-                    loop_window.pop(0)
-                if len(loop_window) >= loop_consecutive_required:
-                    recent = loop_window[-loop_consecutive_required:]
-                    if all(t == recent[0][0] for t, _ in recent):
-                        first_ts = recent[0][1]
-                        last_ts = recent[-1][1]
-                        if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
-                            print(f"Loop detected: '{{recent[0][0][:40]}}' repeated {{loop_consecutive_required}}+ times from {{first_ts:.1f}}s")
-                            with open(loop_detect_file, "w") as lf:
-                                lf.write(str(first_ts))
-                            stop_event.set()
-                            os._exit(42)
+                text_normalized = segment.text.strip().lower()
+                if text_normalized:
+                    loop_window.append((text_normalized, adjusted_end))
+                    while len(loop_window) > loop_consecutive_required * 2:
+                        loop_window.pop(0)
+                    if len(loop_window) >= loop_consecutive_required:
+                        recent = loop_window[-loop_consecutive_required:]
+                        if all(t == recent[0][0] for t, _ in recent):
+                            first_ts = recent[0][1]
+                            last_ts = recent[-1][1]
+                            if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
+                                print(f"Loop detected: '{{recent[0][0][:40]}}' repeated {{loop_consecutive_required}}+ times from {{first_ts:.1f}}s")
+                                with open(loop_detect_file, "w") as lf:
+                                    lf.write(str(first_ts))
+                                stop_event.set()
+                                os._exit(42)
 
-                # Reload subtitles in MPV via IPC every 10 segments
-                if segments_written % 10 == 0 and mpv_ipc_reload is not None:
-                    try:
-                        mpv_ipc_reload()
-                    except Exception as ipc_err:
-                        print(f"MPV IPC reload failed: {{ipc_err}}")
+                    # Reload subtitles in MPV via IPC every 10 segments
+                    if segments_written % 10 == 0 and mpv_ipc_reload is not None:
+                        try:
+                            mpv_ipc_reload()
+                        except Exception as ipc_err:
+                            print(f"MPV IPC reload failed: {{ipc_err}}")
 
-                if current_index % 10 == 0:
-                    print(f"Written {{current_index - {start_index} - 1}} new segments (total {{current_index-1}})")
+                    if current_index % 10 == 0:
+                        print(f"Written {{current_index - {start_index} - 1}} new segments (total {{current_index-1}})")
             except queue.Empty:
                 continue
             except Exception as e:
@@ -1287,33 +1287,33 @@ try:
 
     resume_offset = {resume_offset_seconds}
 
-        for segment in segments:
-            while segment_queue.full() and not stop_event.is_set():
-                time.sleep(0.1)
-            if stop_event.is_set(): break
+    for segment in segments:
+        while segment_queue.full() and not stop_event.is_set():
+            time.sleep(0.1)
+        if stop_event.is_set(): break
 
-            # Track compression ratio failures for hallucination detection
-            seg_cr = getattr(segment, 'compression_ratio', 0.0) or 0.0
-            if seg_cr > 2.4:
-                if compression_fail_streak == 0:
-                    compression_fail_first_ts = segment.start
-                compression_fail_streak += 1
-            else:
-                compression_fail_streak = 0
+        # Track compression ratio failures for hallucination detection
+        seg_cr = getattr(segment, 'compression_ratio', 0.0) or 0.0
+        if seg_cr > 2.4:
+            if compression_fail_streak == 0:
+                compression_fail_first_ts = segment.start
+            compression_fail_streak += 1
+        else:
+            compression_fail_streak = 0
 
-            if compression_fail_streak >= compression_fail_max:
-                print(f"Hallucination detected: {{compression_fail_streak}} consecutive compression ratio failures starting from {{compression_fail_first_ts:.1f}}s")
-                with open(loop_detect_file, "w") as lf:
-                    lf.write(str(compression_fail_first_ts + resume_offset))
-                stop_event.set()
-                os._exit(42)
+        if compression_fail_streak >= compression_fail_max:
+            print(f"Hallucination detected: {{compression_fail_streak}} consecutive compression ratio failures starting from {{compression_fail_first_ts:.1f}}s")
+            with open(loop_detect_file, "w") as lf:
+                lf.write(str(compression_fail_first_ts + resume_offset))
+            stop_event.set()
+            os._exit(42)
 
-            adjusted_segment = Segment(
-                start=segment.start + resume_offset,
-                end=segment.end + resume_offset,
-                text=segment.text,
-                compression_ratio=seg_cr
-            )
+        adjusted_segment = Segment(
+            start=segment.start + resume_offset,
+            end=segment.end + resume_offset,
+            text=segment.text,
+            compression_ratio=seg_cr
+        )
         segment_queue.put(adjusted_segment)
         segments_count += 1
 

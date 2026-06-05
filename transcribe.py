@@ -24,6 +24,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from whisper_model_chooser import WhisperModelChooser
+from helper_files import make_files, cleanup_unfinished
 
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
@@ -768,17 +769,9 @@ def transcribe_audio(
             except Exception as e:
                 write(f"Warning: Could not create metadata file: {e}")
 
-            # Clean up any temporary helper files
-            temp_base = os.path.splitext(temp_srt)[0]
-            for ext in ['.sh', '.bat']:
-                temp_helper = f"{temp_base}{ext}"
-            if os.path.exists(temp_helper):
-                try:
-                    os.remove(temp_helper)
-                except Exception as e:
-                    print(f"Warning: Could not remove temporary file {temp_helper}: {e}")
-            
-            return True
+        cleanup_unfinished(original)
+
+        return True
 
         
     except RuntimeError as e:
@@ -1354,8 +1347,10 @@ try:
         os.rename(r"{unfinished_srt}", r"{srt_file}")
 
         # Recreate helper files for the final SRT file
-        import transcribe
-        transcribe.make_files(r"{srt_file}")
+        import sys as _sys
+        _sys.path.insert(0, r"{os.path.dirname(os.path.abspath(__file__))}")
+        import helper_files as _hf
+        _hf.make_files(r"{srt_file}")
         
         # Create JSON metadata file
         import json
@@ -1484,80 +1479,6 @@ finally:
         except Exception as e:
             write(f"Warning: Could not remove temporary file: {e}")
 
-def make_files(srt_file, url=None):
-    """
-    Create helper files (HTML, .sh, .bat) for the given SRT file.
-    Handles both finished and unfinished transcriptions.
-    
-    Args:
-        srt_file (str): Path to the SRT file
-        url (str, optional): URL to use for helper files. If not provided, will try to extract from HTML.
-    """
-    if not srt_file:
-        print("No SRT file provided")
-        return
-    try:
-        print(f"Creating helper files for {srt_file}")
-        if not os.path.exists(srt_file):
-            # Create an empty file if it doesn't exist
-            os.makedirs(os.path.dirname(srt_file) or '.', exist_ok=True)
-            with open(srt_file, 'w', encoding='utf-8') as f:
-                f.write('Transcription in progress...')
-        
-        dir_path = os.path.dirname(srt_file)
-        base_name = os.path.splitext(os.path.basename(srt_file))[0]
-        
-        # Handle both finished and unfinished files
-        is_unfinished = '.unfinished' in base_name
-        clean_base = base_name.replace('.unfinished', '') if is_unfinished else base_name
-        print(f"Base name: {base_name}, Clean base: {clean_base}")
-        print(f"Dir path: {dir_path}")
-        # Create directory if it doesn't exist
-        os.makedirs(dir_path, exist_ok=True)
-        
-        # If URL was provided, use it directly
-        if url:
-            print(f"Using provided URL: {url}")
-            create_helper_files(dir_path, srt_file, url)
-            return
-            
-        # For unfinished files without URL, try to extract video ID from filename
-        if is_unfinished:
-            # Extract video ID from the filename if possible
-            video_id = 'video_id_placeholder'  # Default if we can't extract
-            try:
-                # Try to get the YouTube video ID from the URL if it exists in the filename
-                import re
-                match = re.search(r'[?&]v=([^&\s]+)', base_name)
-                if match:
-                    video_id = match.group(1)
-                else:
-                    # If no URL in filename, try to use the first part of the filename
-                    video_id = base_name.split('_')[0]
-                    if len(video_id) > 20:  # Probably not a video ID if too long
-                        video_id = 'video_id_placeholder'
-            except:
-                pass
-        else:
-            # For finished files, try to get URL from HTML file
-            html_file = os.path.join(dir_path, f"{clean_base}.htm")
-            
-            if os.path.exists(html_file):
-                try:
-                    print(f"Reading HTML file {html_file}")
-                    with open(html_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        import re
-                        match = re.search(r'URL=[\'"]([^\'"]+)[\'"]', content)
-                        if match:
-                            url = match.group(1)
-                            print(f"URL from HTML: {url}")
-                            create_helper_files(dir_path, srt_file, url)
-                except Exception as e:
-                    print(f"Error reading HTML file {html_file}: {e}")
-            
-    except Exception as e:
-        print(f"Error in make_files for {srt_file}: {e}")
 def write_srt_from_segments(segments, srt):
     """Writes the transcription segments to an SRT file."""
     for i, segment in enumerate(segments, start=1):
@@ -1638,71 +1559,6 @@ def merge_adjacent_identical_segments(segments: List[Segment]) -> List[Segment]:
         else:
             merged.append(s)
     return merged
-
-def create_helper_files(dir_path: str, subtitle_file: str, url: str) -> None:
-    """Create helper files (HTML redirect, batch file, shell script)"""
-    print(f"Creating helper files for {subtitle_file}")
-    try:
-        # Convert to absolute path
-        subtitle_file = os.path.abspath(subtitle_file)
-        base_name = os.path.splitext(os.path.basename(subtitle_file))[0].replace('.unfinished','')
-        print(f"Base name: {base_name}")
-        print(f"Dir path: {dir_path}")
-        print(f"URL: {url}")
-        
-        # Helper function to escape single quotes for shell scripts
-        def escape_shell_single_quotes(text: str) -> str:
-            """Escape single quotes for use in single-quoted shell strings."""
-            return text.replace("'", "'\\''")
-        
-        # HTML redirect (same as before)
-        html_file = os.path.join(dir_path, f"{base_name}.htm")
-        try:
-            with open(html_file, "w", encoding='utf-8') as f:
-                f.write(f"""<!DOCTYPE html>
-<html>
-<head><meta http-equiv="refresh" content="0; URL='{url}'" /></head>
-<body></body>
-</html>""")
-        except OSError as e:
-            print(f"OS error creating HTML file: {e}")
-        except Exception as e:
-            print(f"Error creating HTML file: {e}")
-        
-        # Shell script (.sh) - properly escape single quotes in paths
-        try:
-            sh_file = os.path.join(dir_path, f"{base_name}.sh")
-            linux_path = subtitle_file.replace("\\", "/")
-            escaped_url = escape_shell_single_quotes(url)
-            escaped_path = escape_shell_single_quotes(linux_path)
-            with open(sh_file, "w", encoding='utf-8') as f:
-                f.write(f"#!/bin/bash\nmpv '{escaped_url}' --pause --input-ipc-server=/tmp/mpvsocket --sub-file='{escaped_path}' $@\n")
-            os.chmod(sh_file, 0o755)
-        except OSError as e:
-            print(f"OS error creating shell script: {e}")
-        except Exception as e:
-            print(f"Error creating shell script: {e}")
-
-        # Batch file (.bat)
-        bat_file = os.path.join(dir_path, f"{base_name}.bat")
-        win_path = subtitle_file
-        print(f"Win path: {win_path}")
-        try:
-            if win_path.startswith("/home"):
-                win_path = f"C:\\Users{win_path[5:]}"
-            win_path = win_path.replace("/", "\\")
-            print(f"Win path after replacement: {win_path}")
-            with open(bat_file, "w", encoding="utf-8") as f:
-                f.write('@echo off\n'
-                    'setlocal DisableDelayedExpansion\n'
-                    f'mpv "{url}" --pause --input-ipc-server=/tmp/mpvsocket --sub-file="{win_path}"\n'
-                )
-        except OSError as e:
-            print(f"OS error creating batch file: {e}")
-        except Exception as e:
-            print(f"Error creating batch file: {e}")
-    except Exception as e:
-        print(f"Error creating helper files: {e}")
 
 if __name__ == "__main__":
     if sys.argv[1] == '--write-srt':

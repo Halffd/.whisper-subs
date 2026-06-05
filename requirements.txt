@@ -16,9 +16,8 @@ natsort
 torch
 transformers
 tqdm
-PyQt6
+# PyQt6
 scikit-learn
-
 # Adapter backends (install what you need)
 nemo_toolkit
 moonshine

@@ -123,6 +123,7 @@ class TranscriptionThread(threading.Thread):
 import faster_whisper
 import os
 import sys
+sys.path.insert(0, r"' + os.path.dirname(os.path.abspath(__file__)) + '")
 import threading
 import queue
 import time
@@ -242,23 +243,9 @@ try:
         log_message("Transcription completed successfully")
 
         dir_path = os.path.dirname(r"{srt_file}")
-        base_name = os.path.splitext(os.path.basename(r"{srt_file}"))[0]
 
-        html_file = os.path.join(dir_path, f"{{base_name}}.htm")
-        url = None
-        if os.path.exists(html_file):
-            try:
-                with open(html_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                import re
-                match = re.search(r"URL='([^']+)'", content)
-                if match:
-                    url = match.group(1)
-            except:
-                pass
-
-        if url:
-            create_helper_files(dir_path, os.path.join(dir_path, f"{{base_name}}.srt"), url)
+        import helper_files as _hf
+        _hf.make_files(r"{srt_file}")
 
         return True
     else:
@@ -325,30 +312,14 @@ finally:
                     time.sleep(0.1)
 
                 exit_code = process.returncode
+                exit_code = process.returncode
                 if exit_code == 0 and os.path.exists(srt_file):
                     GLib.idle_add(self.log_callback, f"Successfully created {srt_file}")
 
-                    dir_path = os.path.dirname(srt_file)
-                    base_name = os.path.splitext(os.path.basename(srt_file))[0]
-
-                    html_file = os.path.join(dir_path, f"{base_name}.htm")
-                    url = None
-                    if os.path.exists(html_file):
-                        try:
-                            with open(html_file, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                            import re
-                            match = re.search(r"URL='([^']+)'", content)
-                            if match:
-                                url = match.group(1)
-                        except:
-                            pass
-
-                    if url:
-                        create_helper_files(dir_path, base_name, url)
+                    import helper_files as _hf
+                    _hf.make_files(srt_file)
 
                     return True
-
                 GLib.idle_add(self.log_callback, f"Process exited with code {exit_code}")
                 return False
 
@@ -363,6 +334,8 @@ finally:
                         try:
                             os.rename(unfinished_srt, srt_file)
                             GLib.idle_add(self.log_callback, f"Renamed {unfinished_srt} to {srt_file}")
+                            import helper_files as _hf
+                            _hf.cleanup_unfinished(srt_file)
                         except OSError:
                             pass
                 try:

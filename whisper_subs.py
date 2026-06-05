@@ -29,6 +29,7 @@ _transcribe_module = None
 _twitch_vod_module = None
 _model_module = None
 _livestream_transcriber_module = None
+_helper_files_module = None
 
 def _get_transcribe():
     """Lazy import for transcribe module"""
@@ -36,6 +37,13 @@ def _get_transcribe():
     if _transcribe_module is None:
         import transcribe as _transcribe_module
     return _transcribe_module
+
+def _get_helper_files():
+    """Lazy import for helper_files module"""
+    global _helper_files_module
+    if _helper_files_module is None:
+        import helper_files as _helper_files_module
+    return _helper_files_module
 
 def _get_twitch_vod():
     """Lazy import for twitch_vod module"""
@@ -691,7 +699,7 @@ class WhisperSubs:
                     os.remove(final_file)
                 os.rename(expected_file, final_file)
                 self.log(f"Subtitle saved to {final_file}")
-                _get_transcribe().make_files(final_file, url=url)
+                _get_helper_files().make_files(final_file, url=url)
                 return True
 
         except Exception as e:
@@ -1180,7 +1188,7 @@ class WhisperSubs:
 
             # Create helper files (bash, bat, thumbnail) before transcription
             unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
-            _get_transcribe().make_files(unfinished_srt, url=task_source)
+            _get_helper_files().make_files(unfinished_srt, url=task_source)
 
             # Create symlink from srt_file -> unfinished_srt so players see in-progress transcription
             try:
@@ -1239,7 +1247,7 @@ class WhisperSubs:
                     new_srt_file = f"{base_name}.srt"
                     if new_srt_file != srt_file and os.path.exists(new_srt_file):
                         srt_file = new_srt_file
-                _get_transcribe().make_files(srt_file, url=task_source)
+                _get_helper_files().make_files(srt_file, url=task_source)
 
                 # Copy to secondary location if applicable
                 if srt_file_secondary and os.path.exists(srt_file):
@@ -1751,6 +1759,15 @@ Examples:
 
                 # Process clipboard content
                 sources = [line.strip() for line in clipboard_content.split('\n') if line.strip()]
+                # Save clipboard sources to a timestamped text file in Documents
+                try:
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    clipboard_log = os.path.join(OUTPUT_DIR, f"clipboard_{timestamp}.txt")
+                    with open(clipboard_log, "w", encoding="utf-8") as _clf:
+                        _clf.write("\n".join(sources) + "\n")
+                    print(f"Clipboard sources saved to: {clipboard_log}")
+                except OSError as _cle:
+                    print(f"Warning: could not save clipboard log: {_cle}")
                 if args.shuffle and len(sources) > 1:
                     random.shuffle(sources)
                     print(f"Shuffled {len(sources)} clipboard sources")

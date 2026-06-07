@@ -1202,11 +1202,14 @@ class WhisperSubs:
                 return
 
             update_task_status(job_id, task_source, 'transcribing')
-            # Get base filename without extension and ensure it includes the model name
-            base_name = os.path.splitext(os.path.basename(audio_file))[0]
             safe_model = self._safe_model_filename()
-            if not base_name.endswith(f".{safe_model}"):
-                base_name = f"{base_name}.{safe_model}"
+            if is_local:
+                base_name = os.path.splitext(os.path.basename(audio_file))[0]
+                if not base_name.endswith(f".{safe_model}"):
+                    base_name = f"{base_name}.{safe_model}"
+            else:
+                title_without_model = self._strip_model_from_filename(self.clean_filename(title))
+                base_name = f"{title_without_model}.{safe_model}"
 
             # Write to both locations: video folder AND Documents/Youtube-Subs/local_files
             if is_local:

@@ -590,19 +590,18 @@ class WhisperSubs:
                     yield {"source": source, "status": "pending", "title": title}
                     return
 
-        else:
-            self.log("Source is a single URL or file.")
-            try:
-                if self.is_youtube(source) or self.is_twitch(source):
-                    title, _ = self.get_video_info_cached(source)
-                else:
-                    title = os.path.basename(source)
-                if self.is_youtube(source):
+            else:
+                self.log("Source is a single URL or file.")
+                try:
+                    if self.is_youtube(source) or self.is_twitch(source):
+                        title, _ = self.get_video_info_cached(source)
+                    else:
+                        title = os.path.basename(source)
                     title = self.clean_filename(title)
-                yield {"source": source, "status": "pending", "title": title}
-            except Exception as e:
-                self.log(f"Error getting video info: {e}")
-                yield {"source": source, "status": "pending", "title": os.path.basename(source)}
+                    yield {"source": source, "status": "pending", "title": title}
+                except Exception as e:
+                    self.log(f"Error getting video info: {e}")
+                    yield {"source": source, "status": "pending", "title": os.path.basename(source)}
 
     def _convert_to_audio(self, video_path: str) -> Optional[str]:
         """Convert video file to audio-only M4A for transcription.
@@ -779,7 +778,7 @@ class WhisperSubs:
                         # Fall back to yt-dlp
                         pass
                     else:
-                        title = vod_info.get('title', f'vod_{vod_id}')
+                        title = self.clean_filename(vod_info.get('title', f'vod_{vod_id}'))
                         # Use the twitch_vod module to download the VOD audio
                         output_file = downloader.download_vod_audio(vod_id, title, vod_info.get('duration', 0))
                         if output_file and os.path.exists(output_file):
@@ -793,6 +792,7 @@ class WhisperSubs:
                     self.log(f"Error downloading Twitch VOD with twitch_vod module: {e}")
                     # Fall back to yt-dlp
                     pass  # Continue with regular yt-dlp flow below
+
 
         # === STEP 1: Check for existing files (fast) ===
         if not self.force:

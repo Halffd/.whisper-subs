@@ -125,11 +125,38 @@ class StreamlinkVODDownloader:
         return data['data'][0] if data.get('data') else None
 
     def sanitize_filename(self, filename):
-        """Clean filename for filesystem"""
+        """Clean filename for filesystem, including emoji removal."""
+        import re, unicodedata
         invalid_chars = '<>:"/\\|?*'
         for char in invalid_chars:
             filename = filename.replace(char, '_')
-        return filename[:200]  # Limit length
+        # Strip emojis and non-filesystem-safe Unicode
+        out = []
+        for ch in filename:
+            cp = ord(ch)
+            if cp < 0x20:
+                continue
+            if cp >= 0xFE00 and cp <= 0xFE0F:
+                continue
+            if cp >= 0x1F000 and cp <= 0x1FFFF:
+                continue
+            if cp >= 0xE0000 and cp <= 0xE007F:
+                continue
+            if cp > 0xFFFF:
+                cat = unicodedata.category(ch)
+                if cat.startswith(('So', 'Sk')):
+                    continue
+                out.append(ch)
+                continue
+            cat = unicodedata.category(ch)
+            if cat.startswith(('So', 'Cc', 'Cf')):
+                continue
+            if cat == 'Sk' and cp > 0x0300:
+                continue
+            out.append(ch)
+        filename = ''.join(out)
+        filename = re.sub(r'[_\s]+', ' ', filename)
+        return filename.strip()[:200]
     
     def download_vod_audio(self, vod_id, title, duration):
         """Download VOD audio using streamlink and return the final file path."""

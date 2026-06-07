@@ -385,6 +385,40 @@ class WhisperSubs:
         # Return original URL if we couldn't clean it
         return url
 
+    @staticmethod
+    def _strip_emojis(text):
+        """Remove emojis and other non-filesystem-safe Unicode from text.
+
+        Keeps: ASCII, common Latin/Greek/Cyrillic/CJK, digits, punctuation.
+        Replaces: emojis, symbols, decorative Unicode, zero-width chars,
+        control chars, and anything above U+FFFF (supplementary planes).
+        """
+        import unicodedata
+        out = []
+        for ch in text:
+            cp = ord(ch)
+            if cp < 0x20:
+                continue
+            if cp >= 0xFE00 and cp <= 0xFE0F:
+                continue
+            if cp >= 0x1F000 and cp <= 0x1FFFF:
+                continue
+            if cp >= 0xE0000 and cp <= 0xE007F:
+                continue
+            if cp > 0xFFFF:
+                cat = unicodedata.category(ch)
+                if cat.startswith(('So', 'Sk')):
+                    continue
+                out.append(ch)
+                continue
+            cat = unicodedata.category(ch)
+            if cat.startswith(('So', 'Cc', 'Cf')):
+                continue
+            if cat == 'Sk' and cp > 0x0300:
+                continue
+            out.append(ch)
+        return ''.join(out)
+
     def clean_filename(self, filename):
         # If it's a YouTube URL, clean it first
         if isinstance(filename, str) and ('youtube.com' in filename or 'youtu.be' in filename):
@@ -392,7 +426,15 @@ class WhisperSubs:
 
         # Remove invalid characters from filename
         filename = re.sub(r'[\\/*?:"<>|]', '_', str(filename))
-        return filename.strip()
+        # Strip emojis and non-filesystem-safe Unicode
+        filename = self._strip_emojis(filename)
+        # Collapse multiple underscores/spaces
+        filename = re.sub(r'[_\s]+', ' ', filename)
+        filename = filename.strip()
+        # Fallback if title was only emojis/symbols
+        if not filename:
+            filename = 'untitled'
+        return filename
 
     def resolve_source_to_tasks_lazy(self, source):
         """Lazy resolution with parallel metadata fetching for playlists."""

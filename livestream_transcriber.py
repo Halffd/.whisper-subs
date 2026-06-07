@@ -211,10 +211,34 @@ class LiveStreamTranscriber:
                 self.log(f"Error cleaning up temp directory: {e}")
     
     def _clean_filename(self, filename):
-        """Clean filename of invalid characters."""
-        import re
-        # Remove invalid characters from filename
+        """Clean filename of invalid characters and emojis."""
+        import re, unicodedata
         filename = re.sub(r'[\\/*?:"<>|]', '_', str(filename))
+        out = []
+        for ch in filename:
+            cp = ord(ch)
+            if cp < 0x20:
+                continue
+            if cp >= 0xFE00 and cp <= 0xFE0F:
+                continue
+            if cp >= 0x1F000 and cp <= 0x1FFFF:
+                continue
+            if cp >= 0xE0000 and cp <= 0xE007F:
+                continue
+            if cp > 0xFFFF:
+                cat = unicodedata.category(ch)
+                if cat.startswith(('So', 'Sk')):
+                    continue
+                out.append(ch)
+                continue
+            cat = unicodedata.category(ch)
+            if cat.startswith(('So', 'Cc', 'Cf')):
+                continue
+            if cat == 'Sk' and cp > 0x300:
+                continue
+            out.append(ch)
+        filename = ''.join(out)
+        filename = re.sub(r'[_\s]+', ' ', filename)
         return filename.strip()
 
 

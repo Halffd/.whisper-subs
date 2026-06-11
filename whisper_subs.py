@@ -657,22 +657,22 @@ class WhisperSubs:
                     yield {"source": source, "status": "pending", "title": title}
                     return
 
-            else:
-                self.log("Source is a single URL or file.")
-                try:
-                    if self.is_youtube(source) or self.is_twitch(source):
-                        title, _ = self.get_video_info_cached(source)
-                    else:
-                        title = os.path.basename(source)
-                    title = self.clean_filename(title)
-                    yield {"source": source, "status": "pending", "title": title}
-                except Exception as e:
-                    self.log(f"Error getting video info: {e}")
-                    yield {
-                        "source": source,
-                        "status": "pending",
-                        "title": os.path.basename(source),
-                    }
+        else:
+            self.log("Source is a single URL or file.")
+            try:
+                if self.is_youtube(source) or self.is_twitch(source):
+                    title, _ = self.get_video_info_cached(source)
+                else:
+                    title = os.path.basename(source)
+                title = self.clean_filename(title)
+                yield {"source": source, "status": "pending", "title": title}
+            except Exception as e:
+                self.log(f"Error getting video info: {e}")
+                yield {
+                    "source": source,
+                    "status": "pending",
+                    "title": os.path.basename(source),
+                }
 
     def _convert_to_audio(self, video_path: str) -> Optional[str]:
         """Convert video file to audio-only M4A for transcription.
@@ -1337,7 +1337,9 @@ class WhisperSubs:
                 and self.check_and_download_subs(task_source, channel_dir, title)
                 and not self.force
             ):
-                self.log(f"Downloaded existing subtitle for '{title}'.")
+                self.log(
+                    f"Found existing human-made subtitle for '{title}', skipping transcription. Use -r to force re-transcription."
+                )
                 self.mark_as_processed(unique_id)
                 update_task_status(job_id, task_source, "skipped")
                 return

@@ -1539,7 +1539,7 @@ try:
             compression_fail_streak = 0
 
         if compression_fail_streak >= compression_fail_max:
-            print(f"Hallucination detected (ratio={seg_cr}, repetitive={is_repetitive}): {compression_fail_streak} failures starting from {compression_fail_first_ts:.1f}s")
+            print(f"Hallucination detected (ratio={{seg_cr}}, repetitive={{is_repetitive}}): {{compression_fail_streak}} failures starting from {{compression_fail_first_ts:.1f}}s")
             with open(loop_detect_file, "w") as lf:
                 lf.write(str(compression_fail_first_ts + resume_offset))
             stop_event.set()

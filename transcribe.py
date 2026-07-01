@@ -27,11 +27,12 @@ from whisper_model_chooser import WhisperModelChooser
 from helper_files import make_files, cleanup_unfinished
 
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-audiofile, modelname, langcode = '', 'base', None
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+audiofile, modelname, langcode = "", "base", None
 try:
     import torch.cuda as cuda
     import torch.backends.cudnn as cudnn
+
     cuda.empty_cache()
     cudnn.benchmark = False
     cudnn.deterministic = True
@@ -49,6 +50,7 @@ class LoopDetectedError(Exception):
 
 # ============ ADAPTER-BASED TRANSCRIPTION (for prefixed models) ============
 
+
 def _transcribe_with_adapter(
     audio_file: str,
     model_name: str,
@@ -57,8 +59,8 @@ def _transcribe_with_adapter(
     start_offset_seconds: float = 0.0,
     temperature: float = 0.0,
     write: Callable = print,
-    device: str = 'cpu',
-    compute_type: str = 'int8',
+    device: str = "cpu",
+    compute_type: str = "int8",
     cpu_threads: Optional[int] = None,
     vad_filter: bool = False,
     vad_params: Optional[Dict[str, Any]] = None,
@@ -73,7 +75,7 @@ def _transcribe_with_adapter(
     Returns:
         bool: True if successful, False otherwise
     """
-    real_srt = srt_file + '.unfinished'
+    real_srt = srt_file + ".unfinished"
 
     try:
         ctx = get_context()
@@ -104,7 +106,7 @@ def _transcribe_with_adapter(
         loop_detected = False
         loop_timestamp = 0.0
 
-        with open(real_srt, 'w', encoding='utf-8') as srt:
+        with open(real_srt, "w", encoding="utf-8") as srt:
             srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write("TRANSCRIPTION METADATA\n")
             srt.write(f"Model: {stripped_model}\n")
@@ -124,10 +126,15 @@ def _transcribe_with_adapter(
                     if all(t == recent[0][0] for t, _ in recent):
                         first_ts = recent[0][1]
                         last_ts = recent[-1][1]
-                        if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
+                        if (
+                            last_ts - first_ts >= loop_threshold_seconds
+                            or len(loop_window) >= loop_consecutive_required * 2
+                        ):
                             loop_detected = True
                             loop_timestamp = first_ts
-                            write(f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s")
+                            write(
+                                f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s"
+                            )
                             break
 
                 start_time = format_timestamp(segment.start if segment.start > 0 else 0)
@@ -137,10 +144,15 @@ def _transcribe_with_adapter(
                 srt.write(f"{segment.text}\n\n")
 
         if loop_detected:
-            write(f"Loop detected at {loop_timestamp:.1f}s, stopping. SRT saved up to loop point.")
+            write(
+                f"Loop detected at {loop_timestamp:.1f}s, stopping. SRT saved up to loop point."
+            )
             _trim_srt_to_timestamp(real_srt, loop_timestamp)
             segments = [s for s in segments if s.end <= loop_timestamp]
-            raise LoopDetectedError(loop_timestamp, f"Loop detected at {loop_timestamp:.1f}s during adapter transcription")
+            raise LoopDetectedError(
+                loop_timestamp,
+                f"Loop detected at {loop_timestamp:.1f}s during adapter transcription",
+            )
 
         metadata_file = os.path.splitext(srt_file)[0] + ".metadata.json"
         try:
@@ -151,7 +163,7 @@ def _transcribe_with_adapter(
                 "source_file": os.path.basename(audio_file),
                 "language": language or "auto-detect",
                 "segments_count": len(segments),
-                "start_offset_seconds": start_offset_seconds
+                "start_offset_seconds": start_offset_seconds,
             }
             with open(metadata_file, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
@@ -219,16 +231,22 @@ def is_api_model(model_name: str) -> Tuple[bool, str, str]:
 def srt_time_to_seconds(time_str: str) -> float:
     """Converts SRT time format HH:MM:SS,mmm to seconds."""
     try:
-        parts = re.split('[:,]', time_str)
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]) + int(parts[3]) / 1000.0
+        parts = re.split("[:,]", time_str)
+        return (
+            int(parts[0]) * 3600
+            + int(parts[1]) * 60
+            + int(parts[2])
+            + int(parts[3]) / 1000.0
+        )
     except (ValueError, IndexError):
         return 0.0
+
 
 def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     """
     Parses an SRT file to find the last segment's number and end time.
     Returns (last_end_time_seconds, last_segment_number).
-    
+
     Enhanced to handle:
     - Metadata headers (skip lines starting with numbers followed by newline)
     - Malformed segments
@@ -243,30 +261,33 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     valid_segments_found = 0
 
     try:
-        with open(srt_path, 'r', encoding='utf-8') as f:
+        with open(srt_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
 
-        segments = content.split('\n\n')
+        segments = content.split("\n\n")
         if not segments:
             return 0.0, 0
 
         # Iterate backwards to find the last COMPLETE valid segment block
         for segment_block in reversed(segments):
-            lines = segment_block.strip().split('\n')
+            lines = segment_block.strip().split("\n")
             if len(lines) >= 3:  # Need: number, timestamp, text
                 try:
                     # First line should be segment number
                     current_segment_number = int(lines[0])
-                    
+
                     # Second line should be timestamp
                     time_line = lines[1]
-                    match = re.search(r'\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
+                    match = re.search(
+                        r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})",
+                        time_line,
+                    )
                     if match:
                         end_time_str = match.group(1)
                         last_end_time = srt_time_to_seconds(end_time_str)
                         last_segment_number = current_segment_number
                         valid_segments_found += 1
-                        
+
                         # Need at least 2 valid segments to be confident
                         if valid_segments_found >= 2:
                             return last_end_time, last_segment_number
@@ -277,7 +298,10 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
                 # Might be incomplete last segment - check if it has timestamp
                 try:
                     time_line = lines[1] if lines[0].isdigit() else lines[0]
-                    match = re.search(r'\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
+                    match = re.search(
+                        r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})",
+                        time_line,
+                    )
                     if match:
                         # Incomplete segment - don't use this, use previous
                         continue
@@ -287,7 +311,7 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
         # If we found at least one valid segment, use it
         if valid_segments_found >= 1:
             return last_end_time, last_segment_number
-        
+
         return 0.0, 0  # No valid segments found
     except Exception as e:
         print(f"Could not parse SRT for resume info: {e}")
@@ -298,26 +322,29 @@ def _trim_srt_to_timestamp(srt_path: str, max_end_seconds: float):
     if not os.path.exists(srt_path):
         return
     try:
-        with open(srt_path, 'r', encoding='utf-8') as f:
+        with open(srt_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
-        blocks = content.split('\n\n')
+        blocks = content.split("\n\n")
         kept = []
         for block in blocks:
-            lines = block.strip().split('\n')
+            lines = block.strip().split("\n")
             if len(lines) >= 2:
                 time_line = lines[1]
-                match = re.search(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', time_line)
+                match = re.search(
+                    r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})",
+                    time_line,
+                )
                 if match:
                     end_str = match.group(2)
                     end_sec = srt_time_to_seconds(end_str)
                     if end_sec <= max_end_seconds:
                         kept.append(block)
-        with open(srt_path, 'w', encoding='utf-8') as f:
+        with open(srt_path, "w", encoding="utf-8") as f:
             for i, block in enumerate(kept, start=1):
-                lines = block.strip().split('\n')
+                lines = block.strip().split("\n")
                 if lines and lines[0].strip().isdigit():
                     lines[0] = str(i)
-                f.write('\n'.join(lines) + '\n\n')
+                f.write("\n".join(lines) + "\n\n")
     except Exception as e:
         print(f"Warning: Could not trim SRT file: {e}")
 
@@ -325,25 +352,29 @@ def _trim_srt_to_timestamp(srt_path: str, max_end_seconds: float):
 def dict_to_segment(data: Dict[str, Any]) -> Segment:
     """Convert a dictionary to a Segment dataclass instance."""
     return Segment(
-        start=data.get('start', 0.0),
-        end=data.get('end', 0.0),
-        text=data.get('text', '')
+        start=data.get("start", 0.0),
+        end=data.get("end", 0.0),
+        text=data.get("text", ""),
     )
+
 
 def convert_dict_to_segments(data: List[Dict[str, Any]]) -> List[Segment]:
     """Convert a list of dictionaries to a list of Segment instances."""
     return [dict_to_segment(item) for item in data]
+
+
 def read_stream_proc(stream, label, process):
     """Read from the given stream and print its output."""
     while True:
         try:
             output = stream.readline()
-            if output == '' and process.poll() is not None:
+            if output == "" and process.poll() is not None:
                 break
             if output:
                 print(f"{label}: {output.strip()}")
         except Exception as e:
             break
+
 
 def read_stream(stream, queue):
     """Reads a stream line by line and puts it in a queue."""
@@ -354,6 +385,7 @@ def read_stream(stream, queue):
         else:
             break
 
+
 def check_memory_usage():
     process = psutil.Process()
     memory_percent = process.memory_percent()
@@ -362,10 +394,13 @@ def check_memory_usage():
         print(f"High memory usage detected ({memory_percent:.1f}%). Waiting...")
         time.sleep(10)  # Wait for 10 seconds
         memory_percent = psutil.Process().memory_percent()
+
+
 def standalone(seg):
     dur = seg["end"] - seg["start"]
     words = len(seg["text"].split())
     return dur >= 2.5 or words >= 12
+
 
 def merge_segments(
     segments,
@@ -394,7 +429,7 @@ def merge_segments(
             and new_duration <= max_duration
             and word_count <= max_words
             and char_count <= max_chars
-            and not(standalone(prev) or standalone(s)) 
+            and not (standalone(prev) or standalone(s))
         ):
             prev.text = merged_text
             prev.end = s.end
@@ -406,7 +441,7 @@ def merge_segments(
 
 class ProgressTracker:
     """Track transcription progress with ETA estimation"""
-    
+
     def __init__(self, total_duration: float, write: Callable = print):
         self.total_duration = total_duration
         self.write = write
@@ -414,15 +449,15 @@ class ProgressTracker:
         self.last_progress_time = 0
         self.segments_processed = 0
         self.last_segment_time = 0
-        
+
     def update(self, segment_start: float, segment_end: float) -> None:
         """Update progress with current segment"""
         self.segments_processed += 1
         current_time = time.time()
-        
+
         # Calculate progress percentage
         progress = (segment_end / self.total_duration) * 100
-        
+
         # Calculate ETA (only update every second to avoid spam)
         if current_time - self.last_progress_time >= 1.0:
             elapsed = current_time - self.start_time
@@ -430,15 +465,17 @@ class ProgressTracker:
                 estimated_total = elapsed / (progress / 100)
                 remaining = estimated_total - elapsed
                 eta_str = str(datetime.timedelta(seconds=int(remaining)))
-                
+
                 # Calculate processing speed
                 speed = segment_end / elapsed if elapsed > 0 else 0
-                
-                self.write(f"Progress: {progress:.1f}% | "
-                          f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))} | "
-                          f"ETA: {eta_str} | "
-                          f"Speed: {speed:.1f}x real-time")
-            
+
+                self.write(
+                    f"Progress: {progress:.1f}% | "
+                    f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))} | "
+                    f"ETA: {eta_str} | "
+                    f"Speed: {speed:.1f}x real-time"
+                )
+
             self.last_progress_time = current_time
 
 
@@ -447,8 +484,8 @@ def transcribe_audio(
     model_name: str,
     srt_file: str = "file.srt",
     language: Optional[str] = None,
-    device: str = 'cpu',
-    compute_type: str = 'int8',
+    device: str = "cpu",
+    compute_type: str = "int8",
     cpu_threads: Optional[int] = None,
     write: Callable = print,
     start_time: Optional[str] = None,
@@ -459,7 +496,7 @@ def transcribe_audio(
     vad_filter: bool = False,
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
-    **kwargs
+    **kwargs,
 ) -> bool:
     """
     Transcribe audio file and generate SRT subtitles with helper files.
@@ -467,10 +504,10 @@ def transcribe_audio(
     Supports local (faster-whisper) and adapter-based (all prefixed) models.
     """
     original = srt_file
-    temp_srt = srt_file.replace('.srt','.unfinished.srt')
+    temp_srt = srt_file.replace(".srt", ".unfinished.srt")
 
     # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(temp_srt) or '.', exist_ok=True)
+    os.makedirs(os.path.dirname(temp_srt) or ".", exist_ok=True)
 
     # Check if this is a prefixed (adapter-based) model
     is_remote, provider, stripped_model = is_api_model(model_name)
@@ -482,51 +519,80 @@ def transcribe_audio(
 
         if start_time or end_time:
             trimmed_audio_path = os.path.splitext(audio_file)[0] + ".trimmed.m4a"
-            ffmpeg_cmd = ['ffmpeg', '-y']
+            ffmpeg_cmd = ["ffmpeg", "-y"]
 
             if start_time:
-                if ':' in str(start_time):
-                    parts = str(start_time).split(':')
+                if ":" in str(start_time):
+                    parts = str(start_time).split(":")
                     if len(parts) == 3:
-                        start_offset_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        start_offset_seconds = (
+                            int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        )
                     elif len(parts) == 2:
                         start_offset_seconds = int(parts[0]) * 60 + float(parts[1])
                     else:
                         start_offset_seconds = 0
-                        write(f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS")
-                    ffmpeg_cmd.extend(['-ss', str(start_time)])
+                        write(
+                            f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS"
+                        )
+                    ffmpeg_cmd.extend(["-ss", str(start_time)])
                 else:
                     start_offset_seconds = float(start_time)
-                    ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=start_offset_seconds))])
+                    ffmpeg_cmd.extend(
+                        ["-ss", str(datetime.timedelta(seconds=start_offset_seconds))]
+                    )
 
-                ffmpeg_cmd.extend(['-i', audio_file])
+                ffmpeg_cmd.extend(["-i", audio_file])
 
             if end_time:
-                if ':' in str(end_time):
-                    parts = str(end_time).split(':')
+                if ":" in str(end_time):
+                    parts = str(end_time).split(":")
                     if len(parts) == 3:
-                        end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        end_seconds = (
+                            int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        )
                     elif len(parts) == 2:
                         end_seconds = int(parts[0]) * 60 + float(parts[1])
                     else:
                         end_seconds = 0
-                        write(f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS")
+                        write(
+                            f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS"
+                        )
                 else:
                     end_seconds = float(end_time)
                 if start_time:
                     duration = end_seconds - start_offset_seconds
                 else:
                     duration = end_seconds
-                ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
+                ffmpeg_cmd.extend(["-t", str(datetime.timedelta(seconds=duration))])
 
-            ffmpeg_cmd.extend(['-vn', '-acodec', 'aac', '-b:a', '128k', '-ac', '1', '-ar', '16000', trimmed_audio_path])
-            write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+            ffmpeg_cmd.extend(
+                [
+                    "-vn",
+                    "-acodec",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    trimmed_audio_path,
+                ]
+            )
+            write(
+                f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}..."
+            )
+            result = subprocess.run(
+                ffmpeg_cmd, capture_output=True, text=True, check=False
+            )
             if result.returncode == 0:
                 audio_to_transcribe = trimmed_audio_path
                 write(f"Created trimmed audio: {trimmed_audio_path}")
             else:
-                write(f"Warning: FFmpeg trimming failed: {result.stderr}, using original file")
+                write(
+                    f"Warning: FFmpeg trimming failed: {result.stderr}, using original file"
+                )
                 start_offset_seconds = 0.0
 
         try:
@@ -546,73 +612,98 @@ def transcribe_audio(
                 mpv_ipc_reload=mpv_ipc_reload,
             )
         except LoopDetectedError as e:
-            write(f"Loop detected at {e.timestamp:.1f}s — partial SRT saved. Try a different model.")
+            write(
+                f"Loop detected at {e.timestamp:.1f}s — partial SRT saved. Try a different model."
+            )
             return False
         finally:
-            if audio_to_transcribe != audio_file and os.path.exists(audio_to_transcribe):
+            if audio_to_transcribe != audio_file and os.path.exists(
+                audio_to_transcribe
+            ):
                 try:
                     os.remove(audio_to_transcribe)
                 except Exception as e:
                     write(f"Warning: Could not remove trimmed audio file: {e}")
 
     # Local transcription with faster-whisper (subprocess-based for bare model names)
-    if device == 'cuda':
+    if device == "cuda":
         try:
             import torch
+
             if not torch.cuda.is_available():
-                device = 'cpu'
-                compute_type = 'int8'
+                device = "cpu"
+                compute_type = "int8"
                 print("CUDA not available, falling back to CPU")
         except ImportError:
-            device = 'cpu'
-            compute_type = 'int8'
+            device = "cpu"
+            compute_type = "int8"
             print("PyTorch not available, falling back to CPU")
 
     try:
         # Get audio duration for progress tracking
         try:
             import subprocess
+
             result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-                 '-of', 'default=noprint_wrappers=1:nokey=1', audio_file],
-                capture_output=True, text=True, check=False
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    audio_file,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
             )
-            total_duration = float(result.stdout.strip()) if result.stdout.strip() else 0
+            total_duration = (
+                float(result.stdout.strip()) if result.stdout.strip() else 0
+            )
         except Exception:
             total_duration = 0
-        
+
         # Initialize model with specified CPU threads
         import faster_whisper
+
         whisper_model = faster_whisper.WhisperModel(
             model_name,
             device=device,
             compute_type=compute_type,
             device_index=0,
-            cpu_threads=cpu_threads if cpu_threads else os.cpu_count()
+            cpu_threads=cpu_threads if cpu_threads else os.cpu_count(),
         )
-        
+
         # Initialize progress tracker
-        progress = ProgressTracker(total_duration, write) if total_duration > 0 else None
-        
-        write(f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'})")
+        progress = (
+            ProgressTracker(total_duration, write) if total_duration > 0 else None
+        )
+
+        write(
+            f"Starting transcription (duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'})"
+        )
 
         # Check if using distil-whisper model (needs special parameters)
-        is_distil = 'distil' in model_name.lower()
-        
+        is_distil = "distil" in model_name.lower()
+
         # Distil-whisper models need special parameters for best performance
         transcribe_params = {
-            'audio_file': audio_file,
-            'language': language,
-            'vad_filter': False,
+            "audio_file": audio_file,
+            "language": language,
+            "vad_filter": False,
         }
-        
+
         # Add distil-specific parameters
         if is_distil:
-            transcribe_params.update({
-                'condition_on_previous_text': False,  # Critical for distil models!
-                'max_new_tokens': 128,
-                'beam_size': 5,
-            })
+            transcribe_params.update(
+                {
+                    "condition_on_previous_text": False,  # Critical for distil models!
+                    "max_new_tokens": 128,
+                    "beam_size": 5,
+                }
+            )
             write(f"Using distil-whisper optimized parameters")
 
         # Process in smaller chunks with progress tracking
@@ -635,7 +726,9 @@ def transcribe_audio(
             srt.write(f"Model: {model_name}\n")
             srt.write(f"Date: {datetime.datetime.now().isoformat()}\n")
             srt.write(f"Source: {os.path.basename(audio_file)}\n")
-            srt.write(f"Duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'}\n")
+            srt.write(
+                f"Duration: {str(datetime.timedelta(seconds=int(total_duration))) if total_duration else 'unknown'}\n"
+            )
             srt.write(f"Language: {language or 'auto-detect'}\n")
             srt.write(f"Device: {device}\n")
             srt.write(f"Compute: {compute_type}\n")
@@ -650,7 +743,10 @@ def transcribe_audio(
             seg_idx = 0
             for segment in result_segments:
                 # Track compression ratio failures from faster-whisper segments
-                if hasattr(segment, 'compression_ratio') and segment.compression_ratio > 2.4:
+                if (
+                    hasattr(segment, "compression_ratio")
+                    and segment.compression_ratio > 2.4
+                ):
                     if compression_fail_streak == 0:
                         compression_fail_first_ts = segment.start
                     compression_fail_streak += 1
@@ -662,7 +758,10 @@ def transcribe_audio(
                     continue
 
                 # Merge with previous if identical text
-                if segments_list and segment.text.strip() == segments_list[-1].text.strip():
+                if (
+                    segments_list
+                    and segment.text.strip() == segments_list[-1].text.strip()
+                ):
                     segments_list[-1].end = segment.end
                     continue
 
@@ -680,17 +779,24 @@ def transcribe_audio(
                         if all(t == recent[0][0] for t, _ in recent):
                             first_ts = recent[0][1]
                             last_ts = recent[-1][1]
-                            if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
+                            if (
+                                last_ts - first_ts >= loop_threshold_seconds
+                                or len(loop_window) >= loop_consecutive_required * 2
+                            ):
                                 loop_detected = True
                                 loop_timestamp = first_ts
-                                write(f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s")
+                                write(
+                                    f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s"
+                                )
                                 break
 
                 # Also detect via compression ratio streak
                 if compression_fail_streak >= compression_fail_max:
                     loop_detected = True
                     loop_timestamp = compression_fail_first_ts
-                    write(f"Hallucination detected: {compression_fail_streak} consecutive compression ratio failures starting from {compression_fail_first_ts:.1f}s")
+                    write(
+                        f"Hallucination detected: {compression_fail_streak} consecutive compression ratio failures starting from {compression_fail_first_ts:.1f}s"
+                    )
                     break
 
                 start_ts = format_timestamp(segment.start)
@@ -706,28 +812,35 @@ def transcribe_audio(
         write(f"Transcribed {len(segments_list)} segments, processing...")
 
         if loop_detected:
-            write(f"Loop/hallucination detected at {loop_timestamp:.1f}s — trimming SRT to that point")
+            write(
+                f"Loop/hallucination detected at {loop_timestamp:.1f}s — trimming SRT to that point"
+            )
             _trim_srt_to_timestamp(temp_srt, loop_timestamp)
             segments_list = [s for s in segments_list if s.end <= loop_timestamp]
             # Save partial SRT before raising
             if os.path.exists(temp_srt):
-                os.makedirs(os.path.dirname(original) or '.', exist_ok=True)
+                os.makedirs(os.path.dirname(original) or ".", exist_ok=True)
                 if os.path.exists(original):
                     os.remove(original)
                 os.rename(temp_srt, original)
                 make_files(original)
-            raise LoopDetectedError(loop_timestamp, f"Loop/hallucination detected at {loop_timestamp:.1f}s during local transcription with {model_name}")
+            raise LoopDetectedError(
+                loop_timestamp,
+                f"Loop/hallucination detected at {loop_timestamp:.1f}s during local transcription with {model_name}",
+            )
 
         # Final progress update
         if progress:
             elapsed = time.time() - progress.start_time
             speed = total_duration / elapsed if elapsed > 0 else 0
-            write(f"Transcription completed in {str(datetime.timedelta(seconds=int(elapsed)))} ({speed:.1f}x real-time)")
+            write(
+                f"Transcription completed in {str(datetime.timedelta(seconds=int(elapsed)))} ({speed:.1f}x real-time)"
+            )
 
         # Only proceed if the temporary file was created successfully
         if os.path.exists(temp_srt):
             # Create directory for the final file if it doesn't exist
-            os.makedirs(os.path.dirname(original) or '.', exist_ok=True)
+            os.makedirs(os.path.dirname(original) or ".", exist_ok=True)
 
             # Remove the old file if it exists
             if os.path.exists(original):
@@ -744,7 +857,11 @@ def transcribe_audio(
                     "date": datetime.datetime.now().isoformat(),
                     "source_file": os.path.basename(audio_file),
                     "duration_seconds": total_duration,
-                    "duration_formatted": str(datetime.timedelta(seconds=int(total_duration))) if total_duration else "unknown",
+                    "duration_formatted": str(
+                        datetime.timedelta(seconds=int(total_duration))
+                    )
+                    if total_duration
+                    else "unknown",
                     "language": language or "auto-detect",
                     "device": device,
                     "compute_type": compute_type,
@@ -753,15 +870,11 @@ def transcribe_audio(
                     "vad_params": vad_params,
                     "temperature": temperature,
                     "merge_lines": merge_lines,
-                    "time_range": {
-                        "start": start_time,
-                        "end": end_time
-                    } if start_time or end_time else None,
+                    "time_range": {"start": start_time, "end": end_time}
+                    if start_time or end_time
+                    else None,
                     "segments_count": len(segments_list),
-                    "output_files": {
-                        "srt": original,
-                        "json": metadata_file
-                    }
+                    "output_files": {"srt": original, "json": metadata_file},
                 }
                 with open(metadata_file, "w", encoding="utf-8") as f:
                     json.dump(metadata, f, indent=2, ensure_ascii=False)
@@ -773,16 +886,15 @@ def transcribe_audio(
 
         return True
 
-        
     except RuntimeError as e:
-        if 'CUDA' in str(e) or 'cuDNN' in str(e):
+        if "CUDA" in str(e) or "cuDNN" in str(e):
             print("CUDA/cuDNN error detected, falling back to CPU...")
             return transcribe_audio(
                 audio_file=audio_file,
                 model_name=model_name,
                 srt_file=srt_file,
                 language=language,
-                device='cpu',
+                device="cpu",
                 compute_type=compute_type,
                 cpu_threads=cpu_threads,
                 write=write,
@@ -792,7 +904,7 @@ def transcribe_audio(
                 merge_lines=merge_lines,
                 vad_filter=vad_filter,
                 vad_params=vad_params,
-                mpv_ipc_reload=mpv_ipc_reload
+                mpv_ipc_reload=mpv_ipc_reload,
             )
         else:
             print(f"Error during transcription: {e}", file=sys.stderr)
@@ -801,9 +913,12 @@ def transcribe_audio(
             return False
 
     except LoopDetectedError as e:
-        write(f"Loop/hallucination detected at {e.timestamp:.1f}s — partial SRT saved up to loop point.")
+        write(
+            f"Loop/hallucination detected at {e.timestamp:.1f}s — partial SRT saved up to loop point."
+        )
         make_files(original)
         return False
+
 
 def format_timestamp(timestamp):
     """
@@ -820,15 +935,19 @@ def format_timestamp(timestamp):
     seconds = int(timestamp % 60)
     milliseconds = int((timestamp % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
 def read_segments_from_json(json_file: str) -> List[Segment]:
     """Reads the JSON file and converts it to a list of Segment objects."""
     try:
-        with open(json_file, 'r', encoding='utf-8') as f:
+        with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
             return [Segment(**segment) for segment in data]
     except (IOError, json.JSONDecodeError) as e:
         print(f"Error reading JSON file: {e}", file=sys.stderr)
         return []
+
+
 def write_srt(segments_file, srt):
     if os.path.exists(segments_file):
         # Read the JSON segments file to fetch transcribed segments
@@ -843,14 +962,15 @@ def write_srt(segments_file, srt):
             srt.write(f"{start_time} --> {end_time}\n")
             srt.write(f"{text}\n\n")
 
+
 def process_create(
     file: str,
     model_name: str,
-    srt_file: str = 'none',
-    segments_file: str = 'segments.json',
-    language: str = 'none',
-    device: str = 'cpu',
-    compute_type: str = 'int8',
+    srt_file: str = "none",
+    segments_file: str = "segments.json",
+    language: str = "none",
+    device: str = "cpu",
+    compute_type: str = "int8",
     force_device: bool = False,
     auto: bool = True,
     write: Callable = print,
@@ -863,11 +983,13 @@ def process_create(
     merge_lines: bool = False,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
-    mpv_ipc_reload: Optional[Callable] = None
+    mpv_ipc_reload: Optional[Callable] = None,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
     if file is None:
-        raise ValueError("The 'file' argument cannot be None. Please provide a valid file path.")
+        raise ValueError(
+            "The 'file' argument cannot be None. Please provide a valid file path."
+        )
 
     # Check for prefixed (adapter-based) models - route through adapter system
     is_remote, provider, _ = is_api_model(model_name)
@@ -878,8 +1000,8 @@ def process_create(
             model_name=model_name,
             srt_file=srt_file,
             language=language,
-            device='cpu',
-            compute_type='int8',
+            device="cpu",
+            compute_type="int8",
             cpu_threads=cpu_threads,
             write=write,
             start_time=start_time,
@@ -888,23 +1010,23 @@ def process_create(
             merge_lines=merge_lines,
             vad_filter=vad_filter,
             vad_params=vad_params,
-            mpv_ipc_reload=mpv_ipc_reload
+            mpv_ipc_reload=mpv_ipc_reload,
         )
 
     # Only switch to CPU if not forcing device
-    if not force_device and device == 'cpu':
-        device = 'cpu'
-        compute_type = 'int8'
+    if not force_device and device == "cpu":
+        device = "cpu"
+        compute_type = "int8"
         write(f"Falling back to CPU and int8")
     model_names = _model_module.MODEL_NAMES
 
-    if device == 'cuda' and auto:
+    if device == "cuda" and auto:
         chooser = WhisperModelChooser()
-        best = chooser.choose_best_model(english_only='en' in model_name)
-        model_name = best['model']
-        compute_type = best['compute_type']
+        best = chooser.choose_best_model(english_only="en" in model_name)
+        model_name = best["model"]
+        compute_type = best["compute_type"]
         write(f"Selected model: {model_name} {compute_type}")
-    compute_type = 'int8'
+    compute_type = "int8"
     if not model_name in model_names:
         model_name = _model_module.getName(model_name)
     write(f"Transcribe Model name: {model_name}")
@@ -912,91 +1034,161 @@ def process_create(
         i = model_names.index(model_name)
 
         # Try with original settings first
-        success = try_transcribe(file, model_name, srt_file, language, device, compute_type, force_device, write, cpu_threads,
-                                 vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines,
-                                 start_time, end_time)
+        success = try_transcribe(
+            file,
+            model_name,
+            srt_file,
+            language,
+            device,
+            compute_type,
+            force_device,
+            write,
+            cpu_threads,
+            vad_filter,
+            vad_params,
+            diarization,
+            diarization_params,
+            temperature,
+            merge_lines,
+            start_time,
+            end_time,
+        )
         if success:
             return True
 
         # If not forcing device and original settings fail, try smaller models
         if not force_device:
             write("Trying smaller models...")
-            for j in range(i-1, -1, -1):
+            for j in range(i - 1, -1, -1):
                 current_model = model_names[j]
-                success = try_transcribe(file, current_model, srt_file, language, device, compute_type, force_device, write, cpu_threads,
-                                         vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines,
-                                         start_time, end_time)
+                success = try_transcribe(
+                    file,
+                    current_model,
+                    srt_file,
+                    language,
+                    device,
+                    compute_type,
+                    force_device,
+                    write,
+                    cpu_threads,
+                    vad_filter,
+                    vad_params,
+                    diarization,
+                    diarization_params,
+                    temperature,
+                    merge_lines,
+                    start_time,
+                    end_time,
+                )
                 if success:
                     write(f"Successfully transcribed with {current_model}")
                     return True
-            if device == 'cuda':
+            if device == "cuda":
                 write("All GPU models failed, falling back to CPU...")
-                return try_transcribe(file, 'medium.en' if 'en' in model_name else 'large-v3', srt_file, language, 'cpu', 'int8', False, write, cpu_threads,
-                                      vad_filter, vad_params, diarization, diarization_params, temperature, merge_lines,
-                                      start_time, end_time)
+                return try_transcribe(
+                    file,
+                    "medium.en" if "en" in model_name else "large-v3",
+                    srt_file,
+                    language,
+                    "cpu",
+                    "int8",
+                    False,
+                    write,
+                    cpu_threads,
+                    vad_filter,
+                    vad_params,
+                    diarization,
+                    diarization_params,
+                    temperature,
+                    merge_lines,
+                    start_time,
+                    end_time,
+                )
     else:
-        write('No model')
+        write("No model")
     return False
 
+
 def try_transcribe(
-    file: str, current_model: str, srt_file: str, language: str,
-    device: str, compute_type: str, force_device: bool, write: Callable,
-    cpu_threads: Optional[int] = None, vad_filter: bool = False,
-    vad_params: Optional[Dict[str, Any]] = None, diarization: bool = False,
-    diarization_params: Optional[Dict[str, Any]] = None, temperature: float = 0,
-    merge_lines: bool = False, start_time: Optional[str] = None,
-    end_time: Optional[str] = None, mpv_ipc_reload: Optional[Callable] = None,
-    _loop_retry_count: int = 0
+    file: str,
+    current_model: str,
+    srt_file: str,
+    language: str,
+    device: str,
+    compute_type: str,
+    force_device: bool,
+    write: Callable,
+    cpu_threads: Optional[int] = None,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    diarization: bool = False,
+    diarization_params: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+    merge_lines: bool = False,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    mpv_ipc_reload: Optional[Callable] = None,
+    _loop_retry_count: int = 0,
 ) -> bool:
     """Try transcription with given parameters, supporting resume."""
     script_path = None
     resume_audio_path = None
     trimmed_audio_path = None
     try:
-        unfinished_srt = srt_file.replace('.srt', '.unfinished.srt')
-        os.makedirs(os.path.dirname(unfinished_srt) or '.', exist_ok=True)
+        unfinished_srt = srt_file.replace(".srt", ".unfinished.srt")
+        os.makedirs(os.path.dirname(unfinished_srt) or ".", exist_ok=True)
 
         # --- TIME RANGE CUTTING ---
         audio_to_transcribe = file
         start_offset_seconds = 0.0
-        
+
         if start_time or end_time:
             trimmed_audio_path = os.path.splitext(file)[0] + ".trimmed.m4a"
             # Use -ss BEFORE -i for faster seeking, -vn to skip video processing
-            ffmpeg_cmd = ['ffmpeg', '-y']
+            ffmpeg_cmd = ["ffmpeg", "-y"]
 
             if start_time:
                 # Parse start time (support HH:MM:SS, MM:SS, or seconds)
-                if ':' in str(start_time):
+                if ":" in str(start_time):
                     # Place -ss before -i for fast seeking
-                    ffmpeg_cmd.extend(['-ss', str(start_time)])
+                    ffmpeg_cmd.extend(["-ss", str(start_time)])
                     # Calculate offset for subtitle timestamps
-                    parts = str(start_time).split(':')
+                    parts = str(start_time).split(":")
                     if len(parts) == 3:  # HH:MM:SS
-                        start_offset_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        start_offset_seconds = (
+                            int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        )
                     elif len(parts) == 2:  # MM:SS
                         start_offset_seconds = int(parts[0]) * 60 + float(parts[1])
                     else:  # Invalid format
                         start_offset_seconds = 0
-                        write(f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS")
+                        write(
+                            f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS"
+                        )
                 else:
                     start_offset_seconds = float(start_time)
-                    ffmpeg_cmd.extend(['-ss', str(datetime.timedelta(seconds=start_offset_seconds))])
+                    ffmpeg_cmd.extend(
+                        ["-ss", str(datetime.timedelta(seconds=start_offset_seconds))]
+                    )
 
-            ffmpeg_cmd.extend(['-i', file])
+            ffmpeg_cmd.extend(["-i", file])
 
             if end_time:
                 # Parse end time and calculate duration
-                if ':' in str(end_time):
+                if ":" in str(end_time):
                     # Convert HH:MM:SS or MM:SS to seconds
-                    parts = str(end_time).split(':')
+                    parts = str(end_time).split(":")
                     if len(parts) == 3:  # HH:MM:SS
-                        end_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        end_seconds = (
+                            int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        )
                     elif len(parts) == 2:  # MM:SS
                         end_seconds = int(parts[0]) * 60 + float(parts[1])
                     else:  # Invalid format
                         end_seconds = 0
-                        write(f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS")
+                        write(
+                            f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS"
+                        )
                 else:
                     end_seconds = float(end_time)
 
@@ -1006,26 +1198,38 @@ def try_transcribe(
                 else:
                     duration = end_seconds
 
-                ffmpeg_cmd.extend(['-t', str(datetime.timedelta(seconds=duration))])
+                ffmpeg_cmd.extend(["-t", str(datetime.timedelta(seconds=duration))])
 
             # Audio only - optimized for transcription speed
-            ffmpeg_cmd.extend([
-                '-vn',  # No video
-                '-acodec', 'aac',
-                '-b:a', '128k',  # Sufficient for speech
-                '-ac', '1',  # Mono
-                '-ar', '16000',  # Whisper native sample rate
-                trimmed_audio_path
-            ])
+            ffmpeg_cmd.extend(
+                [
+                    "-vn",  # No video
+                    "-acodec",
+                    "aac",
+                    "-b:a",
+                    "128k",  # Sufficient for speech
+                    "-ac",
+                    "1",  # Mono
+                    "-ar",
+                    "16000",  # Whisper native sample rate
+                    trimmed_audio_path,
+                ]
+            )
 
-            write(f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}...")
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+            write(
+                f"Cutting audio from {start_time or 'start'} to {end_time or 'end'}..."
+            )
+            result = subprocess.run(
+                ffmpeg_cmd, capture_output=True, text=True, check=False
+            )
             if result.returncode == 0:
                 audio_to_transcribe = trimmed_audio_path
                 write(f"Created trimmed audio: {trimmed_audio_path}")
                 write(f"Subtitle offset: {start_offset_seconds:.2f}s")
             else:
-                write(f"Warning: FFmpeg trimming failed: {result.stderr}, using original file")
+                write(
+                    f"Warning: FFmpeg trimming failed: {result.stderr}, using original file"
+                )
                 trimmed_audio_path = None
                 start_offset_seconds = 0.0
         # --- END TIME RANGE CUTTING ---
@@ -1033,66 +1237,97 @@ def try_transcribe(
         # --- RESUME LOGIC ---
         resume_offset_seconds = 0.0
         start_index = 0
-        open_mode = 'w'
+        open_mode = "w"
 
         # Check if metadata file exists and validate settings match
-        metadata_file = os.path.splitext(unfinished_srt)[0].replace('.unfinished', '') + '.metadata.json'
+        metadata_file = (
+            os.path.splitext(unfinished_srt)[0].replace(".unfinished", "")
+            + ".metadata.json"
+        )
         can_resume = True
-        
+
         if os.path.exists(metadata_file):
             try:
-                with open(metadata_file, 'r', encoding='utf-8') as f:
+                with open(metadata_file, "r", encoding="utf-8") as f:
                     metadata = json.load(f)
-                
+
                 # Validate key settings match
-                if metadata.get('model') != model_name:
-                    write(f"⚠️  Model changed ({metadata.get('model')} → {model_name}), starting fresh")
+                if metadata.get("model") != model_name:
+                    write(
+                        f"⚠️  Model changed ({metadata.get('model')} → {model_name}), starting fresh"
+                    )
                     can_resume = False
-                elif metadata.get('language') != (language or 'auto-detect'):
+                elif metadata.get("language") != (language or "auto-detect"):
                     write(f"⚠️  Language changed, starting fresh")
                     can_resume = False
             except Exception as e:
                 write(f"⚠️  Could not read metadata: {e}")
-        
+
         if can_resume:
             last_end_time, last_segment_number = get_srt_resume_info(unfinished_srt)
 
             if last_end_time > 0.1:  # Resume if there's more than 0.1s transcribed
-                write(f"✓ Found unfinished transcription: {last_segment_number} segments, resuming from {last_end_time:.2f}s")
+                write(
+                    f"✓ Found unfinished transcription: {last_segment_number} segments, resuming from {last_end_time:.2f}s"
+                )
                 resume_offset_seconds = last_end_time
                 start_index = last_segment_number
-                open_mode = 'a'
-                resume_audio_path = os.path.splitext(audio_to_transcribe)[0] + ".resume.m4a"
+                open_mode = "a"
+                resume_audio_path = (
+                    os.path.splitext(audio_to_transcribe)[0] + ".resume.m4a"
+                )
 
                 try:
                     ss_time = str(datetime.timedelta(seconds=resume_offset_seconds))
-                    ffmpeg_command = ['/bin/ffmpeg', '-y', '-ss', ss_time, '-i', audio_to_transcribe, '-c:a', 'aac', '-b:a', '128k', '-ac', '1', '-ar', '16000', resume_audio_path]
-                    write(f"✂️  Creating partial audio file for resume (from {ss_time})...")
+                    ffmpeg_command = [
+                        "/bin/ffmpeg",
+                        "-y",
+                        "-ss",
+                        ss_time,
+                        "-i",
+                        audio_to_transcribe,
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "128k",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        resume_audio_path,
+                    ]
+                    write(
+                        f"✂️  Creating partial audio file for resume (from {ss_time})..."
+                    )
 
-                    result = subprocess.run(ffmpeg_command, capture_output=True, text=True, check=False)
+                    result = subprocess.run(
+                        ffmpeg_command, capture_output=True, text=True, check=False
+                    )
                     if result.returncode != 0:
-                        raise Exception(f"FFmpeg failed: {result.stderr[:200] if result.stderr else 'Unknown error'}")
+                        raise Exception(
+                            f"FFmpeg failed: {result.stderr[:200] if result.stderr else 'Unknown error'}"
+                        )
 
                     audio_to_transcribe = resume_audio_path
                     write(f"✓ Resume audio created successfully")
                 except Exception as e:
                     write(f"⚠️  Could not create resume audio: {e}")
                     write(f"→ Starting from beginning (clearing unfinished file)")
-                    resume_offset_seconds, start_index, open_mode = 0.0, 0, 'w'
+                    resume_offset_seconds, start_index, open_mode = 0.0, 0, "w"
                     audio_to_transcribe = file
                     try:
-                        with open(unfinished_srt, 'w', encoding='utf-8') as f:
-                            f.write('')
+                        with open(unfinished_srt, "w", encoding="utf-8") as f:
+                            f.write("")
                     except:
                         pass
             else:
                 # No valid resume point - start fresh
-                with open(unfinished_srt, 'w', encoding='utf-8') as f:
-                    f.write('')
+                with open(unfinished_srt, "w", encoding="utf-8") as f:
+                    f.write("")
         else:
             # Can't resume due to settings change - start fresh
-            with open(unfinished_srt, 'w', encoding='utf-8') as f:
-                f.write('')
+            with open(unfinished_srt, "w", encoding="utf-8") as f:
+                f.write("")
         # --- END RESUME LOGIC ---
 
         # Create helper files for the unfinished SRT file
@@ -1107,10 +1342,14 @@ def try_transcribe(
         except OSError:
             write(f"Could not create symlink, skipping")
 
-        is_english_only = '.en' in current_model
-        language_param = '\'en\'' if is_english_only else ('None' if language == 'none' else f"'{language}'")
-        whisper_log = srt_file.replace('.srt', '.whisper.log')
-        
+        is_english_only = ".en" in current_model
+        language_param = (
+            "'en'"
+            if is_english_only
+            else ("None" if language == "none" else f"'{language}'")
+        )
+        whisper_log = srt_file.replace(".srt", ".whisper.log")
+
         # Initialize audio_duration for progress tracking (will be updated after model loads)
         audio_duration = 0
 
@@ -1157,12 +1396,12 @@ write_event = threading.Event()
 stop_event = threading.Event()
 device = "{device}"
 compute_type = "{compute_type}"
-cpu_threads = {cpu_threads if cpu_threads else 'None'}
+cpu_threads = {cpu_threads if cpu_threads else "None"}
 vad_filter = {str(vad_filter).capitalize()}
-vad_params = {vad_params if vad_filter and vad_params else 'None'}
+vad_params = {vad_params if vad_filter and vad_params else "None"}
 temperature = {temperature}
 merge_lines = {str(merge_lines).capitalize()}
-mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else 'None'}
+mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else "None"}
 start_offset_seconds = {start_offset_seconds}
 segments_written = 0
 audio_duration = {audio_duration}
@@ -1287,7 +1526,12 @@ try:
 
         # Track compression ratio failures for hallucination detection
         seg_cr = getattr(segment, 'compression_ratio', 0.0) or 0.0
-        if seg_cr > 2.4:
+        
+        # Check for repetitive content like "0000, 0000, 0000"
+        import re
+        is_repetitive = bool(re.search(r"(.+?)(,\s*\1){(3,)}", segment.text))
+
+        if seg_cr > 2.4 or is_repetitive:
             if compression_fail_streak == 0:
                 compression_fail_first_ts = segment.start
             compression_fail_streak += 1
@@ -1295,7 +1539,7 @@ try:
             compression_fail_streak = 0
 
         if compression_fail_streak >= compression_fail_max:
-            print(f"Hallucination detected: {{compression_fail_streak}} consecutive compression ratio failures starting from {{compression_fail_first_ts:.1f}}s")
+            print(f"Hallucination detected (ratio={seg_cr}, repetitive={is_repetitive}): {compression_fail_streak} failures starting from {compression_fail_first_ts:.1f}s")
             with open(loop_detect_file, "w") as lf:
                 lf.write(str(compression_fail_first_ts + resume_offset))
             stop_event.set()
@@ -1362,7 +1606,7 @@ try:
             "language": {language_param},
             "device": "{device}",
             "compute_type": "{compute_type}",
-            "cpu_threads": {cpu_threads if cpu_threads else 'None'},
+            "cpu_threads": {cpu_threads if cpu_threads else "None"},
             "vad_enabled": {vad_filter},
             "temperature": {temperature},
             "segments_count": segments_count
@@ -1387,61 +1631,94 @@ finally:
     file_handler.close()
     whisper_logger.removeHandler(file_handler)
 '''
-        
+
         import tempfile
+
         temp_dir = tempfile.gettempdir()
         script_path = os.path.join(temp_dir, f"temp_whisper_{os.getpid()}.py")
-        
-        with open(script_path, 'w', encoding='utf-8') as f:
+
+        with open(script_path, "w", encoding="utf-8") as f:
             f.write(script)
 
         args = [sys.executable, script_path]
         write(f"Running transcription with model {current_model} on {device}")
-        
+
         process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding='utf-8', errors='replace', text=True, bufsize=1, universal_newlines=True
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
         )
 
         def log_output(pipe, prefix):
             for line in pipe:
-                if line := line.strip(): write(f"{prefix}: {line}")
+                if line := line.strip():
+                    write(f"{prefix}: {line}")
 
-        stdout_thread = threading.Thread(target=log_output, args=(process.stdout, "Out"), daemon=True)
-        stderr_thread = threading.Thread(target=log_output, args=(process.stderr, "Error"), daemon=True)
-        stdout_thread.start(); stderr_thread.start()
-        
+        stdout_thread = threading.Thread(
+            target=log_output, args=(process.stdout, "Out"), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=log_output, args=(process.stderr, "Error"), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
         exit_code = process.wait()
 
-        stdout_thread.join(timeout=5); stderr_thread.join(timeout=5)
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
 
         if exit_code == 42:
-            loop_detect_file = unfinished_srt.replace('.srt', '.loop_detect')
+            loop_detect_file = unfinished_srt.replace(".srt", ".loop_detect")
             loop_timestamp = 0.0
             if os.path.exists(loop_detect_file):
                 try:
-                    with open(loop_detect_file, 'r') as lf:
+                    with open(loop_detect_file, "r") as lf:
                         loop_timestamp = float(lf.read().strip())
                     os.remove(loop_detect_file)
                 except Exception as e:
                     write(f"Warning: Could not read loop detect file: {e}")
 
             if loop_timestamp > 0:
-                write(f"Loop detected at {loop_timestamp:.1f}s, trimming SRT and retrying...")
+                write(
+                    f"Loop detected at {loop_timestamp:.1f}s, trimming SRT and retrying..."
+                )
                 _trim_srt_to_timestamp(unfinished_srt, loop_timestamp)
 
             if _loop_retry_count < 2:
                 write(f"Retrying transcription (attempt {_loop_retry_count + 1}/2)...")
                 return try_transcribe(
-                    file, current_model, srt_file, language, device, compute_type,
-                    force_device, write, cpu_threads, vad_filter, vad_params,
-                    diarization, diarization_params, temperature, merge_lines,
-                    start_time, end_time, mpv_ipc_reload,
-                    _loop_retry_count=_loop_retry_count + 1
+                    file,
+                    current_model,
+                    srt_file,
+                    language,
+                    device,
+                    compute_type,
+                    force_device,
+                    write,
+                    cpu_threads,
+                    vad_filter,
+                    vad_params,
+                    diarization,
+                    diarization_params,
+                    temperature,
+                    merge_lines,
+                    start_time,
+                    end_time,
+                    mpv_ipc_reload,
+                    _loop_retry_count=_loop_retry_count + 1,
                 )
             else:
                 write("Max loop retries reached, keeping partial SRT")
-                if os.path.exists(unfinished_srt) and os.path.getsize(unfinished_srt) > 10:
+                if (
+                    os.path.exists(unfinished_srt)
+                    and os.path.getsize(unfinished_srt) > 10
+                ):
                     if os.path.islink(srt_file):
                         os.remove(srt_file)
                     if os.path.exists(srt_file):
@@ -1451,11 +1728,15 @@ finally:
                     return True
                 return False
 
-        if exit_code == 0 and os.path.exists(srt_file) and os.path.getsize(srt_file) > 10:
+        if (
+            exit_code == 0
+            and os.path.exists(srt_file)
+            and os.path.getsize(srt_file) > 10
+        ):
             write(f"Successfully created {srt_file}")
             make_files(srt_file)
             return True
-        
+
         write(f"Process exited with code {exit_code}")
         return False
 
@@ -1465,7 +1746,8 @@ finally:
 
     finally:
         try:
-            if script_path and os.path.exists(script_path): os.unlink(script_path)
+            if script_path and os.path.exists(script_path):
+                os.unlink(script_path)
             if resume_audio_path and os.path.exists(resume_audio_path):
                 os.unlink(resume_audio_path)
                 write("Removed temporary resume audio file.")
@@ -1479,6 +1761,7 @@ finally:
         except Exception as e:
             write(f"Warning: Could not remove temporary file: {e}")
 
+
 def write_srt_from_segments(segments, srt):
     """Writes the transcription segments to an SRT file."""
     for i, segment in enumerate(segments, start=1):
@@ -1490,6 +1773,7 @@ def write_srt_from_segments(segments, srt):
         srt.write(f"{start_time} --> {end_time}\n")
         srt.write(f"{segment.text}\n\n")
 
+
 HALLUCINATION_NAMES = {
     "Sônia Ruberti",
     "Tiago Anderson",
@@ -1497,6 +1781,7 @@ HALLUCINATION_NAMES = {
     "Anderson",
     "Ruberti",
 }
+
 
 def is_whisper_entity(seg):
     """Check if a segment contains hallucinated entities."""
@@ -1508,9 +1793,9 @@ def is_whisper_entity(seg):
     # Access the segment's properties if available
     # The attributes might not be available in all contexts, so handle safely
     try:
-        if hasattr(seg, 'no_speech_prob') and seg.no_speech_prob > 0.5:
+        if hasattr(seg, "no_speech_prob") and seg.no_speech_prob > 0.5:
             return True
-        if hasattr(seg, 'avg_logprob') and seg.avg_logprob < -1.2:
+        if hasattr(seg, "avg_logprob") and seg.avg_logprob < -1.2:
             return True
     except:
         pass  # If properties aren't available, continue with other checks
@@ -1519,6 +1804,7 @@ def is_whisper_entity(seg):
         return True
 
     return False
+
 
 def is_garbage(seg):
     """Check if a segment contains garbage text that should be filtered out."""
@@ -1543,9 +1829,11 @@ def is_garbage(seg):
         return True
     return False
 
+
 def filter_garbage_segments(segments: List[Segment]) -> List[Segment]:
     """Remove segments that are likely to be garbage."""
     return [s for s in segments if not is_garbage(s)]
+
 
 def merge_adjacent_identical_segments(segments: List[Segment]) -> List[Segment]:
     """Merge adjacent segments that have identical text."""
@@ -1560,31 +1848,37 @@ def merge_adjacent_identical_segments(segments: List[Segment]) -> List[Segment]:
             merged.append(s)
     return merged
 
+
 if __name__ == "__main__":
-    if sys.argv[1] == '--write-srt':
+    if sys.argv[1] == "--write-srt":
         json_file = sys.argv[2]
         srt_file = sys.argv[3]
-        if not ':' in json_file or not ':' in srt_file:
+        if not ":" in json_file or not ":" in srt_file:
             subs_dir = "Documents\\Youtube-Subs"
-            if not ':' in json_file:
+            if not ":" in json_file:
                 json_file = os.path.join(os.path.expanduser("~"), subs_dir, json_file)
-            if not ':' in srt_file:
+            if not ":" in srt_file:
                 srt_file = os.path.join(os.path.expanduser("~"), subs_dir, srt_file)
-        with open(srt_file, mode='w', encoding='utf-8') as srt:
+        with open(srt_file, mode="w", encoding="utf-8") as srt:
             write_srt(json_file, srt)
         sys.exit(0)
 
     elif len(sys.argv) < 5:
-        print("Usage: python script.py <audio_file> <model_name> <language> <device> <compute>")
+        print(
+            "Usage: python script.py <audio_file> <model_name> <language> <device> <compute>"
+        )
         sys.exit(1)
     audio_file = sys.argv[1]
     model_name = sys.argv[2]
-    language = sys.argv[3] if sys.argv[3] != 'none' else None
-    srt_file = sys.argv[4] if len(sys.argv) > 6 else 'transcription.srt'
-    device = sys.argv[5] if len(sys.argv) > 4 else 'cuda'
-    compute = sys.argv[6] if len(sys.argv) > 5 else 'int8_float32'
+    language = sys.argv[3] if sys.argv[3] != "none" else None
+    srt_file = sys.argv[4] if len(sys.argv) > 6 else "transcription.srt"
+    device = sys.argv[5] if len(sys.argv) > 4 else "cuda"
+    compute = sys.argv[6] if len(sys.argv) > 5 else "int8_float32"
 
-    print(f"Transcribing {audio_file} using model {model_name} and language {language}", file=sys.stderr)
+    print(
+        f"Transcribing {audio_file} using model {model_name} and language {language}",
+        file=sys.stderr,
+    )
 
     # Call the transcribe_audio generator
     transcribe_audio(audio_file, model_name, srt_file, language, device, compute)

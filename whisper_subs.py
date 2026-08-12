@@ -203,7 +203,7 @@ class WhisperSubs:
         ignore_subs: bool = False,
         sub_lang: Optional[str] = None,
         run_mpv: bool = False,
-        browser: str = "chrome",
+        browser: str = "firefox",
         strict_language_tier: bool = False,
         force_retry: bool = False,
         vad_filter: Optional[bool] = None,
@@ -1817,7 +1817,10 @@ Examples:
         help="Force retry transcription even if already completed (ignores existing subtitles).",
     )
     process_group.add_argument(
-        "-i", "--ignore-subs", action="store_true", help="Ignore existing subtitles."
+        "-is", "--ignore-subs", action="store_false", help="Ignore existing subtitles."
+    )
+    process_group.add_argument(
+        "-i", "--invert", action="store_true", help="Invert lines"
     )
     process_group.add_argument(
         "-lang", "--language", help="Language code for subtitle priority."
@@ -2080,13 +2083,11 @@ Examples:
                     job_or_source = sources[0]
                 else:
                     print(f"Found {len(sources)} sources in clipboard:")
-                    for i, src in enumerate(sources[:5], 1):
-                        print(f"  {i}. {src[:80]}{'...' if len(src) > 80 else ''}")
-                    if len(sources) > 5:
-                        print(
-                            f"  ... and {len(sources) - 5} more"
-                            " (processing all in a single batch)"
-                        )
+                    if args.invert:
+                        print("Inverting...")
+                        sources.reverse()
+                    for i, src in enumerate(sources):
+                        print(f"  {i}. {src}")
                     job_or_source = "\n".join(sources)
             except Exception as e:
                 parser.error(f"No source provided and could not read clipboard: {e}")

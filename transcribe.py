@@ -1148,7 +1148,8 @@ def try_transcribe(
             ffmpeg_cmd = ["ffmpeg", "-y"]
 
             if start_time:
-                # Parse start time (support HH:MM:SS, MM:SS, or seconds)
+                # Parse start time (support HH:MM:SS, MM:SS, or minutes/seconds)
+                # Integers/floats without colons are treated as minutes
                 if ":" in str(start_time):
                     # Place -ss before -i for fast seeking
                     ffmpeg_cmd.extend(["-ss", str(start_time)])
@@ -1166,7 +1167,8 @@ def try_transcribe(
                             f"Warning: Invalid start_time format '{start_time}', expected HH:MM:SS or MM:SS"
                         )
                 else:
-                    start_offset_seconds = float(start_time)
+                    # Plain number (int or float) = minutes
+                    start_offset_seconds = float(start_time) * 60
                     ffmpeg_cmd.extend(
                         ["-ss", str(datetime.timedelta(seconds=start_offset_seconds))]
                     )
@@ -1175,6 +1177,7 @@ def try_transcribe(
 
             if end_time:
                 # Parse end time and calculate duration
+                # Integers/floats without colons are treated as minutes
                 if ":" in str(end_time):
                     # Convert HH:MM:SS or MM:SS to seconds
                     parts = str(end_time).split(":")
@@ -1190,7 +1193,8 @@ def try_transcribe(
                             f"Warning: Invalid end_time format '{end_time}', expected HH:MM:SS or MM:SS"
                         )
                 else:
-                    end_seconds = float(end_time)
+                    # Plain number (int or float) = minutes
+                    end_seconds = float(end_time) * 60
 
                 # Calculate duration
                 if start_time:

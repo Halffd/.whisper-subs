@@ -1894,14 +1894,14 @@ Examples:
         "--start",
         type=str,
         default=None,
-        help="Start time to transcribe (format: HH:MM:SS or seconds).",
+        help="Start time to transcribe (format: HH:MM:SS, MM:SS, or minutes as int/float).",
     )
     advanced_group.add_argument(
         "--end-time",
         "--end",
         type=str,
         default=None,
-        help="End time to transcribe (format: HH:MM:SS or seconds).",
+        help="End time to transcribe (format: HH:MM:SS, MM:SS, or minutes as int/float).",
     )
     advanced_group.add_argument(
         "--mpv-ipc",

@@ -1358,9 +1358,11 @@ def try_transcribe(
         audio_duration = 0
 
         script = f'''
+import sys
+sys.path.insert(0, r"{os.path.dirname(os.path.abspath(__file__))}")
+
 import faster_whisper
 import os
-import sys
 import threading
 import queue
 import time

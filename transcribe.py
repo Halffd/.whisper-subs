@@ -1252,9 +1252,9 @@ def try_transcribe(
                     metadata = json.load(f)
 
                 # Validate key settings match
-                if metadata.get("model") != model_name:
+                if metadata.get("model") != current_model:
                     write(
-                        f"⚠️  Model changed ({metadata.get('model')} → {model_name}), starting fresh"
+                        f"⚠️  Model changed ({metadata.get('model')} → {current_model}), starting fresh"
                     )
                     can_resume = False
                 elif metadata.get("language") != (language or "auto-detect"):
@@ -1584,6 +1584,8 @@ try:
     
     stop_event.set()
     writer_thread.join(timeout=30)
+    # Small delay to ensure writer thread has flushed all data
+    time.sleep(0.5)
 
     if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
         if os.path.islink(r"{srt_file}"): os.remove(r"{srt_file}")

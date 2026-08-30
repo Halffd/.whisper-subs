@@ -729,8 +729,8 @@ class WhisperSubs:
 
         result = subprocess.run(
             ffmpeg_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             check=False,
         )
@@ -745,7 +745,7 @@ class WhisperSubs:
                 pass
             return audio_path
         else:
-            self.log(f"Audio extraction failed, using original file")
+            self.log(f"Audio extraction failed. FFmpeg error: {result.stderr}")
             return video_path
 
     def check_and_download_subs(self, url, output_dir, title):

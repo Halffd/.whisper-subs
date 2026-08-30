@@ -1817,7 +1817,7 @@ Examples:
         help="Force retry transcription even if already completed (ignores existing subtitles).",
     )
     process_group.add_argument(
-        "-is", "--ignore-subs", action="store_false", help="Ignore existing subtitles."
+        "-is", "--ignore-subs", action="store_true", help="Ignore existing subtitles."
     )
     process_group.add_argument(
         "-i", "--invert", action="store_true", help="Invert lines"
@@ -1856,6 +1856,7 @@ Examples:
     advanced_group.add_argument(
         "--vad",
         action="store_false",
+        dest="vad_filter",
         help="Disable Voice Activity Detection (VAD) filter.",
     )
     advanced_group.add_argument(

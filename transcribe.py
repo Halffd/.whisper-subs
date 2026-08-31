@@ -1334,8 +1334,8 @@ def try_transcribe(
                 f.write("")
         # --- END RESUME LOGIC ---
 
-        # Create helper files for the unfinished SRT file
-        make_files(unfinished_srt)
+        # Create helper files for the final SRT file (not unfinished)
+        make_files(srt_file)
 
         # Create symlink from srt_file -> unfinished_srt so players see in-progress transcription
         if os.path.exists(srt_file) or os.path.islink(srt_file):

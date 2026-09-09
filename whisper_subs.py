@@ -269,6 +269,10 @@ class WhisperSubs:
         # CPU threads setting
         self.cpu_threads = cpu_threads
 
+        # Optional callback when SRT file is created (for streaming)
+        # Called with (srt_path, unfinished_srt_path) when the unfinished SRT is created
+        self.on_srt_created: Optional[Callable[[str, str], None]] = None
+
     def _get_ytdlp_base_opts(self, **extra_opts) -> Dict[str, Any]:
         """Get base yt-dlp options with cookies from browser (required for YouTube)."""
         base_opts = {
@@ -1352,6 +1356,13 @@ class WhisperSubs:
             except OSError:
                 pass
 
+            # Callback for real-time subtitle streaming
+            if self.on_srt_created:
+                try:
+                    self.on_srt_created(srt_file, unfinished_srt)
+                except Exception as e:
+                    self.log(f"Warning: on_srt_created callback failed: {e}")
+
             # Launch mpv FIRST if --run option is specified (before transcription starts)
             mpv_process = None
             if hasattr(self, "run_mpv") and self.run_mpv:
@@ -1914,6 +1925,19 @@ Examples:
         default="/tmp/mpvsocket",
         help="MPV IPC socket path (default: /tmp/mpvsocket).",
     )
+    # Livestream options
+    advanced_group.add_argument(
+        "--live-poll",
+        type=int,
+        default=10,
+        help="Livestream transcription poll interval in seconds (default: 10).",
+    )
+    advanced_group.add_argument(
+        "--live-growth",
+        type=float,
+        default=1.02,
+        help="Livestream growth threshold factor (default: 1.02 = 2%% growth).",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -2151,6 +2175,8 @@ Examples:
             compute_type=args.compute,
             output_dir=OUTPUT_DIR,
             log_func=lambda msg: print(f"[LIVE] {msg}"),
+            live_poll=args.live_poll,
+            live_growth=args.live_growth,
         )
 
         try:

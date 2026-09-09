@@ -65,6 +65,7 @@ def _transcribe_with_adapter(
     vad_filter: bool = False,
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
+    on_srt_created: Optional[Callable[[str, str], None]] = None,
     **kwargs,
 ) -> bool:
     """Transcribe using the adapter system (for all prefixed models).
@@ -182,6 +183,13 @@ def _transcribe_with_adapter(
 
         write(f"Transcription in progress: {srt_file}")
         make_files(srt_file)
+
+        # Callback for real-time subtitle streaming
+        if on_srt_created:
+            try:
+                on_srt_created(srt_file, real_srt)
+            except Exception as e:
+                write(f"Warning: on_srt_created callback failed: {e}")
 
         if mpv_ipc_reload is not None:
             try:
@@ -496,6 +504,7 @@ def transcribe_audio(
     vad_filter: bool = False,
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
+    on_srt_created: Optional[Callable[[str, str], None]] = None,
     **kwargs,
 ) -> bool:
     """
@@ -610,6 +619,7 @@ def transcribe_audio(
                 vad_filter=vad_filter,
                 vad_params=vad_params,
                 mpv_ipc_reload=mpv_ipc_reload,
+                on_srt_created=on_srt_created,
             )
         except LoopDetectedError as e:
             write(
@@ -984,6 +994,7 @@ def process_create(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     mpv_ipc_reload: Optional[Callable] = None,
+    on_srt_created: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
     if file is None:
@@ -1011,6 +1022,7 @@ def process_create(
             vad_filter=vad_filter,
             vad_params=vad_params,
             mpv_ipc_reload=mpv_ipc_reload,
+            on_srt_created=on_srt_created,
         )
 
     # Only switch to CPU if not forcing device

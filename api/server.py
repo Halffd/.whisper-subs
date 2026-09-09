@@ -15,6 +15,7 @@ import socketio
 import secrets
 import hashlib
 import jwt
+import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from fastapi import (
     FastAPI,
@@ -51,6 +52,39 @@ from srt_tailer import SRTTailerManager, SRTTailer
 # SRT file path registry: task_id -> {"srt": str, "unfinished": str}
 srt_paths: Dict[str, Dict[str, str]] = {}
 srt_paths_lock = threading.Lock()
+
+# Media file path registry: task_id -> {"audio": str, "video": str}
+media_paths: Dict[str, Dict[str, str]] = {}
+media_paths_lock = threading.Lock()
+
+
+def register_media_path(task_id: str, media_type: str, file_path: str):
+    """Register a media file path for a task.
+
+    Args:
+        task_id: The task identifier
+        media_type: "audio" or "video"
+        file_path: Absolute path to the media file
+    """
+    with media_paths_lock:
+        if task_id not in media_paths:
+            media_paths[task_id] = {}
+        media_paths[task_id][media_type] = file_path
+
+
+def register_srt_path(task_id: str, path_type: str, file_path: str):
+    """Register an SRT file path for a task.
+
+    Args:
+        task_id: The task identifier
+        path_type: "srt" or "unfinished"
+        file_path: Absolute path to the SRT file
+    """
+    with srt_paths_lock:
+        if task_id not in srt_paths:
+            srt_paths[task_id] = {}
+        srt_paths[task_id][path_type] = file_path
+
 
 # SRT tailer manager for real-time streaming
 srt_tailer_manager = SRTTailerManager()
@@ -1203,6 +1237,302 @@ async def get_subtitles_snapshot(task_id: str):
             }
 
     raise HTTPException(status_code=404, detail="Subtitle file not found")
+
+
+# =============================================================================
+# Media Streaming Endpoints (Audio/Video)
+# =============================================================================
+
+
+def _parse_range_header(range_header: Optional[str], file_size: int) -> tuple:
+    """Parse Range header and return (start, end, content_length).
+
+    Returns (0, file_size - 1, file_size) if no valid range header.
+    """
+    if not range_header or not range_header.startswith("bytes="):
+        return 0, file_size - 1, file_size
+
+    try:
+        range_spec = range_header[6:]  # Remove "bytes="
+        start_str, end_str = range_spec.split("-", 1)
+
+        start = int(start_str) if start_str else 0
+        end = int(end_str) if end_str else file_size - 1
+
+        # Clamp to file bounds
+        start = max(0, min(start, file_size - 1))
+        end = max(start, min(end, file_size - 1))
+
+        return start, end, end - start + 1
+    except (ValueError, IndexError):
+        return 0, file_size - 1, file_size
+
+
+async def _stream_file(
+    file_path: str,
+    range_header: Optional[str] = None,
+    media_type: str = "application/octet-stream",
+    filename: Optional[str] = None,
+):
+    """Stream a file with Range request support."""
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    file_size = os.path.getsize(file_path)
+    start, end, content_length = _parse_range_header(range_header, file_size)
+
+    async def file_iterator():
+        chunk_size = 1024 * 1024  # 1MB chunks
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            remaining = content_length
+            while remaining > 0:
+                read_size = min(chunk_size, remaining)
+                chunk = f.read(read_size)
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(content_length),
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+    }
+
+    if filename:
+        headers["Content-Disposition"] = f'inline; filename="{filename}"'
+
+    status_code = 206 if range_header else 200
+
+    return StreamingResponse(
+        file_iterator(),
+        status_code=status_code,
+        media_type=media_type,
+        headers=headers,
+    )
+
+
+@app.get("/api/v1/media/audio/{cache_key}")
+async def stream_cached_audio(
+    cache_key: str,
+    range: Optional[str] = None,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Stream a cached audio file by cache key (SHA256 hash prefix).
+
+    The cache key is the first 16 characters of the SHA256 hash of the source URL.
+    Supports Range requests for seeking.
+    """
+    import audio_cache
+
+    index = audio_cache._load_index()
+    entry = index["entries"].get(cache_key)
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Audio not found in cache")
+
+    audio_path = entry.get("path", "")
+    if not audio_path or not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Cached audio file not found")
+
+    # Update LRU access time
+    entry["mtime"] = time.time()
+    audio_cache._save_index(index)
+
+    # Determine media type from extension
+    ext = os.path.splitext(audio_path)[1].lower()
+    media_types = {
+        ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/opus",
+        ".flac": "audio/flac",
+        ".aac": "audio/aac",
+    }
+    media_type = media_types.get(ext, "audio/mpeg")
+
+    filename = os.path.basename(audio_path)
+    return await _stream_file(audio_path, range, media_type, filename)
+
+
+@app.get("/api/v1/media/video/{task_id}")
+async def stream_task_video(
+    task_id: str,
+    range: Optional[str] = None,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Stream the video file associated with a transcription task.
+
+    Supports Range requests for seeking. The video file must have been
+    registered via the media_paths registry (set during download).
+    """
+    with media_paths_lock:
+        if task_id not in media_paths:
+            raise HTTPException(
+                status_code=404, detail="Task not found or media not registered"
+            )
+        paths = media_paths[task_id]
+
+    video_path = paths.get("video")
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    ext = os.path.splitext(video_path)[1].lower()
+    media_types = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".mov": "video/quicktime",
+        ".avi": "video/x-msvideo",
+        ".m4v": "video/x-m4v",
+    }
+    media_type = media_types.get(ext, "video/mp4")
+
+    filename = os.path.basename(video_path)
+    return await _stream_file(video_path, range, media_type, filename)
+
+
+@app.get("/api/v1/media/audio/{task_id}")
+async def stream_task_audio(
+    task_id: str,
+    range: Optional[str] = None,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Stream the audio file associated with a transcription task.
+
+    Supports Range requests for seeking. The audio file must have been
+    registered via the media_paths registry (set during download).
+    """
+    with media_paths_lock:
+        if task_id not in media_paths:
+            raise HTTPException(
+                status_code=404, detail="Task not found or media not registered"
+            )
+        paths = media_paths[task_id]
+
+    audio_path = paths.get("audio")
+    if not audio_path or not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    ext = os.path.splitext(audio_path)[1].lower()
+    media_types = {
+        ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/opus",
+        ".flac": "audio/flac",
+        ".aac": "audio/aac",
+    }
+    media_type = media_types.get(ext, "audio/mpeg")
+
+    filename = os.path.basename(audio_path)
+    return await _stream_file(audio_path, range, media_type, filename)
+
+
+@app.get("/api/v1/media/info/{task_id}")
+async def get_media_info(
+    task_id: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Get metadata about media files associated with a task.
+
+    Returns file paths, sizes, durations (if available), and formats.
+    """
+    with media_paths_lock:
+        if task_id not in media_paths:
+            raise HTTPException(
+                status_code=404, detail="Task not found or media not registered"
+            )
+        paths = media_paths[task_id]
+
+    info = {"task_id": task_id, "audio": None, "video": None}
+
+    for media_type in ["audio", "video"]:
+        path = paths.get(media_type)
+        if path and os.path.exists(path):
+            stat = os.stat(path)
+            info[media_type] = {
+                "path": path,
+                "filename": os.path.basename(path),
+                "size_bytes": stat.st_size,
+                "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                "format": os.path.splitext(path)[1][1:].lower(),
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            }
+
+    return info
+
+
+@app.get("/api/v1/cache/audio")
+async def list_cached_audio(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    List all cached audio files with metadata.
+
+    Returns list of {cache_key, source, path, size_mb, format, modified}.
+    """
+    import audio_cache
+
+    index = audio_cache._load_index()
+    results = []
+
+    for cache_key, entry in index["entries"].items():
+        path = entry.get("path", "")
+        if path and os.path.exists(path):
+            stat = os.stat(path)
+            ext = os.path.splitext(path)[1][1:].lower()
+            results.append(
+                {
+                    "cache_key": cache_key,
+                    "source": entry.get("source", "")[:200],
+                    "path": path,
+                    "filename": os.path.basename(path),
+                    "size_bytes": stat.st_size,
+                    "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                    "format": ext,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "age_days": round((time.time() - entry.get("mtime", 0)) / 86400, 1),
+                }
+            )
+
+    return {"cached_audio": sorted(results, key=lambda x: x["modified"], reverse=True)}
+
+
+@app.delete("/api/v1/cache/audio/{cache_key}")
+async def delete_cached_audio(
+    cache_key: str,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Delete a cached audio file by cache key.
+    """
+    import audio_cache
+
+    index = audio_cache._load_index()
+    entry = index["entries"].get(cache_key)
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Audio not found in cache")
+
+    path = entry.get("path", "")
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    del index["entries"][cache_key]
+    audio_cache._save_index(index)
+
+    return {"message": f"Cached audio {cache_key} deleted"}
 
 
 @app.get("/live/{task_id}")

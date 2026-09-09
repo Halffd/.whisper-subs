@@ -1245,13 +1245,19 @@ class WhisperSubs:
         except Exception:
             return False
 
-    def process_task(self, job_id, task):
+    def process_task(self, job_id, task, task_id: Optional[str] = None):
         task_source = task["source"]
         unique_id = self.get_unique_id(task_source)
         if not self.force_retry and self.is_processed(unique_id):
             self.log(f"Skipping task '{task_source}' - already processed.")
             update_task_status(job_id, task_source, "skipped", task["title"])
             return
+
+        # Generate task_id if not provided (for API media path registration)
+        if task_id is None:
+            import hashlib
+
+            task_id = f"{job_id}_{hashlib.md5(task_source.encode()).hexdigest()[:8]}"
 
         audio_file, is_local = None, self.is_local_file(task_source)
         try:
@@ -1295,6 +1301,14 @@ class WhisperSubs:
             if not audio_file or not os.path.exists(audio_file):
                 self.log(f"Audio file not found: {audio_file}")
                 return
+
+            # Register audio file for media streaming API
+            try:
+                from api.server import register_media_path
+
+                register_media_path(task_id, "audio", audio_file)
+            except ImportError:
+                pass  # API server not available (e.g., CLI mode)
 
             # Update base_name construction
             if not is_local and timeday:
@@ -1347,6 +1361,15 @@ class WhisperSubs:
             # Create helper files (bash, bat, thumbnail) before transcription
             unfinished_srt = srt_file.replace(".srt", ".unfinished.srt")
             _get_helper_files().make_files(unfinished_srt, url=task_source)
+
+            # Register SRT paths for streaming API
+            try:
+                from api.server import register_srt_path
+
+                register_srt_path(task_id, "unfinished", unfinished_srt)
+                register_srt_path(task_id, "srt", srt_file)
+            except ImportError:
+                pass  # API server not available (e.g., CLI mode)
 
             # Create symlink from srt_file -> unfinished_srt so players see in-progress transcription
             try:
@@ -1598,11 +1621,16 @@ class WhisperSubs:
                 existing_tasks.append(task)
                 update_job(job["id"], {"tasks": existing_tasks})
 
+                # Generate task_id for media path registration
+                import hashlib
+
+                task_id = f"{job['id']}_{hashlib.md5(task['source'].encode()).hexdigest()[:8]}"
+
                 # Process the task
                 self.log(
                     f"Processing [{total_processed + 1}/{total_discovered}]: {task['title']}"
                 )
-                self.process_task(job["id"], task)
+                self.process_task(job["id"], task, task_id)
 
                 # Update progress
                 total_processed += 1

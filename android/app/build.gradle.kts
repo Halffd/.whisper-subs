@@ -49,6 +49,13 @@ android {
         compose = true
         viewBinding = false
     }
+    externalNativeBuild {
+        cmake {
+            path = "src/main/cpp/CMakeLists.txt"
+            version = "3.22.1"
+        }
+    }
+    ndkVersion = "27.0.12077973"
 }
 dependencies {
     // Core Android

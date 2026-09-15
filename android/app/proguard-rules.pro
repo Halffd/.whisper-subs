@@ -24,3 +24,13 @@
 
 # App specific
 -keep class com.halffd.whispersubs.** { *; }
+
+# JNI classes
+-keep class com.halffd.whispersubs.local.WhisperNative { *; }
+-keep class com.halffd.whispersubs.local.TranscriptSegment { *; }
+-keep class com.halffd.whispersubs.local.ModelManager$WhisperModel { *; }
+-keep class com.halffd.whispersubs.local.TranscriptionService { *; }
+-keep class com.halffd.whispersubs.local.LocalTranscriptionViewModel { *; }
+
+# Native library
+-keep class com.halffd.whispersubs.local.** { *; }

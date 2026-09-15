@@ -24,6 +24,8 @@ import com.halffd.whispersubs.ui.library.LibraryScreen
 import com.halffd.whispersubs.ui.live.LiveScreen
 import com.halffd.whispersubs.ui.player.PlayerScreen
 import com.halffd.whispersubs.ui.settings.SettingsScreen
+import com.halffd.whispersubs.ui.local.LocalScreen
+import com.halffd.whispersubs.ui.local.LocalPlayerScreen
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -53,6 +55,12 @@ class MainActivity : ComponentActivity() {
                         }
                         composable("live") {
                             LiveScreen(onNavigateToSettings = { navController.navigate("settings") })
+                        }
+                        composable("local") {
+                            LocalScreen()
+                        }
+                        composable("local_player") {
+                            LocalPlayerScreen(navController)
                         }
                         composable(
                             route = "player/{itemId}",

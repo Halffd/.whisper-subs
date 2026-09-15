@@ -16,6 +16,7 @@ import secrets
 import hashlib
 import jwt
 import time
+import re
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from fastapi import (
     FastAPI,
@@ -27,9 +28,15 @@ from fastapi import (
     Depends,
     Security,
     Form,
+    Header,
 )
 from fastapi.security import APIKeyHeader, APIKeyQuery
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    FileResponse,
+    StreamingResponse,
+    HTMLResponse,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
@@ -113,9 +120,9 @@ class AuthManager:
 
     def __init__(self, config_file: str):
         self.config_file = config_file
-        self.config = self._load_config()
-        self.token_blacklist: set = set()
         self.lock = threading.Lock()
+        self.token_blacklist: set = set()
+        self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load or create API configuration"""
@@ -1316,7 +1323,7 @@ async def _stream_file(
 @app.get("/api/v1/media/audio/{cache_key}")
 async def stream_cached_audio(
     cache_key: str,
-    range: Optional[str] = None,
+    range: Optional[str] = Header(None, alias="Range"),
     current_user: str = Depends(get_current_user_optional),
 ):
     """
@@ -1361,7 +1368,7 @@ async def stream_cached_audio(
 @app.get("/api/v1/media/video/{task_id}")
 async def stream_task_video(
     task_id: str,
-    range: Optional[str] = None,
+    range: Optional[str] = Header(None, alias="Range"),
     current_user: str = Depends(get_current_user_optional),
 ):
     """
@@ -1399,7 +1406,7 @@ async def stream_task_video(
 @app.get("/api/v1/media/audio/{task_id}")
 async def stream_task_audio(
     task_id: str,
-    range: Optional[str] = None,
+    range: Optional[str] = Header(None, alias="Range"),
     current_user: str = Depends(get_current_user_optional),
 ):
     """
@@ -1533,6 +1540,437 @@ async def delete_cached_audio(
     audio_cache._save_index(index)
 
     return {"message": f"Cached audio {cache_key} deleted"}
+
+
+# =============================================================================
+# Mobile App Endpoints (Library / Playback / Connect)
+# =============================================================================
+
+VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".ts", ".flv"}
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".flac", ".aac", ".webm"}
+THUMB_EXTS = {".webp", ".jpg", ".jpeg", ".png"}
+SRT_EXTS = {".srt", ".vtt"}
+
+
+def _safe_output_path(rel_path: str) -> Optional[str]:
+    """Resolve a relative path under OUTPUT_DIR, blocking traversal."""
+    if not rel_path:
+        return None
+    base = os.path.abspath(OUTPUT_DIR)
+    candidate = os.path.abspath(os.path.join(base, rel_path))
+    if not candidate.startswith(base + os.sep) and candidate != base:
+        return None
+    if not os.path.exists(candidate):
+        return None
+    return candidate
+
+
+def _infer_url_from_base(base: str) -> Optional[str]:
+    """Extract the source URL from sibling helper files if present."""
+    for suffix in [".htm", ".html", ".mpv.json", ".json"]:
+        helper = f"{base}{suffix}"
+        if not os.path.exists(helper):
+            continue
+        try:
+            if suffix in (".htm", ".html"):
+                content = open(helper, encoding="utf-8", errors="ignore").read(2000)
+                import re as _re
+
+                m = _re.search(r"URL='([^']+)'", content)
+                if m:
+                    return m.group(1)
+            else:
+                data = json.load(open(helper, encoding="utf-8", errors="ignore"))
+                url = data.get("url")
+                if url:
+                    return url
+        except Exception:
+            continue
+    return None
+
+
+def _library_items() -> List[Dict[str, Any]]:
+    """Scan OUTPUT_DIR for subtitle files and their sibling media."""
+    items: List[Dict[str, Any]] = []
+    if not os.path.isdir(OUTPUT_DIR):
+        return items
+
+    for root, _dirs, files in os.walk(OUTPUT_DIR):
+        for fname in sorted(files):
+            if not fname.endswith(".srt") or ".unfinished" in fname:
+                continue
+            if os.path.islink(os.path.join(root, fname)):
+                continue  # symlink to .unfinished.srt
+            srt_path = os.path.join(root, fname)
+            base = os.path.splitext(srt_path)[0]
+            rel = os.path.relpath(srt_path, OUTPUT_DIR)
+
+            media = []
+            thumb = None
+            for f in sorted(os.listdir(root)):
+                ext = os.path.splitext(f)[1].lower()
+                if f.startswith(os.path.basename(base)):
+                    full = os.path.join(root, f)
+                    if ext in VIDEO_EXTS:
+                        media.append({"type": "video", "path": full, "format": ext[1:]})
+                    elif ext in AUDIO_EXTS:
+                        media.append({"type": "audio", "path": full, "format": ext[1:]})
+                    elif ext in THUMB_EXTS and thumb is None:
+                        thumb = full
+
+            base_name = os.path.basename(base)
+            # Strip model suffix and timestamp prefix for display
+            title = base_name
+            safe_model_names = [
+                m.replace(":", "_") for m in getattr(model, "ALL_MODEL_NAMES", [])
+            ]
+            for m in sorted(safe_model_names, key=len, reverse=True):
+                if title.endswith(f".{m}"):
+                    title = title[: -(len(m) + 1)]
+                    break
+            title = re.sub(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}_", "", title)
+
+            items.append(
+                {
+                    "id": os.path.relpath(srt_path, OUTPUT_DIR).replace(os.sep, "/"),
+                    "title": title,
+                    "channel": os.path.basename(root),
+                    "path": os.path.relpath(srt_path, OUTPUT_DIR).replace(os.sep, "/"),
+                    "srt_path": rel.replace(os.sep, "/"),
+                    "media": media,
+                    "has_video": any(m["type"] == "video" for m in media),
+                    "has_audio": any(m["type"] == "audio" for m in media),
+                    "has_thumbnail": thumb is not None,
+                    "thumbnail_path": (
+                        os.path.relpath(thumb, OUTPUT_DIR).replace(os.sep, "/")
+                        if thumb
+                        else None
+                    ),
+                    "source_url": _infer_url_from_base(base),
+                    "size_bytes": os.path.getsize(srt_path),
+                }
+            )
+    return items
+
+
+@app.get("/api/v1/library")
+async def api_library(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """List all transcribed content on the server (finished SRT files + media)."""
+    items = _library_items()
+    for it in items:
+        rel = it["path"]
+        it["urls"] = {
+            "srt": f"/api/v1/subs/file?path={rel}",
+            "media": [
+                {
+                    "type": m["type"],
+                    "format": m["format"],
+                    "url": f"/api/v1/media/file?path={os.path.relpath(m['path'], OUTPUT_DIR).replace(os.sep, '/')}",
+                }
+                for m in it["media"]
+            ],
+            "thumbnail": (
+                f"/api/v1/thumb/file?path={it['thumbnail_path']}"
+                if it["thumbnail_path"]
+                else None
+            ),
+            "play": f"/api/v1/play?source={it['source_url']}&srt={rel}"
+            if it["source_url"]
+            else None,
+        }
+    return {"library": items, "count": len(items)}
+
+
+@app.get("/api/v1/subs/file")
+async def api_subtitle_file(
+    path: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Serve an SRT/VTT file by relative path."""
+    file_path = _safe_output_path(path)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found")
+    ext = os.path.splitext(file_path)[1].lower()
+    media_type = "text/vtt" if ext == ".vtt" else "text/plain"
+    return FileResponse(
+        file_path, media_type=media_type, filename=os.path.basename(file_path)
+    )
+
+
+@app.get("/api/v1/media/file")
+async def api_media_file(
+    path: str,
+    range: Optional[str] = Header(None, alias="Range"),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Stream a local media file (audio/video) by relative path with Range support."""
+    file_path = _safe_output_path(path)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found")
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in VIDEO_EXTS:
+        media_type = {
+            ".mp4": "video/mp4",
+            ".mkv": "video/x-matroska",
+            ".webm": "video/webm",
+            ".mov": "video/quicktime",
+            ".m4v": "video/x-m4v",
+            ".avi": "video/x-msvideo",
+            ".ts": "video/mp2t",
+        }.get(ext, "video/mp4")
+    elif ext in AUDIO_EXTS:
+        media_type = {
+            ".m4a": "audio/mp4",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".opus": "audio/opus",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+        }.get(ext, "audio/mpeg")
+    else:
+        media_type = "application/octet-stream"
+    return await _stream_file(file_path, range, media_type, os.path.basename(file_path))
+
+
+@app.get("/api/v1/thumb/file")
+async def api_thumb_file(
+    path: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Serve a thumbnail image by relative path."""
+    file_path = _safe_output_path(path)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    ext = os.path.splitext(file_path)[1].lower()
+    media_type = {
+        ".webp": "image/webp",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+    }.get(ext, "image/jpeg")
+    return FileResponse(file_path, media_type=media_type)
+
+
+@app.get("/api/v1/play")
+async def api_play_resolve(
+    source: str,
+    srt: Optional[str] = None,
+    prefer_audio: bool = False,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Resolve playback info for a remote source (yt-dlp/streamlink) plus
+    an optional local SRT for sidecar subtitles.
+    """
+    import api.stream_resolver as stream_resolver
+
+    try:
+        info = stream_resolver.resolve_stream(
+            source, prefer_audio=prefer_audio, cookies_browser=COOKIES_FROM_BROWSER
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stream resolution failed: {e}")
+
+    play_url = source
+    protocol = info.protocol
+    if protocol != "hls":
+        # Progressive/direct URLs are IP-bound; proxy through server with Range
+        play_url = f"/api/v1/proxy?source={source}"
+
+    payload = info.to_dict()
+    payload["play_url"] = play_url
+    payload["protocol"] = protocol
+    payload["srt_url"] = f"/api/v1/subs/file?path={srt}" if srt else None
+    return payload
+
+
+@app.get("/api/v1/proxy")
+async def api_stream_proxy(
+    source: str,
+    range: Optional[str] = Header(None, alias="Range"),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Proxy a remote stream through the server with Range support.
+    Used for IP-bound direct URLs (YouTube googlevideo etc.).
+    Falls back to local media if the source matches a local file.
+    """
+    import api.stream_resolver as stream_resolver
+
+    try:
+        info = stream_resolver.resolve_stream(
+            source, prefer_audio=False, cookies_browser=COOKIES_FROM_BROWSER
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stream resolution failed: {e}")
+
+    upstream_url = info.url
+    upstream_headers = dict(info.headers or {})
+
+    # Need to peek at status before streaming: use a manual approach
+    import httpx
+
+    headers = {"Accept": "*/*"}
+    headers.update(upstream_headers)
+    if range:
+        headers["Range"] = range
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        req = client.build_request("GET", upstream_url, headers=headers)
+        resp = await client.send(req, stream=True)
+
+    if resp.status_code not in (200, 206):
+        body = (await resp.aread())[:300]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream returned {resp.status_code}: {body.decode(errors='ignore')}",
+        )
+
+    response_headers = {
+        "Content-Type": resp.headers.get("Content-Type", "application/octet-stream"),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-cache",
+    }
+    if resp.headers.get("Content-Range"):
+        response_headers["Content-Range"] = resp.headers["Content-Range"]
+    if resp.headers.get("Content-Length"):
+        response_headers["Content-Length"] = resp.headers["Content-Length"]
+
+    async def body_stream():
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                yield chunk
+        finally:
+            await resp.aclose()
+
+    return StreamingResponse(
+        body_stream(),
+        status_code=resp.status_code,
+        headers=response_headers,
+    )
+
+
+# Cookie browser used for yt-dlp stream resolution (overridable via env)
+COOKIES_FROM_BROWSER = os.environ.get("WHISPER_COOKIES_BROWSER", "firefox")
+
+
+@app.get("/api/v1/live")
+async def api_live_tasks(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """List live/active transcription tasks for the Live tab."""
+    live = []
+    with task_lock:
+        for task_id, details in task_status.items():
+            status = details.get("status", "")
+            if details.get("is_live") or status in (
+                "pending",
+                "processing",
+                "queued",
+                "transcribing",
+            ):
+                entry = {
+                    "task_id": task_id,
+                    "status": status,
+                    "source": details.get("source", ""),
+                    "model_name": details.get("model_name", ""),
+                    "is_live": bool(details.get("is_live")),
+                    "created_at": details.get("created_at", ""),
+                    "error": details.get("error"),
+                }
+                with srt_paths_lock:
+                    if task_id in srt_paths:
+                        entry["has_subtitles"] = True
+                        entry["sse_url"] = f"/api/v1/tasks/{task_id}/subtitles/stream"
+                        entry["snapshot_url"] = (
+                            f"/api/v1/tasks/{task_id}/subtitles/snapshot"
+                        )
+                        entry["subs_url"] = f"/api/v1/tasks/{task_id}/subtitles"
+                live.append(entry)
+    return {"live": live, "count": len(live)}
+
+
+@app.get("/connect")
+async def connect_page():
+    """
+    Mobile connect page: shows QR code encoding the server URL (and API key if
+    present), plus manual entry fields.
+    """
+    import qrcode
+    import qrcode.image.svg
+
+    # Detect server host + port from request
+    base_url = f"http://{os.environ.get('WHISPER_HOST', '')}:{os.environ.get('WHISPER_PORT', '8000')}"
+    if not os.environ.get("WHISPER_HOST"):
+        try:
+            import socket
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            base_url = f"http://{local_ip}:8000"
+        except Exception:
+            base_url = "http://localhost:8000"
+
+    # Find first valid API key to embed
+    api_key = ""
+    for user in auth_manager.config.get("users", {}).values():
+        keys = user.get("api_keys", [])
+        if keys:
+            api_key = keys[0]
+            break
+
+    connect_data = base_url
+    if api_key:
+        connect_data = f"{base_url}?api_key={api_key}"
+
+    qr = qrcode.QRCode(border=2, box_size=8)
+    qr.add_data(connect_data)
+    qr.make(fit=True)
+    img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+    qr_svg = img.to_string().decode("utf-8")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connect - WhisperSubs Mobile</title>
+<style>
+  body {{ font-family: -apple-system, system-ui, sans-serif; background: #0d1117;
+         color: #e6edf3; min-height: 100vh; display: flex; align-items: center;
+         justify-content: center; margin: 0; padding: 1rem; }}
+  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+          padding: 2rem; max-width: 420px; width: 100%; text-align: center; }}
+  h1 {{ font-size: 1.3rem; margin: 0 0 0.5rem; }}
+  p {{ color: #8b949e; font-size: 0.9rem; margin: 0.25rem 0 1.5rem; }}
+  .qr {{ background: #fff; padding: 12px; border-radius: 8px; display: inline-block;
+        margin-bottom: 1.25rem; max-width: 220px; }}
+  .qr svg {{ display: block; width: 100%; height: auto; }}
+  .url {{ background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+         padding: 0.6rem 0.8rem; font-family: monospace; font-size: 0.85rem;
+         word-break: break-all; margin-bottom: 0.75rem; }}
+  .hint {{ font-size: 0.8rem; color: #8b949e; }}
+  .key {{ display: inline-block; margin-top: 0.5rem; font-size: 0.75rem;
+         color: #58a6ff; word-break: break-all; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>WhisperSubs Mobile</h1>
+    <p>Scan with the app, or enter the server URL manually.</p>
+    <div class="qr">{qr_svg}</div>
+    <div class="url">{connect_data}</div>
+    <div class="hint">The QR includes the API key for automatic authentication.</div>
+    <div class="key">api_key: {api_key or "(none configured)"}</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(html)
 
 
 @app.get("/live/{task_id}")

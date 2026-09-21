@@ -22,4 +22,10 @@ object AppModule {
     fun provideApiClient(serverConfig: ServerConfig): ApiClient {
         return ApiClient(serverConfig)
     }
+
+    @Provides
+    @Singleton
+    fun provideLocalLibraryRepository(@dagger.hilt.android.qualifiers.ApplicationContext context: Context): LocalLibraryRepository {
+        return LocalLibraryRepository(context)
+    }
 }

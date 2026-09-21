@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,12 +46,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.halffd.whispersubs.R
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.LibraryItem
+import com.halffd.whispersubs.data.LocalLibraryRepository
 import com.halffd.whispersubs.data.ServerConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,30 +62,42 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LibraryScreen(navController: NavController, onNavigateToSettings: () -> Unit) {
+fun LibraryScreen(
+    navController: NavController,
+    onNavigateToSettings: () -> Unit,
+) {
     val context = LocalContext.current
     val serverConfig = ServerConfig.getInstance(context)
-    val apiClient = remember { ApiClient(serverConfig) }
+    val apiClient: ApiClient = hiltViewModel()
+    val localRepo: LocalLibraryRepository = hiltViewModel()
 
-    var items by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
+    var serverItems by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
+    var localItems by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    fun loadLibrary() {
+    fun loadAll() {
         isLoading = true
         error = null
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
-            val result = apiClient.getLibrary()
+            val serverResult = apiClient.getLibrary()
+            val localResult = localRepo.getLocalItems()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 isLoading = false
-                result.onSuccess { items = it.library }
+                serverResult.onSuccess { serverItems = it.library }
                     .onFailure { error = it.message ?: "Failed to load library" }
+                localResult.onSuccess { localItems = it }
+                    .onFailure { error = it.message ?: "Failed to load local library" }
             }
         }
     }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        loadLibrary()
+        loadAll()
+    }
+
+    val allItems = remember(serverItems, localItems) {
+        (serverItems + localItems).sortedByDescending { it.size_bytes }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -90,7 +105,7 @@ fun LibraryScreen(navController: NavController, onNavigateToSettings: () -> Unit
             title = { Text(stringResource(R.string.library_tab), fontWeight = FontWeight.Bold) },
             colors = TopAppBarDefaults.mediumTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             actions = {
-                IconButton(onClick = ::loadLibrary) {
+                IconButton(onClick = ::loadAll) {
                     Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                 }
                 IconButton(onClick = onNavigateToSettings) {
@@ -108,10 +123,10 @@ fun LibraryScreen(navController: NavController, onNavigateToSettings: () -> Unit
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(text = error!!, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
-                    androidx.compose.material3.Button(onClick = ::loadLibrary) { Text("Retry") }
+                    androidx.compose.material3.Button(onClick = ::loadAll) { Text("Retry") }
                 }
             }
-        } else if (items.isEmpty()) {
+        } else if (allItems.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
@@ -130,7 +145,7 @@ fun LibraryScreen(navController: NavController, onNavigateToSettings: () -> Unit
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(items) { item ->
+                items(allItems) { item ->
                     LibraryItemCard(item = item, navController = navController)
                 }
             }
@@ -141,15 +156,25 @@ fun LibraryScreen(navController: NavController, onNavigateToSettings: () -> Unit
 @Composable
 fun LibraryItemCard(item: LibraryItem, navController: NavController) {
     val context = LocalContext.current
+    val isLocal = item.id.startsWith("local:")
     val baseUrl = ServerConfig.getInstance(context).getApiEndpoint()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         onClick = {
-            val route = "player/${android.net.Uri.encode(item.id)}" +
-                "?srtUrl=${android.net.Uri.encode("$baseUrl${item.urls.srt}")}" +
-                "&sourceUrl=${android.net.Uri.encode(item.source_url ?: "")}" +
-                "&title=${android.net.Uri.encode(item.title)}"
+            val route: String = if (isLocal) {
+                // Local file - use file:// URI directly
+                "player/${android.net.Uri.encode(item.id)}" +
+                    "?srtUrl=${android.net.Uri.encode(item.urls.srt)}" +
+                    "&sourceUrl=${android.net.Uri.encode(item.source_url ?: "")}" +
+                    "&title=${android.net.Uri.encode(item.title)}"
+            } else {
+                val baseUrl = ServerConfig.getInstance(context).getApiEndpoint()
+                "player/${android.net.Uri.encode(item.id)}" +
+                    "?srtUrl=${android.net.Uri.encode("$baseUrl${item.urls.srt}")}" +
+                    "&sourceUrl=${android.net.Uri.encode(item.source_url ?: "")}" +
+                    "&title=${android.net.Uri.encode(item.title)}"
+            }
             navController.navigate(route)
         }
     ) {
@@ -157,23 +182,32 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
             modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Thumbnail
+            // Thumbnail / Local indicator
             Box(
                 modifier = Modifier
                     .size(width = 80.dp, height = 45.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
-                item.urls.thumbnail?.let { thumbUrl ->
-                    AsyncImage(
-                        model = ImageRequest.Builder(context)
-                            .data("$baseUrl$thumbUrl")
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                if (isLocal) {
+                    androidx.compose.material3.Icon(
+                        Icons.Filled.Smartphone,
+                        contentDescription = "Local",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp).padding(8.dp)
                     )
+                } else {
+                    item.urls.thumbnail?.let { thumbUrl ->
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current)
+                                .data("$baseUrl$thumbUrl")
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -188,7 +222,7 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = item.channel,
+                    text = if (isLocal) "Local Transcription" else item.channel,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -199,6 +233,7 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
                     if (item.has_video) Badge("VIDEO")
                     if (item.has_audio) Badge("AUDIO")
                     if (item.has_thumbnail) Badge("THUMB")
+                    if (isLocal) Badge("LOCAL", MaterialTheme.colorScheme.tertiaryContainer)
                 }
             }
 
@@ -212,7 +247,7 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
 }
 
 @Composable
-fun Badge(text: String) {
+fun Badge(text: String, color: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.primaryContainer) {
     Box(
         modifier = Modifier.padding(horizontal = 4.dp).height(20.dp),
         contentAlignment = Alignment.Center

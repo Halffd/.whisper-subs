@@ -17,6 +17,7 @@ import hashlib
 import jwt
 import time
 import re
+import urllib.parse
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from fastapi import (
     FastAPI,
@@ -1597,7 +1598,7 @@ def _library_items() -> List[Dict[str, Any]]:
 
     for root, _dirs, files in os.walk(OUTPUT_DIR):
         for fname in sorted(files):
-            if not fname.endswith(".srt") or ".unfinished" in fname:
+            if not fname.endswith(".srt") or re.search(r"[.-]unfinished\.srt$", fname):
                 continue
             if os.path.islink(os.path.join(root, fname)):
                 continue  # symlink to .unfinished.srt
@@ -1676,7 +1677,12 @@ async def api_library(
                 if it["thumbnail_path"]
                 else None
             ),
-            "play": f"/api/v1/play?source={it['source_url']}&srt={rel}"
+            "play": (
+                "/api/v1/play?source="
+                + urllib.parse.quote(it["source_url"], safe="")
+                + "&srt="
+                + urllib.parse.quote(rel, safe="")
+            )
             if it["source_url"]
             else None,
         }
@@ -1777,8 +1783,7 @@ async def api_play_resolve(
     play_url = source
     protocol = info.protocol
     if protocol != "hls":
-        # Progressive/direct URLs are IP-bound; proxy through server with Range
-        play_url = f"/api/v1/proxy?source={source}"
+        play_url = "/api/v1/proxy?source=" + urllib.parse.quote(source, safe="")
 
     payload = info.to_dict()
     payload["play_url"] = play_url
@@ -1891,6 +1896,318 @@ async def api_live_tasks(
                         entry["subs_url"] = f"/api/v1/tasks/{task_id}/subtitles"
                 live.append(entry)
     return {"live": live, "count": len(live)}
+
+
+# =============================================================================
+# Channels Endpoints (tree view over OUTPUT_DIR)
+# =============================================================================
+
+
+def _fetch_image_cached(url: str) -> tuple:
+    """Fetch a remote image once and cache to disk. Returns (path, media_type)."""
+    import hashlib as _hashlib
+
+    cache_dir = os.path.expanduser("~/.cache/whisper-subs/channels")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    key = _hashlib.md5(url.encode()).hexdigest()
+    # Reuse cached file regardless of guessed ext
+    for ext in (".webp", ".jpg", ".jpeg", ".png"):
+        cached = os.path.join(cache_dir, key + ext)
+        if os.path.exists(cached):
+            media_type = {
+                ".webp": "image/webp",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+            }[ext]
+            return cached, media_type
+
+    import httpx
+
+    resp = httpx.get(
+        url, timeout=20.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}
+    )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502, detail=f"Image fetch failed: {resp.status_code}"
+        )
+
+    ctype = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+    ext = {"image/webp": ".webp", "image/jpeg": ".jpg", "image/png": ".png"}.get(
+        ctype, ".jpg"
+    )
+    path = os.path.join(cache_dir, key + ext)
+    with open(path, "wb") as f:
+        f.write(resp.content)
+    return path, ctype
+
+
+@app.get("/api/v1/channels")
+async def api_channels(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """List channels (subdirectories of OUTPUT_DIR) with video counts."""
+    import api.channels as channels_mod
+
+    channels = channels_mod.scan_channels()
+    return {"channels": channels, "count": len(channels)}
+
+
+@app.get("/api/v1/channels/{channel}/videos")
+async def api_channel_videos(
+    channel: str,
+    refresh: bool = False,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Merged video list for a channel: transcribed (from disk) + untranscribed
+    (from yt-dlp flat playlist of the channel page). ?refresh=true bypasses cache.
+    """
+    import asyncio
+    import api.channels as channels_mod
+
+    try:
+        return await asyncio.to_thread(
+            channels_mod.channel_videos_merged, channel, refresh
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Channel not found: {channel}")
+
+
+@app.get("/api/v1/channels/{channel}/icon")
+async def api_channel_icon(
+    channel: str,
+    refresh: bool = False,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Channel avatar image (fetched via yt-dlp, disk-cached)."""
+    import asyncio
+    import api.channels as channels_mod
+
+    def resolve():
+        remote = channels_mod.channel_remote(channel, refresh=refresh)
+        return remote.get("avatar")
+
+    try:
+        avatar_url = await asyncio.to_thread(resolve)
+        if not avatar_url:
+            raise HTTPException(status_code=404, detail="No channel avatar")
+        path, media_type = await asyncio.to_thread(_fetch_image_cached, avatar_url)
+        return FileResponse(path, media_type=media_type)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Channel not found: {channel}")
+
+
+@app.get("/api/v1/thumb/proxy")
+async def api_thumb_proxy(
+    url: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Proxy a remote video thumbnail with disk caching."""
+    try:
+        path, media_type = await asyncio.to_thread(_fetch_image_cached, url)
+        return FileResponse(path, media_type=media_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Thumbnail fetch failed: {e}")
+
+
+@app.get("/api/v1/video/stats")
+async def api_video_stats(
+    url: str,
+    refresh: bool = False,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Full video stats (views, likes, duration, upload date) via yt-dlp."""
+    import asyncio
+    import api.channels as channels_mod
+
+    return await asyncio.to_thread(channels_mod.video_stats, url, refresh)
+
+
+@app.get("/channels")
+async def channels_page():
+    """Desktop channels view: channel tree with videos, thumbnails, stats."""
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Channels - WhisperSubs</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117;
+         color: #e6edf3; margin: 0; padding: 1rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+  .search { width: 100%; max-width: 400px; padding: 0.6rem 0.8rem; border-radius: 8px;
+            border: 1px solid #30363d; background: #161b22; color: #e6edf3;
+            margin-bottom: 1rem; font-size: 0.95rem; }
+  .ch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+             gap: 0.75rem; }
+  .ch-card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+             padding: 0.9rem; cursor: pointer; display: flex; gap: 0.75rem;
+             align-items: center; }
+  .ch-card:hover { border-color: #58a6ff; }
+  .ch-icon { width: 44px; height: 44px; border-radius: 50%; background: #21262d;
+             flex-shrink: 0; object-fit: cover; }
+  .ch-name { font-weight: 600; font-size: 0.9rem; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .ch-meta { color: #8b949e; font-size: 0.75rem; margin-top: 2px; }
+  .videos { display: none; }
+  .back { color: #58a6ff; cursor: pointer; margin-bottom: 1rem; display: none;
+          font-size: 0.9rem; }
+  .v-card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+            padding: 0.75rem; display: flex; gap: 0.9rem; margin-bottom: 0.6rem; }
+  .v-thumb { width: 160px; height: 90px; border-radius: 8px; background: #21262d;
+             flex-shrink: 0; object-fit: cover; }
+  .v-info { flex: 1; min-width: 0; }
+  .v-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
+  .v-meta { color: #8b949e; font-size: 0.78rem; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px;
+           font-size: 0.65rem; font-weight: 700; margin-right: 4px; }
+  .b-srt { background: #1f3a5f; color: #58a6ff; }
+  .b-model { background: #274156; color: #7ee2b8; }
+  .b-none { background: #490202; color: #ff7b72; }
+  .v-actions { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
+  button { padding: 5px 12px; border-radius: 6px; border: 1px solid #30363d;
+           background: #21262d; color: #e6edf3; cursor: pointer; font-size: 0.78rem; }
+  button:hover { border-color: #58a6ff; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .loading { color: #8b949e; padding: 2rem; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>Channels</h1>
+  <div class="back" onclick="showChannels()">&larr; All channels</div>
+  <input class="search" id="search" placeholder="Filter channels..." oninput="filterChannels()">
+  <div class="ch-grid" id="chGrid"><div class="loading">Loading channels...</div></div>
+  <div class="videos" id="videos"></div>
+
+<script>
+const api = '';
+
+function fmtDur(s) {
+  if (!s) return '';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.round(s%60);
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+           : `${m}:${String(sec).padStart(2,'0')}`;
+}
+function fmtViews(v) {
+  if (v == null) return '';
+  if (v >= 1e6) return (v/1e6).toFixed(1) + 'M views';
+  if (v >= 1e3) return (v/1e3).toFixed(1) + 'K views';
+  return v + ' views';
+}
+function esc(s) { return (s||'').replace(/[&<>"']/g, c =>
+  ({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c])); }
+
+async function loadChannels() {
+  const res = await fetch(api + '/api/v1/channels');
+  const data = await res.json();
+  const grid = document.getElementById('chGrid');
+  grid.innerHTML = '';
+  for (const ch of data.channels) {
+    const div = document.createElement('div');
+    div.className = 'ch-card';
+    div.dataset.name = ch.name.toLowerCase();
+    div.onclick = () => openChannel(ch.name);
+    div.innerHTML = `
+      <img class="ch-icon" src="${api}/api/v1/channels/${encodeURIComponent(ch.name)}/icon"
+           onerror="this.style.visibility='hidden'">
+      <div style="min-width:0">
+        <div class="ch-name">${esc(ch.name)}</div>
+        <div class="ch-meta">${ch.transcribed} transcribed${ch.unfinished ? ' \\u00b7 ' + ch.unfinished + ' in progress' : ''}</div>
+      </div>`;
+    grid.appendChild(div);
+  }
+}
+
+function filterChannels() {
+  const q = document.getElementById('search').value.toLowerCase();
+  document.querySelectorAll('.ch-card').forEach(c => {
+    c.style.display = c.dataset.name.includes(q) ? '' : 'none';
+  });
+}
+
+async function openChannel(name) {
+  document.getElementById('chGrid').style.display = 'none';
+  document.getElementById('search').style.display = 'none';
+  document.querySelector('.back').style.display = 'block';
+  const pane = document.getElementById('videos');
+  pane.style.display = 'block';
+  pane.innerHTML = '<div class="loading">Loading ' + esc(name) + ' videos...</div>';
+
+  const res = await fetch(api + `/api/v1/channels/${encodeURIComponent(name)}/videos`);
+  const data = await res.json();
+  pane.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'margin-bottom:1rem';
+  header.innerHTML = `<div style="font-weight:700;font-size:1.1rem">${esc(data.channel_name || name)}</div>
+    <div class="ch-meta">${data.subscribers ? data.subscribers + ' subscribers \\u00b7 ' : ''}${data.transcribed_count}/${data.total} transcribed</div>`;
+  pane.appendChild(header);
+
+  for (const v of data.videos) {
+    const card = document.createElement('div');
+    card.className = 'v-card';
+    const hasVideo = v.media && v.media.some(m => m.type === 'video');
+    const badges = v.transcribed
+      ? (v.model ? `<span class="badge b-model">${esc(v.model)}</span>` : '') +
+        (v.has_media ? `<span class="badge b-srt">${hasVideo ? 'VIDEO' : 'AUDIO'}</span>` : '') +
+        `<span class="badge b-srt">SUB</span>`
+      : `<span class="badge b-none">NOT TRANSCRIBED</span>`;
+    const stats = [v.date, fmtDur(v.duration), fmtViews(v.views)].filter(Boolean).join(' \\u00b7 ');
+    card.innerHTML = `
+      <img class="v-thumb" src="${v.thumbnail_url || ''}" onerror="this.style.visibility='hidden'">
+      <div class="v-info">
+        <div class="v-title">${esc(v.title)}</div>
+        <div class="v-meta">${stats}</div>
+        <div style="margin-top:4px">${badges}</div>
+        <div class="v-actions">
+          ${v.transcribed ? `<button class="primary" onclick="playVideo('${esc(v.source_url||'')}','${encodeURIComponent(v.srt_url||'')}')">Play</button>
+                            <button onclick="window.open('${api}${v.srt_url}','_blank')">Download SRT</button>` : ''}
+          ${!v.transcribed && v.source_url ? `<button class="primary" onclick="transcribe('${esc(v.source_url)}', this)">Transcribe</button>
+                                             <button onclick="window.open('${esc(v.source_url)}','_blank')">Open</button>` : ''}
+        </div>
+      </div>`;
+    pane.appendChild(card);
+  }
+}
+
+function showChannels() {
+  document.getElementById('chGrid').style.display = '';
+  document.getElementById('search').style.display = '';
+  document.querySelector('.back').style.display = 'none';
+  document.getElementById('videos').style.display = 'none';
+}
+
+function playVideo(source, srt) {
+  if (source && source.includes('youtube.com')) {
+    window.open(source, '_blank');
+  } else if (srt) {
+    window.open(api + '/api/v1/play?source=' + source + '&srt=' + srt, '_blank');
+  }
+}
+
+async function transcribe(source, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  try {
+    const res = await fetch(api + '/transcribe', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source: source, model_name: 'large-v3'})
+    });
+    if (res.ok) { btn.textContent = 'Queued'; }
+    else { btn.textContent = 'Failed'; btn.disabled = false; }
+  } catch (e) { btn.textContent = 'Failed'; btn.disabled = false; }
+}
+
+loadChannels();
+</script>
+</body>
+</html>"""
+    return HTMLResponse(html)
 
 
 @app.get("/connect")

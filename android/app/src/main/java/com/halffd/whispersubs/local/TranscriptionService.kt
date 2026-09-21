@@ -28,6 +28,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.Date
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TranscriptionService : Service() {
@@ -167,6 +170,8 @@ class TranscriptionService : Service() {
 
                 _state.value = TranscriptionState.Completed
                 publishState(TranscriptionState.Completed)
+                // Save SRT file
+                saveSrtFile()
                 stopSelf()
             } catch (e: Exception) {
                 Log.e(TAG, "File transcription failed", e)
@@ -249,6 +254,8 @@ class TranscriptionService : Service() {
         whisper = null
         _state.value = TranscriptionState.Stopped
         publishState(TranscriptionState.Stopped)
+        // Save SRT file for live transcription
+        saveSrtFile()
         publishState(TranscriptionState.Idle)
         stopForeground(true)
         stopSelf()
@@ -257,6 +264,17 @@ class TranscriptionService : Service() {
     private fun updateNotification(text: String) {
         val notification = buildNotification(text)
         notificationManager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun saveSrtFile() {
+        val segments = sharedSegments.value
+        if (segments.isEmpty()) return
+
+        val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(java.util.Date())
+        val baseName = "transcription_$timestamp"
+        SrtWriter.writeSrt(this, segments, baseName)?.let { file ->
+            Log.i(TAG, "Saved SRT to ${file.absolutePath}")
+        }
     }
 
     private fun buildNotification(text: String): Notification {

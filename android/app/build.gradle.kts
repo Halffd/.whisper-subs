@@ -2,13 +2,13 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.dagger.hilt.android") version "2.51.1"
+    id("com.google.dagger.hilt.android")
     id("kotlin-android")
     id("kotlin-kapt")
 }
 android {
     namespace = "com.halffd.whispersubs"
-    compileSdk = 34
+    compileSdk = 35
     defaultConfig {
         applicationId = "com.halffd.whispersubs"
         minSdk = 26
@@ -51,11 +51,11 @@ android {
     }
     externalNativeBuild {
         cmake {
-            path = "src/main/cpp/CMakeLists.txt"
+            path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
     }
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "28.2.13676358"
 }
 dependencies {
     // Core Android
@@ -102,6 +102,7 @@ dependencies {
     // Hilt DI
     implementation("com.google.dagger:hilt-android:$hilt_version")
     kapt("com.google.dagger:hilt-compiler:$hilt_version")
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
     
     // Material3
     implementation("androidx.compose.material3:material3:$material3_version")
@@ -120,10 +121,9 @@ dependencies {
     
     // Media3 (ExoPlayer)
     implementation("androidx.media3:media3-exoplayer:$media3_version")
+    implementation("androidx.media3:media3-exoplayer-hls:$media3_version")
     implementation("androidx.media3:media3-ui:$media3_version")
-    implementation("androidx.media3:media3-datasource-rtmp:$media3_version")
     implementation("androidx.media3:media3-session:$media3_version")
-    implementation("androidx.media3:media3-subtitle:$media3_version") // For SRT sidecar
     
     // Coil for thumbnails
     implementation("io.coil-kt:coil-compose:$coil_version")

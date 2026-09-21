@@ -1,13 +1,11 @@
 package com.halffd.whispersubs.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
     primary = Color(0xFF58A6FF),
@@ -63,21 +61,8 @@ fun WhisperSubsTheme(
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
-    val view = LocalContext.current
-    if (!darkTheme && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        view.setTheme(android.R.style.Theme_Material_Light_NoActionBar)
-    }
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
         content = content
     )
-}
-
-object Typography {
-    val titleLarge = androidx.compose.material3.TypographyDefaults.titleLarge
-    val titleMedium = androidx.compose.material3.TypographyDefaults.titleMedium
-    val bodyLarge = androidx.compose.material3.TypographyDefaults.bodyLarge
-    val bodyMedium = androidx.compose.material3.TypographyDefaults.bodyMedium
-    val labelLarge = androidx.compose.material3.TypographyDefaults.labelLarge
 }

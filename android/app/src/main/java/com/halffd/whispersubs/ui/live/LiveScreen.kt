@@ -1,45 +1,76 @@
 package com.halffd.whispersubs.ui.live
 
-import android.os.Bundle
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
-import androidx.navigation.compose.findNavController
 import com.halffd.whispersubs.R
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.LiveTask
-import com.halffd.whispersubs.data.LiveResponse
+import com.halffd.whispersubs.data.ServerConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LiveScreen(onNavigateToSettings: () -> Unit) {
+fun LiveScreen(navController: NavController, onNavigateToSettings: () -> Unit) {
     val context = LocalContext.current
-    val apiClient: ApiClient = hiltViewModel()
-    val navController = findNavController()
-    val liveTasks by remember { mutableStateOf<List<LiveTask>>(emptyList()) }
-    val isLoading by remember { mutableStateOf(false) }
-    val error by remember { mutableStateOf<String?>(null) }
+    val serverConfig = ServerConfig.getInstance(context)
+    val apiClient = remember { ApiClient(serverConfig) }
 
-    LaunchedEffect(Unit) {
-        loadLiveTasks()
-    }
+    var liveTasks by remember { mutableStateOf<List<LiveTask>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
 
     fun loadLiveTasks() {
         isLoading = true
         error = null
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             val result = apiClient.getLiveTasks()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 isLoading = false
@@ -49,16 +80,20 @@ fun LiveScreen(onNavigateToSettings: () -> Unit) {
         }
     }
 
+    LaunchedEffect(Unit) {
+        loadLiveTasks()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text(stringResource(R.string.live_tab), fontWeight = FontWeight.Bold) },
             colors = TopAppBarDefaults.mediumTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             actions = {
-                IconButton(onClick = loadLiveTasks) {
-                    Icon(androidx.compose.material.icons.Icons.Default.Refresh, contentDescription = "Refresh")
+                IconButton(onClick = ::loadLiveTasks) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                 }
                 IconButton(onClick = onNavigateToSettings) {
-                    Icon(androidx.compose.material.icons.Icons.Default.Settings, contentDescription = "Settings")
+                    Icon(Icons.Filled.Settings, contentDescription = "Settings")
                 }
             }
         )
@@ -72,17 +107,26 @@ fun LiveScreen(onNavigateToSettings: () -> Unit) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(text = error!!, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
-                    Button(onClick = loadLiveTasks) { Text("Retry") }
+                    androidx.compose.material3.Button(onClick = ::loadLiveTasks) { Text("Retry") }
                 }
             }
         } else if (liveTasks.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(androidx.compose.material.icons.Icons.Default.FiberManualRecord, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), size = 64.dp)
+                    Icon(
+                        Icons.Filled.FiberManualRecord,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(64.dp)
+                    )
                     Spacer(Modifier.height(16.dp))
                     Text(text = "No live transcriptions running", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(8.dp))
-                    Text(text = "Start a live job from the server", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                    Text(
+                        text = "Start a live job from the server CLI",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
                 }
             }
         } else {
@@ -102,19 +146,16 @@ fun LiveScreen(onNavigateToSettings: () -> Unit) {
 @Composable
 fun LiveTaskCard(task: LiveTask, navController: NavController) {
     val context = LocalContext.current
-    val baseUrl = com.halffd.whispersubs.data.ServerConfig.getInstance(context).getApiEndpoint()
+    val baseUrl = ServerConfig.getInstance(context).getApiEndpoint()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         onClick = {
-            val srtUrl = task.subs_url ?: ""
-            val playerArgs = Bundle().apply {
-                putString("itemId", task.task_id)
-                putString("title", task.source)
-                putString("sourceUrl", task.source)
-                putString("srtUrl", "${baseUrl}$srtUrl")
-            }
-            navController.navigate("player/${task.task_id}", playerArgs)
+            val route = "player/${android.net.Uri.encode(task.task_id)}" +
+                "?srtUrl=${android.net.Uri.encode(if (task.has_subtitles == true) "$baseUrl${task.subs_url}" else "")}" +
+                "&sourceUrl=${android.net.Uri.encode(task.source)}" +
+                "&title=${android.net.Uri.encode(task.source)}"
+            navController.navigate(route)
         }
     ) {
         Row(
@@ -124,20 +165,22 @@ fun LiveTaskCard(task: LiveTask, navController: NavController) {
             Box(
                 modifier = Modifier
                     .size(48.dp)
-                    .clip(androidx.compose.foundation.shape.CircleShape)
+                    .clip(CircleShape)
                     .background(
-                        if (task.status == "processing") MaterialTheme.colorScheme.primaryContainer
-                        else if (task.status == "pending") MaterialTheme.colorScheme.tertiaryContainer
-                        else MaterialTheme.colorScheme.errorContainer
+                        when (task.status) {
+                            "processing" -> MaterialTheme.colorScheme.primaryContainer
+                            "pending" -> MaterialTheme.colorScheme.tertiaryContainer
+                            else -> MaterialTheme.colorScheme.errorContainer
+                        }
                     ),
                 contentAlignment = Alignment.Center
             ) {
                 if (task.is_live) {
                     Icon(
-                        androidx.compose.material.icons.Icons.Default.FiberManualRecord,
+                        Icons.Filled.FiberManualRecord,
                         contentDescription = "Live",
                         tint = MaterialTheme.colorScheme.error,
-                        size = 20.dp
+                        modifier = Modifier.size(20.dp)
                     )
                 } else {
                     CircularProgressIndicator(
@@ -148,26 +191,22 @@ fun LiveTaskCard(task: LiveTask, navController: NavController) {
             }
             Spacer(Modifier.width(12.dp))
 
-            Column(modifier = Modifier.weight(1f).padding(top = 8.dp, bottom = 8.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = task.source.takeLast(50),
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
-                    overflow = androidx.compose.ui.text.TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(2.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = task.status.uppercase(),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.width(8.dp))
-                    if (task.has_subtitles == true) {
-                        Badge(text = "SUBS", color = MaterialTheme.colorScheme.primaryContainer)
-                    }
+                    if (task.has_subtitles == true) Badge("SUBS")
                     Text(
                         text = "Model: ${task.model_name}",
                         style = MaterialTheme.typography.labelSmall,
@@ -177,7 +216,7 @@ fun LiveTaskCard(task: LiveTask, navController: NavController) {
             }
 
             Icon(
-                painter = androidx.compose.ui.graphics.vector.painter.rememberVectorPainter(androidx.compose.material.icons.Icons.Default.ChevronRight),
+                Icons.Filled.ChevronRight,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -186,9 +225,9 @@ fun LiveTaskCard(task: LiveTask, navController: NavController) {
 }
 
 @Composable
-fun Badge(text: String, color: androidx.compose.ui.graphics.Color) {
+fun Badge(text: String) {
     Box(
-        modifier = Modifier.padding(4.dp, 0.dp).height(20.dp).padding(horizontal = 8.dp),
+        modifier = Modifier.padding(horizontal = 4.dp).height(20.dp).clip(RoundedCornerShape(4.dp)),
         contentAlignment = Alignment.Center
     ) {
         Text(

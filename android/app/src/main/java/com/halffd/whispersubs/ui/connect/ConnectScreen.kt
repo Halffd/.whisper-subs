@@ -1,42 +1,68 @@
 package com.halffd.whispersubs.ui.connect
 
-import android.content.Context
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.core.content.ContextCompat
 import com.halffd.whispersubs.R
 import com.halffd.whispersubs.data.ServerConfig
 
 @Composable
-fun ConnectScreen(onConnected: () -> Unit) {
+fun ConnectScreen(serverConfig: ServerConfig, onConnected: () -> Unit) {
     val context = LocalContext.current
-    val serverConfig: ServerConfig = hiltViewModel()
-    val baseUrl by remember { mutableStateOf(serverConfig.baseUrl ?: "") }
-    val apiKey by remember { mutableStateOf(serverConfig.apiKey ?: "") }
-    val error by remember { mutableStateOf<String?>(null) }
+    var baseUrl by remember { mutableStateOf(serverConfig.baseUrl ?: "") }
+    var apiKey by remember { mutableStateOf(serverConfig.apiKey ?: "") }
+    var error by remember { mutableStateOf<String?>(null) }
 
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) {
-            // TODO: Implement QR scan with CameraX + ML Kit
-            android.widget.Toast.makeText(context, "QR scan: use /connect page on phone browser instead", android.widget.Toast.LENGTH_LONG).show()
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(context, "Camera permission denied", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Scan the QR shown at http://your-server:8000/connect", Toast.LENGTH_LONG).show()
         }
     }
 
     fun connect() {
         if (baseUrl.isNotBlank()) {
-            serverConfig.baseUrl = baseUrl.trimEnd('/')
-            serverConfig.apiKey = if (apiKey.isBlank()) null else apiKey
+            serverConfig.baseUrl = baseUrl.trim().trimEnd('/')
+            serverConfig.apiKey = if (apiKey.isBlank()) null else apiKey.trim()
             onConnected()
         } else {
             error = "Please enter a server URL"
@@ -46,15 +72,16 @@ fun ConnectScreen(onConnected: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .fillMaxWidth()
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(
-            painter = androidx.compose.ui.graphics.vector.painter.rememberVectorPainter(androidx.compose.material.icons.Icons.Default.Mic),
+            imageVector = Icons.Filled.Mic,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.primary,
-            size = 80.dp
+            modifier = Modifier.size(80.dp)
         )
         Spacer(Modifier.height(16.dp))
         Text(
@@ -76,9 +103,7 @@ fun ConnectScreen(onConnected: () -> Unit) {
             label = { Text("http://192.168.1.x:8000") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            keyboardOptions = androidx.compose.ui.text.input.KeyboardOptions(
-                keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri
-            )
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
         )
         Spacer(Modifier.height(12.dp))
 
@@ -88,12 +113,16 @@ fun ConnectScreen(onConnected: () -> Unit) {
             label = { Text("API Key (optional)") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+            visualTransformation = PasswordVisualTransformation()
         )
         Spacer(Modifier.height(16.dp))
 
         error?.let { msg ->
-            Text(text = msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = msg,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Spacer(Modifier.height(12.dp))
         }
 
@@ -102,7 +131,7 @@ fun ConnectScreen(onConnected: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Button(
-                onClick = connect,
+                onClick = ::connect,
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
             ) {
@@ -110,8 +139,12 @@ fun ConnectScreen(onConnected: () -> Unit) {
             }
             OutlinedButton(
                 onClick = {
-                    if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA)
+                        != PackageManager.PERMISSION_GRANTED
+                    ) {
                         cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+                    } else {
+                        Toast.makeText(context, "Scan the QR shown at http://your-server:8000/connect", Toast.LENGTH_LONG).show()
                     }
                 },
                 modifier = Modifier.weight(1f)
@@ -122,10 +155,10 @@ fun ConnectScreen(onConnected: () -> Unit) {
 
         Spacer(Modifier.height(24.dp))
         Text(
-            text = "Tip: Open http://your-server:8000/connect on your phone browser for QR code",
+            text = "Tip: Open http://your-server:8000/connect in your phone browser to see the QR code",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp,
-            textAlign = androidx.compose.ui.text.TextAlign.Center
+            textAlign = TextAlign.Center
         )
     }
 }

@@ -1,48 +1,77 @@
 package com.halffd.whispersubs.ui.library
 
-import android.os.Bundle
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
-import androidx.navigation.compose.findNavController
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.halffd.whispersubs.R
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.LibraryItem
-import com.halffd.whispersubs.data.LibraryResponse
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
+import com.halffd.whispersubs.data.ServerConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LibraryScreen(onNavigateToSettings: () -> Unit) {
+fun LibraryScreen(navController: NavController, onNavigateToSettings: () -> Unit) {
     val context = LocalContext.current
-    val apiClient: ApiClient = hiltViewModel()
-    val navController = findNavController()
-    val items by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
-    val isLoading by remember { mutableStateOf(false) }
-    val error by remember { mutableStateOf<String?>(null) }
+    val serverConfig = ServerConfig.getInstance(context)
+    val apiClient = remember { ApiClient(serverConfig) }
 
-    LaunchedEffect(Unit) {
-        loadLibrary()
-    }
+    var items by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
 
     fun loadLibrary() {
         isLoading = true
         error = null
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             val result = apiClient.getLibrary()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 isLoading = false
@@ -52,16 +81,20 @@ fun LibraryScreen(onNavigateToSettings: () -> Unit) {
         }
     }
 
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        loadLibrary()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text(stringResource(R.string.library_tab), fontWeight = FontWeight.Bold) },
             colors = TopAppBarDefaults.mediumTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             actions = {
-                IconButton(onClick = loadLibrary) {
-                    Icon(androidx.compose.material.icons.Icons.Default.Refresh, contentDescription = "Refresh")
+                IconButton(onClick = ::loadLibrary) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                 }
                 IconButton(onClick = onNavigateToSettings) {
-                    Icon(androidx.compose.material.icons.Icons.Default.Settings, contentDescription = "Settings")
+                    Icon(androidx.compose.material.icons.Icons.Filled.Settings, contentDescription = "Settings")
                 }
             }
         )
@@ -75,13 +108,18 @@ fun LibraryScreen(onNavigateToSettings: () -> Unit) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(text = error!!, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
-                    Button(onClick = loadLibrary) { Text("Retry") }
+                    androidx.compose.material3.Button(onClick = ::loadLibrary) { Text("Retry") }
                 }
             }
         } else if (items.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(androidx.compose.material.icons.Icons.Default.VideoLibrary, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), size = 64.dp)
+                    Icon(
+                        Icons.Filled.VideoLibrary,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(64.dp)
+                    )
                     Spacer(Modifier.height(16.dp))
                     Text(text = stringResource(R.string.no_items), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -103,19 +141,16 @@ fun LibraryScreen(onNavigateToSettings: () -> Unit) {
 @Composable
 fun LibraryItemCard(item: LibraryItem, navController: NavController) {
     val context = LocalContext.current
-    val baseUrl = com.halffd.whispersubs.data.ServerConfig.getInstance(context).getApiEndpoint()
+    val baseUrl = ServerConfig.getInstance(context).getApiEndpoint()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         onClick = {
-            val srtUrl = item.urls.srt
-            val playerArgs = Bundle().apply {
-                putString("itemId", item.id)
-                putString("title", item.title)
-                putString("sourceUrl", item.source_url ?: "")
-                putString("srtUrl", "${baseUrl}$srtUrl")
-            }
-            navController.navigate("player/${item.id}", playerArgs)
+            val route = "player/${android.net.Uri.encode(item.id)}" +
+                "?srtUrl=${android.net.Uri.encode("$baseUrl${item.urls.srt}")}" +
+                "&sourceUrl=${android.net.Uri.encode(item.source_url ?: "")}" +
+                "&title=${android.net.Uri.encode(item.title)}"
+            navController.navigate(route)
         }
     ) {
         Row(
@@ -125,18 +160,18 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
             // Thumbnail
             Box(
                 modifier = Modifier
-                    .size(80.dp, 45.dp)
+                    .size(width = 80.dp, height = 45.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 item.urls.thumbnail?.let { thumbUrl ->
                     AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
+                        model = ImageRequest.Builder(context)
                             .data("$baseUrl$thumbUrl")
                             .crossfade(true)
                             .build(),
                         contentDescription = null,
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -144,12 +179,12 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
             Spacer(Modifier.width(12.dp))
 
             // Info
-            Column(modifier = Modifier.weight(1f).padding(top = 8.dp, bottom = 8.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.title,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
-                    overflow = androidx.compose.ui.text.TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
@@ -157,26 +192,18 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
-                    overflow = androidx.compose.ui.text.TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(4.dp))
                 Row {
-                    if (item.has_video) {
-                        Badge(text = "VIDEO", color = MaterialTheme.colorScheme.primaryContainer)
-                        Spacer(Modifier.width(4.dp))
-                    }
-                    if (item.has_audio) {
-                        Badge(text = "AUDIO", color = MaterialTheme.colorScheme.secondaryContainer)
-                        Spacer(Modifier.width(4.dp))
-                    }
-                    if (item.has_thumbnail) {
-                        Badge(text = "THUMB", color = MaterialTheme.colorScheme.tertiaryContainer)
-                    }
+                    if (item.has_video) Badge("VIDEO")
+                    if (item.has_audio) Badge("AUDIO")
+                    if (item.has_thumbnail) Badge("THUMB")
                 }
             }
 
             Icon(
-                painter = androidx.compose.ui.graphics.vector.painter.rememberVectorPainter(androidx.compose.material.icons.Icons.Default.ChevronRight),
+                Icons.Filled.ChevronRight,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -185,9 +212,9 @@ fun LibraryItemCard(item: LibraryItem, navController: NavController) {
 }
 
 @Composable
-fun Badge(text: String, color: androidx.compose.ui.graphics.Color) {
+fun Badge(text: String) {
     Box(
-        modifier = Modifier.padding(4.dp, 0.dp).height(20.dp).padding(horizontal = 8.dp),
+        modifier = Modifier.padding(horizontal = 4.dp).height(20.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(

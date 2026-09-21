@@ -56,7 +56,7 @@ Java_com_halffd_whispersubs_local_WhisperNative_init(JNIEnv* env, jclass clazz,
     wrapper->params.single_segment = false;
     wrapper->params.max_tokens = 0;
     wrapper->params.suppress_blank = true;
-    wrapper->params.suppress_non_speech_tokens = true;
+    wrapper->params.suppress_nst = true;
     wrapper->params.temperature = 0.0f;
     wrapper->params.max_initial_ts = 1.0f;
     wrapper->params.length_penalty = -1.0f;

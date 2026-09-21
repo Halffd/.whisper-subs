@@ -23,7 +23,6 @@ data class WhisperModel(
     val name: String,
     val sizeMb: Int,
     val url: String,
-    val sha256: String,
     val description: String
 ) {
     val filename = "$id.bin"
@@ -41,7 +40,6 @@ object ModelManager {
             name = "Tiny (39 MB)",
             sizeMb = 39,
             url = "${BASE_URL}ggml-tiny.bin",
-            sha256 = "41c3323c1b5c414763c8f4e6c8c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "Fastest, English-only, ~32x realtime"
         ),
         WhisperModel(
@@ -49,7 +47,6 @@ object ModelManager {
             name = "Tiny.en (39 MB)",
             sizeMb = 39,
             url = "${BASE_URL}ggml-tiny.en.bin",
-            sha256 = "d3ddfc9d7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c",
             description = "English-only, fastest"
         ),
         WhisperModel(
@@ -57,7 +54,6 @@ object ModelManager {
             name = "Base (74 MB)",
             sizeMb = 74,
             url = "${BASE_URL}ggml-base.bin",
-            sha256 = "e7b7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "Good balance, multilingual, ~16x realtime"
         ),
         WhisperModel(
@@ -65,7 +61,6 @@ object ModelManager {
             name = "Base.en (74 MB)",
             sizeMb = 74,
             url = "${BASE_URL}ggml-base.en.bin",
-            sha256 = "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "English-only, good balance"
         ),
         WhisperModel(
@@ -73,7 +68,6 @@ object ModelManager {
             name = "Small (244 MB)",
             sizeMb = 244,
             url = "${BASE_URL}ggml-small.bin",
-            sha256 = "a7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "Better accuracy, ~6x realtime"
         ),
         WhisperModel(
@@ -81,7 +75,6 @@ object ModelManager {
             name = "Small.en (244 MB)",
             sizeMb = 244,
             url = "${BASE_URL}ggml-small.en.bin",
-            sha256 = "b7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "English-only, better accuracy"
         ),
         WhisperModel(
@@ -89,7 +82,6 @@ object ModelManager {
             name = "Medium (769 MB)",
             sizeMb = 769,
             url = "${BASE_URL}ggml-medium.bin",
-            sha256 = "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "High accuracy, ~2x realtime"
         ),
         WhisperModel(
@@ -97,7 +89,6 @@ object ModelManager {
             name = "Large-v3 (1550 MB)",
             sizeMb = 1550,
             url = "${BASE_URL}ggml-large-v3.bin",
-            sha256 = "d7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
             description = "Best accuracy, ~1x realtime"
         )
     )
@@ -136,7 +127,7 @@ object ModelManager {
         try {
             val response = client.newCall(request).execute()
             if (!response.isSuccessful) {
-                Log.e(TAG, "Download failed: ${response.code()}")
+                Log.e(TAG, "Download failed: ${response.code}")
                 return false
             }
 

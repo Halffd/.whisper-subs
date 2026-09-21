@@ -2,75 +2,70 @@ package com.halffd.whispersubs.local
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
-import com.halffd.whispersubs.local.ModelManager.WhisperModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class LocalTranscriptionViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val _models = MutableLiveData<List<WhisperModel>>()
-    val models: LiveData<List<WhisperModel>> = _models
+    data class UiState(
+        val models: List<WhisperModel> = emptyList(),
+        val downloadedModels: List<WhisperModel> = emptyList(),
+        val selectedModel: WhisperModel? = null,
+        val downloadProgress: Float = 0f,
+        val isDownloading: Boolean = false,
+        val error: String? = null,
+    )
 
-    private val _downloadedModels = MutableLiveData<List<WhisperModel>>()
-    val downloadedModels: LiveData<List<WhisperModel>> = _downloadedModels
-
-    private val _selectedModel = MutableLiveData<WhisperModel?>()
-    val selectedModel: LiveData<WhisperModel?> = _selectedModel
-
-    private val _downloadProgress = MutableLiveData<Float>()
-    val downloadProgress: LiveData<Float> = _downloadProgress
-
-    private val _isDownloading = MutableLiveData<Boolean>()
-    val isDownloading: LiveData<Boolean> = _isDownloading
-
-    private val _error = MutableLiveData<String?>()
-    val error: LiveData<String?> = _error
+    private val _state = MutableStateFlow(UiState(models = ModelManager.AVAILABLE_MODELS))
+    val state: StateFlow<UiState> = _state
 
     init {
-        loadModels()
+        refreshDownloaded()
     }
 
     fun loadModels() {
-        _models.value = ModelManager.AVAILABLE_MODELS
+        _state.value = _state.value.copy(models = ModelManager.AVAILABLE_MODELS)
         refreshDownloaded()
     }
 
     fun refreshDownloaded() {
-        _downloadedModels.value = ModelManager.getDownloadedModels(getApplication())
-        if (_selectedModel.value?.let { !ModelManager.isModelDownloaded(getApplication(), it.id) } == true) {
-            _selectedModel.value = _downloadedModels.value?.firstOrNull()
-        }
+        val downloaded = ModelManager.getDownloadedModels(getApplication())
+        val current = _state.value
+        val selected = current.selectedModel
+            ?.takeIf { ModelManager.isModelDownloaded(getApplication(), it.id) }
+            ?: downloaded.firstOrNull()
+        _state.value = current.copy(downloadedModels = downloaded, selectedModel = selected)
     }
 
     fun selectModel(model: WhisperModel) {
-        _selectedModel.value = model
+        _state.value = _state.value.copy(selectedModel = model)
     }
 
     fun downloadModel(model: WhisperModel) {
         if (ModelManager.isModelDownloaded(getApplication(), model.id)) return
 
-        _isDownloading.value = true
-        _downloadProgress.value = 0f
-        _error.value = null
+        _state.value = _state.value.copy(isDownloading = true, downloadProgress = 0f, error = null)
 
         viewModelScope.launch(Dispatchers.IO) {
-            val success = withContext(Dispatchers.IO) {
-                ModelManager.downloadModel(getApplication(), model) { progress ->
-                    _downloadProgress.postValue(progress)
-                }
+            val success = ModelManager.downloadModel(getApplication(), model) { progress ->
+                _state.value = _state.value.copy(downloadProgress = progress)
             }
 
-            _isDownloading.postValue(false)
-            if (success) {
-                _downloadProgress.postValue(1f)
-                refreshDownloaded()
-                if (_selectedModel.value == null) _selectedModel.value = model
-            } else {
-                _error.postValue("Failed to download ${model.name}")
+            withContext(Dispatchers.Main) {
+                if (success) {
+                    _state.value = _state.value.copy(isDownloading = false, downloadProgress = 1f)
+                    refreshDownloaded()
+                    _state.value = _state.value.copy(selectedModel = model)
+                } else {
+                    _state.value = _state.value.copy(
+                        isDownloading = false,
+                        error = "Failed to download ${model.name}"
+                    )
+                }
             }
         }
     }
@@ -80,7 +75,7 @@ class LocalTranscriptionViewModel(application: Application) : AndroidViewModel(a
         if (success) {
             refreshDownloaded()
         } else {
-            _error.value = "Failed to delete ${model.name}"
+            _state.value = _state.value.copy(error = "Failed to delete ${model.name}")
         }
     }
 }

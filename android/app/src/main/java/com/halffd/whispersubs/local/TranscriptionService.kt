@@ -18,7 +18,12 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import com.halffd.whispersubs.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -37,11 +42,27 @@ class TranscriptionService : Service() {
         const val EXTRA_LANGUAGE = "language"
         const val EXTRA_TRANSLATE = "translate"
         const val EXTRA_THREADS = "threads"
+
+        // Static state mirror so UI can observe the service without binding
+        private val _sharedState = MutableStateFlow<TranscriptionState>(TranscriptionState.Idle)
+        val sharedState: StateFlow<TranscriptionState> = _sharedState
+
+        private val _sharedSegments = MutableStateFlow<List<TranscriptSegment>>(emptyList())
+        val sharedSegments: StateFlow<List<TranscriptSegment>> = _sharedSegments
+
+        internal fun publishState(state: TranscriptionState) {
+            _sharedState.value = state
+        }
+
+        internal fun publishSegment(segment: TranscriptSegment) {
+            _sharedSegments.value = _sharedSegments.value + segment
+        }
     }
 
     private var whisper: WhisperNative? = null
     private var audioRecord: AudioRecord? = null
     private var isRecording = AtomicBoolean(false)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var isPaused = AtomicBoolean(false)
     private val handler = Handler(Looper.getMainLooper())
     private val notificationManager: NotificationManager by lazy {
@@ -83,6 +104,7 @@ class TranscriptionService : Service() {
         val modelPath = ModelManager.getModelPath(this, modelId).absolutePath
         if (!File(modelPath).exists()) {
             _state.value = TranscriptionState.Error("Model not found: $modelId")
+            publishState(TranscriptionState.Error("Model not found: $modelId"))
             stopSelf()
             return
         }
@@ -90,11 +112,13 @@ class TranscriptionService : Service() {
         whisper = WhisperNative.init(modelPath, threads, translate, language)
             ?: run {
                 _state.value = TranscriptionState.Error("Failed to initialize Whisper")
+                publishState(TranscriptionState.Error("Failed to initialize Whisper"))
                 stopSelf()
                 return@startTranscription
             }
 
         _state.value = TranscriptionState.Transcribing
+        publishState(TranscriptionState.Transcribing)
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
 
         if (sourcePath != null && File(sourcePath).exists()) {
@@ -107,7 +131,7 @@ class TranscriptionService : Service() {
     }
 
     private fun transcribeFile(file: File) {
-        lifecycleScope.launch(Dispatchers.IO) {
+        serviceScope.launch(Dispatchers.IO) {
             try {
                 // Load audio file (simplified - would need proper audio decoding)
                 // For now, simulate with chunks
@@ -119,9 +143,11 @@ class TranscriptionService : Service() {
                 Thread.sleep(1000)
 
                 _state.value = TranscriptionState.Completed
+                publishState(TranscriptionState.Completed)
                 stopSelf()
             } catch (e: Exception) {
                 _state.value = TranscriptionState.Error(e.message ?: "Transcription failed")
+                publishState(TranscriptionState.Error(e.message ?: "Transcription failed"))
                 stopSelf()
             }
         }
@@ -142,6 +168,7 @@ class TranscriptionService : Service() {
         ).also {
             if (it.state != AudioRecord.STATE_INITIALIZED) {
                 _state.value = TranscriptionState.Error("AudioRecord init failed")
+                publishState(TranscriptionState.Error("AudioRecord init failed"))
                 stopSelf()
                 return@also
             }
@@ -150,7 +177,7 @@ class TranscriptionService : Service() {
         audioRecord?.startRecording()
         isRecording.set(true)
 
-        lifecycleScope.launch(Dispatchers.IO) {
+        serviceScope.launch(Dispatchers.IO) {
             val buffer = ShortArray(16000) // 1 second at 16kHz
             while (isRecording.get()) {
                 if (isPaused.get()) {
@@ -172,6 +199,7 @@ class TranscriptionService : Service() {
                             lastSegment?.let {
                                 _currentSegment.postValue(it)
                                 _progress.postValue(whisper?.getProgress() ?: 0f)
+                                publishSegment(it)
                             }
                         }
                     }
@@ -182,7 +210,9 @@ class TranscriptionService : Service() {
 
     private fun togglePause() {
         val paused = !isPaused.getAndSet(!isPaused.get())
-        _state.value = if (paused) TranscriptionState.Paused else TranscriptionState.Transcribing
+        val newState = if (paused) TranscriptionState.Paused else TranscriptionState.Transcribing
+        _state.value = newState
+        publishState(newState)
         updateNotification(if (paused) "Paused" else "Transcribing...")
     }
 
@@ -194,6 +224,8 @@ class TranscriptionService : Service() {
         whisper?.free()
         whisper = null
         _state.value = TranscriptionState.Stopped
+        publishState(TranscriptionState.Stopped)
+        publishState(TranscriptionState.Idle)
         stopForeground(true)
         stopSelf()
     }
@@ -245,6 +277,7 @@ class TranscriptionService : Service() {
 
     override fun onDestroy() {
         stopTranscription()
+        serviceScope.cancel()
         super.onDestroy()
     }
 

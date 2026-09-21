@@ -38,6 +38,12 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".local.TranscriptionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false" />
+
         <provider
             android:name="androidx.camera.core.CameraXConfigProvider"
             android:authorities="${applicationId}.camerax"

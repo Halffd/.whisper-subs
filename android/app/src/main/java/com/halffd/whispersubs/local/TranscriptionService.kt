@@ -17,6 +17,7 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
+import android.util.Log
 import com.halffd.whispersubs.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,6 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class TranscriptionService : Service() {
 
     companion object {
+        private const val TAG = "TranscriptionService"
         const val CHANNEL_ID = "transcription_channel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_START = "com.halffd.whispersubs.START_TRANSCRIPTION"
@@ -123,29 +125,51 @@ class TranscriptionService : Service() {
 
         if (sourcePath != null && File(sourcePath).exists()) {
             // File transcription
-            transcribeFile(File(sourcePath))
+            transcribeFile(android.net.Uri.parse(sourcePath))
         } else {
             // Live microphone transcription
             startLiveTranscription()
         }
     }
 
-    private fun transcribeFile(file: File) {
+    private fun transcribeFile(uri: android.net.Uri) {
+        val context = this
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // Load audio file (simplified - would need proper audio decoding)
-                // For now, simulate with chunks
                 _state.value = TranscriptionState.Transcribing
+                publishState(TranscriptionState.Transcribing)
                 updateNotification("Transcribing file...")
 
-                // TODO: Use MediaExtractor to decode audio to 16kHz mono float32
-                // This is a placeholder - real implementation needs audio decoding
-                Thread.sleep(1000)
+                val cancelled = AtomicBoolean(false)
+                var segmentIdx = 0
+
+                AudioDecoder.decode(
+                    context = context,
+                    uri = uri,
+                    onChunk = { floatChunk ->
+                        if (isRecording.get()) return@decode // shouldn't happen in file mode
+
+                        val result = whisper?.transcribe(floatChunk)
+                        if (result == 0) {
+                            val nSegments = whisper?.getSegmentCount() ?: 0
+                            for (i in segmentIdx until nSegments) {
+                                whisper?.getSegment(i)?.let { segment ->
+                                    _currentSegment.postValue(segment)
+                                    _progress.postValue(whisper?.getProgress() ?: 0f)
+                                    publishSegment(segment)
+                                    segmentIdx++
+                                }
+                            }
+                        }
+                    },
+                    cancelled = AtomicBoolean()
+                )
 
                 _state.value = TranscriptionState.Completed
                 publishState(TranscriptionState.Completed)
                 stopSelf()
             } catch (e: Exception) {
+                Log.e(TAG, "File transcription failed", e)
                 _state.value = TranscriptionState.Error(e.message ?: "Transcription failed")
                 publishState(TranscriptionState.Error(e.message ?: "Transcription failed"))
                 stopSelf()

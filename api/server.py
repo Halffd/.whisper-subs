@@ -2025,6 +2025,113 @@ async def api_video_stats(
     return await asyncio.to_thread(channels_mod.video_stats, url, refresh)
 
 
+# =============================================================================
+# Search Endpoints (subtitles / YouTube / Twitch)
+# =============================================================================
+
+
+@app.get("/api/v1/search/subtitles")
+async def api_search_subtitles(
+    q: str,
+    channel: Optional[str] = None,
+    limit: int = 50,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Content search across transcribed SRT files (timestamp + snippet)."""
+    import asyncio
+    import api.search as search_mod
+
+    try:
+        results = await asyncio.to_thread(
+            search_mod.search_subtitles, q, channel, limit
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+    # Attach play URLs where media exists
+    for r in results:
+        base = os.path.join(OUTPUT_DIR, r["id"])
+        base = os.path.splitext(base)[0]
+        for f in os.listdir(os.path.dirname(base)):
+            if f.startswith(os.path.basename(base)):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in (".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".ts"):
+                    r["play_url"] = "/api/v1/media/file?path=" + urllib.parse.quote(
+                        os.path.relpath(
+                            os.path.join(os.path.dirname(base), f), OUTPUT_DIR
+                        ).replace(os.sep, "/"),
+                        safe="",
+                    )
+                    break
+                elif ext in (".m4a", ".mp3", ".wav", ".ogg", ".opus", ".flac", ".aac"):
+                    r["play_url"] = "/api/v1/media/file?path=" + urllib.parse.quote(
+                        os.path.relpath(
+                            os.path.join(os.path.dirname(base), f), OUTPUT_DIR
+                        ).replace(os.sep, "/"),
+                        safe="",
+                    )
+        if r.get("source_url") is None:
+            # extract source url for transcribe/play buttons
+            import api.channels as channels_mod
+
+            r["source_url"] = channels_mod._extract_url_from_base(base)
+
+    return {"results": results, "count": len(results), "query": q}
+
+
+@app.get("/api/v1/search/youtube")
+async def api_search_youtube(
+    q: str,
+    limit: int = 10,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Online YouTube search via yt-dlp."""
+    import asyncio
+    import api.search as search_mod
+
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    results = await asyncio.to_thread(search_mod.search_youtube, q, limit)
+    for r in results:
+        if r.get("thumbnail_url"):
+            r["thumbnail_url"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+                r["thumbnail_url"], safe=""
+            )
+    return {"results": results, "count": len(results), "query": q}
+
+
+@app.get("/api/v1/search/twitch")
+async def api_search_twitch(
+    channel: str,
+    q: Optional[str] = None,
+    type: str = "all",
+    sort: str = "date",
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Twitch channel VODs + live stream, filtered and sorted.
+    type: all | vod | live; sort: date | views | duration | title
+    """
+    import asyncio
+    import api.search as search_mod
+
+    if not channel.strip():
+        raise HTTPException(status_code=400, detail="Empty channel")
+
+    try:
+        data = await asyncio.to_thread(search_mod.search_twitch, channel, q, type, sort)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Twitch search failed: {e}")
+
+    for section in ([data["live"]] if data.get("live") else []) + data.get("vods", []):
+        if section.get("thumbnail_url"):
+            section["thumbnail_url"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+                section["thumbnail_url"], safe=""
+            )
+    return data
+
+
 @app.get("/channels")
 async def channels_page():
     """Desktop channels view: channel tree with videos, thumbnails, stats."""

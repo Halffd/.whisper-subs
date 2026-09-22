@@ -166,9 +166,14 @@ fun SearchScreen(navController: NavController) {
 
     fun playOnline(item: VideoSearchResult) {
         val source = item.url ?: return
-        // YouTube/Twitch sources open in browser (handles auth/geo);
-        // the server proxy covers Media3 playback for transcribed items.
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(source)))
+        // Open in the app's player: server resolves via yt-dlp, Media3
+        // progressively downloads and plays (Range through server proxy,
+        // direct HLS for Twitch).
+        val route = "player/${Uri.encode(item.id ?: source)}" +
+            "?srtUrl=${Uri.encode("")}" +
+            "&sourceUrl=${Uri.encode(source)}" +
+            "&title=${Uri.encode(item.title ?: source)}"
+        navController.navigate(route)
     }
 
     fun transcribeOnline(item: VideoSearchResult) {

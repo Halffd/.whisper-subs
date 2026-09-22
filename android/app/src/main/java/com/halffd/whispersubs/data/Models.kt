@@ -187,3 +187,57 @@ data class TranscribeRequestBody(
     val source: String,
     val model_name: String
 )
+
+@Serializable
+data class SubtitleSearchResponse(
+    val results: List<SubtitleSearchResult>,
+    val count: Int,
+    val query: String
+)
+
+@Serializable
+data class SubtitleSearchResult(
+    val id: String,
+    val title: String,
+    val channel: String,
+    val date: String?,
+    val model: String?,
+    val match_count: Int,
+    val matches: List<SubtitleMatch>,
+    val srt_url: String,
+    val play_url: String?,
+    val source_url: String? = null
+)
+
+@Serializable
+data class SubtitleMatch(
+    val timestamp: String,
+    val snippet: String
+)
+
+@Serializable
+data class VideoSearchResponse(
+    val results: List<VideoSearchResult>,
+    val count: Int,
+    val query: String
+)
+
+@Serializable
+data class VideoSearchResult(
+    val id: String,
+    val title: String?,
+    val duration: Double?,
+    val views: Long?,
+    val thumbnail_url: String?,
+    val url: String?,
+    val channel: String? = null,
+    val live: Boolean = false
+)
+
+@Serializable
+data class TwitchSearchResponse(
+    val live: VideoSearchResult?,
+    val vods: List<VideoSearchResult>,
+    val total: Int,
+    val channel: String
+)

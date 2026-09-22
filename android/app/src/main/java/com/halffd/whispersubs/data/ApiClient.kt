@@ -249,6 +249,65 @@ class ApiClient(private val serverConfig: ServerConfig) {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Search API
+    // -----------------------------------------------------------------
+
+    suspend fun searchSubtitles(q: String, channel: String? = null, limit: Int = 50): Result<SubtitleSearchResponse> {
+        return try {
+            val encodedQ = URLEncoder.encode(q, "UTF-8")
+            val channelParam = channel?.let { "&channel=${URLEncoder.encode(it, "UTF-8")}" } ?: ""
+            val response = client.get(url("/api/v1/search/subtitles?q=$encodedQ&limit=$limit$channelParam")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<SubtitleSearchResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchYoutube(q: String, limit: Int = 10): Result<VideoSearchResponse> {
+        return try {
+            val encodedQ = URLEncoder.encode(q, "UTF-8")
+            val response = client.get(url("/api/v1/search/youtube?q=$encodedQ&limit=$limit")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<VideoSearchResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchTwitch(
+        channel: String,
+        q: String? = null,
+        type: String = "all",
+        sort: String = "date",
+    ): Result<TwitchSearchResponse> {
+        return try {
+            val encodedChannel = URLEncoder.encode(channel, "UTF-8")
+            val qParam = q?.takeIf { it.isNotBlank() }?.let { "&q=${URLEncoder.encode(it, "UTF-8")}" } ?: ""
+            val response = client.get(url("/api/v1/search/twitch?channel=$encodedChannel&type=$type&sort=$sort$qParam")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<TwitchSearchResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     fun close() {
         client.close()
         okClient.dispatcher.executorService.shutdown()

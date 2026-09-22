@@ -112,3 +112,78 @@ data class SseEvent(
     val event: String,
     val data: String
 )
+
+@Serializable
+data class ChannelsResponse(
+    val channels: List<Channel>,
+    val count: Int
+)
+
+@Serializable
+data class Channel(
+    val name: String,
+    val transcribed: Int,
+    val unfinished: Int
+)
+
+@Serializable
+data class ChannelVideosResponse(
+    val channel: String,
+    val channel_name: String?,
+    val channel_url: String?,
+    val subscribers: Long?,
+    val avatar_url: String?,
+    val videos: List<ChannelVideo>,
+    val total: Int,
+    val transcribed_count: Int
+)
+
+@Serializable
+data class ChannelVideo(
+    val id: String,
+    val title: String,
+    val date: String?,
+    val model: String?,
+    val video_id: String?,
+    val source_url: String?,
+    val has_srt: Boolean,
+    val has_media: Boolean,
+    val media: List<MediaFile>,
+    val has_thumbnail: Boolean,
+    val thumbnail_url: String?,
+    val srt_url: String?,
+    val duration: Double?,
+    val views: Long?,
+    val likes: Long?,
+    val transcribed: Boolean,
+    val has_video: Boolean = false,
+    val has_audio: Boolean = false
+)
+
+@Serializable
+data class VideoStatsResponse(
+    val url: String,
+    val title: String?,
+    val views: Long?,
+    val likes: Long?,
+    val duration: Double?,
+    val upload_date: String?,
+    val channel: String?,
+    val thumbnail: String?,
+    val description: String?
+)
+
+@Serializable
+data class TaskResponse(
+    val task_id: String,
+    val status: String,
+    val source: String,
+    val model_name: String,
+    val created_at: String
+)
+
+@Serializable
+data class TranscribeRequestBody(
+    val source: String,
+    val model_name: String
+)

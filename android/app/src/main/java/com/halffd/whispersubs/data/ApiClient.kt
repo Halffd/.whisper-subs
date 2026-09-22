@@ -15,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import okhttp3.OkHttpClient
@@ -182,6 +183,69 @@ class ApiClient(private val serverConfig: ServerConfig) {
         } catch (e: Exception) {
             Log.w("ApiClient", "Failed to parse SSE segment: $data", e)
             null
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Channels API
+    // -----------------------------------------------------------------
+
+    suspend fun getChannels(): Result<ChannelsResponse> {
+        return try {
+            val response = client.get(url("/api/v1/channels")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<ChannelsResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getChannelVideos(channel: String, refresh: Boolean = false): Result<ChannelVideosResponse> {
+        return try {
+            val encodedChannel = URLEncoder.encode(channel, "UTF-8")
+            val refreshParam = if (refresh) "&refresh=true" else ""
+            val response = client.get(url("/api/v1/channels/$encodedChannel/videos?1=1$refreshParam")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<ChannelVideosResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Absolute URL for icons/thumbnails/media relative paths. */
+    fun absoluteIconUrl(relative: String): String {
+        return if (relative.startsWith("http")) relative else url(relative)
+    }
+
+    fun absoluteThumbUrl(relative: String): String {
+        return if (relative.startsWith("http")) relative else url(relative)
+    }
+
+    /** Start a transcription job for a source URL (POST /transcribe). */
+    suspend fun startTranscription(source: String, modelName: String = "large-v3"): Result<TaskResponse> {
+        return try {
+            val response = client.post(url("/transcribe")) {
+                contentType(ContentType.Application.Json)
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+                setBody(TranscribeRequestBody(source = source, model_name = modelName))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<TaskResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

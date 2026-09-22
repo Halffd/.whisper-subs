@@ -15,6 +15,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.ServerConfig
+import com.halffd.whispersubs.ui.channels.ChannelsScreen
+import com.halffd.whispersubs.ui.channels.ChannelVideosScreen
 import com.halffd.whispersubs.ui.connect.ConnectScreen
 import com.halffd.whispersubs.ui.library.LibraryScreen
 import com.halffd.whispersubs.ui.live.LiveScreen
@@ -80,6 +82,16 @@ private fun AppNavHost(
         }
         composable("local") {
             LocalScreen(navController = navController)
+        }
+        composable("channels") {
+            ChannelsScreen(navController = navController)
+        }
+        composable(
+            route = "channel_videos/{channelName}",
+            arguments = listOf(navArgument("channelName") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val channelName = backStackEntry.arguments?.getString("channelName").orEmpty()
+            ChannelVideosScreen(channelName = channelName, navController = navController)
         }
         composable("local_player") {
             LocalPlayerScreen(navController = navController)

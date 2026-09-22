@@ -18,6 +18,9 @@ import com.halffd.whispersubs.data.ServerConfig
 import com.halffd.whispersubs.ui.channels.ChannelsScreen
 import com.halffd.whispersubs.ui.channels.ChannelVideosScreen
 import com.halffd.whispersubs.ui.connect.ConnectScreen
+import com.halffd.whispersubs.ui.home.HomeScreen
+import com.halffd.whispersubs.ui.home.VideosScreen
+import com.halffd.whispersubs.ui.connect.ConnectScreen
 import com.halffd.whispersubs.ui.library.LibraryScreen
 import com.halffd.whispersubs.ui.live.LiveScreen
 import com.halffd.whispersubs.ui.local.LocalPlayerScreen
@@ -46,7 +49,7 @@ class MainActivity : ComponentActivity() {
             WhisperSubsTheme {
                 Surface {
                     AppNavHost(
-                        startDestination = if (isConnected) "library" else "connect",
+                        startDestination = if (isConnected) "home" else "connect",
                         onConnected = { isConnected = true },
                         serverConfig = serverConfig,
                     )
@@ -67,6 +70,12 @@ private fun AppNavHost(
     NavHost(navController = navController, startDestination = startDestination) {
         composable("connect") {
             ConnectScreen(serverConfig = serverConfig, onConnected = onConnected)
+        }
+        composable("home") {
+            HomeScreen(navController = navController)
+        }
+        composable("videos") {
+            VideosScreen(navController = navController)
         }
         composable("library") {
             LibraryScreen(
@@ -93,6 +102,9 @@ private fun AppNavHost(
             val channelName = backStackEntry.arguments?.getString("channelName").orEmpty()
             ChannelVideosScreen(channelName = channelName, navController = navController)
         }
+        composable("videos") {
+            VideosScreen(navController = navController)
+        }
         composable("local_player") {
             LocalPlayerScreen(navController = navController)
         }
@@ -118,7 +130,7 @@ private fun AppNavHost(
             )
         }
         composable("settings") {
-            SettingsScreen(serverConfig = serverConfig)
+            SettingsScreen(navController = navController)
         }
     }
 }

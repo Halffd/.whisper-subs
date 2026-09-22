@@ -241,3 +241,27 @@ data class TwitchSearchResponse(
     val total: Int,
     val channel: String
 )
+
+@Serializable
+data class DownloadRequest(
+    val source: String
+)
+
+@Serializable
+data class DownloadEntry(
+    val download_id: String,
+    val source: String,
+    val status: String,          // pending | processing | merging | completed | failed
+    val progress: Double? = null,
+    val speed_mbps: Double? = null,
+    val downloaded_mb: Double? = null,
+    val title: String? = null,
+    val channel: String? = null,
+    val duration: Double? = null,
+    val thumbnail: String? = null,
+    val file_path: String? = null,
+    val rel_path: String? = null,
+    val error: String? = null,
+    val created_at: Double? = null,
+    val updated_at: Double? = null,
+)

@@ -442,6 +442,12 @@ class TranscriptionRequest(BaseModel):
     mpv_socket: Optional[str] = Field("/tmp/mpvsocket", description="MPV socket path")
 
 
+class DownloadRequest(BaseModel):
+    """Request for a server-side yt-dlp video download (in-app playback)."""
+
+    source: str = Field(..., description="URL of the video to download")
+
+
 class TranscriptionRequestAdvanced(TranscriptionRequest):
     """Extended request with batch processing support"""
 
@@ -2130,6 +2136,56 @@ async def api_search_twitch(
                 section["thumbnail_url"], safe=""
             )
     return data
+
+
+# =============================================================================
+# Download Endpoints (server-side yt-dlp downloads for in-app playback)
+# =============================================================================
+
+
+@app.post("/api/v1/download")
+async def api_start_download(
+    request: DownloadRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Start a server-side yt-dlp download of a video (best mp4).
+    Poll /api/v1/download/{id} until completed, then play via
+    /api/v1/media/file?path=<rel_path>.
+    """
+    import asyncio
+    import api.downloads as downloads_mod
+
+    try:
+        entry = await asyncio.to_thread(downloads_mod.start_download, request.source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return entry
+
+
+@app.get("/api/v1/download/{download_id}")
+async def api_download_status(
+    download_id: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Status of one download (progress, file path when completed)."""
+    import api.downloads as downloads_mod
+
+    entry = downloads_mod.get_download(download_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Download not found")
+    return entry
+
+
+@app.get("/api/v1/downloads")
+async def api_list_downloads(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """List all downloads (active + recent)."""
+    import api.downloads as downloads_mod
+
+    downloads_mod.clear_finished()
+    return downloads_mod.list_downloads()
 
 
 @app.get("/channels")

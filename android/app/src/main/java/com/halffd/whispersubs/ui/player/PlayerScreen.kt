@@ -76,6 +76,7 @@ fun PlayerScreen(
     srtUrl: String,
     title: String,
     navController: NavController,
+    mediaUrl: String = "",
 ) {
     val context = LocalContext.current
     val serverConfig = com.halffd.whispersubs.data.ServerConfig.getInstance(context)
@@ -112,7 +113,13 @@ fun PlayerScreen(
         }
 
         // Resolve playback source
-        if (sourceUrl.isNotBlank()) {
+        if (mediaUrl.isNotBlank()) {
+            // Pre-downloaded file: play directly (no yt-dlp resolution)
+            isLoading = false
+            exoPlayer.setMediaItem(MediaItem.fromUri(mediaUrl))
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = true
+        } else if (sourceUrl.isNotBlank()) {
             apiClient.getPlayInfo(sourceUrl, if (isLive) null else srtUrl)
                 .onSuccess { resp ->
                     isLoading = false

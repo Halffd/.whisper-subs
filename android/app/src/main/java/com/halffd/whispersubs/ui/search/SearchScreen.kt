@@ -65,10 +65,12 @@ import androidx.navigation.NavController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.halffd.whispersubs.data.ApiClient
+import com.halffd.whispersubs.data.DownloadEntry
 import com.halffd.whispersubs.data.ServerConfig
 import com.halffd.whispersubs.data.SubtitleMatch
 import com.halffd.whispersubs.data.SubtitleSearchResult
 import com.halffd.whispersubs.data.VideoSearchResult
+import kotlinx.coroutines.delay
 import com.halffd.whispersubs.local.LocalSearch
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -101,6 +103,7 @@ fun SearchScreen(navController: NavController) {
     // YouTube / Twitch raw video results
     var onlineResults by remember { mutableStateOf<List<VideoSearchResult>>(emptyList()) }
     var twitchLive by remember { mutableStateOf<VideoSearchResult?>(null) }
+    var downloadState by remember { mutableStateOf<DownloadEntry?>(null) }
 
     fun runSearch() {
         val q = query.trim()
@@ -166,14 +169,49 @@ fun SearchScreen(navController: NavController) {
 
     fun playOnline(item: VideoSearchResult) {
         val source = item.url ?: return
-        // Open in the app's player: server resolves via yt-dlp, Media3
-        // progressively downloads and plays (Range through server proxy,
-        // direct HLS for Twitch).
-        val route = "player/${Uri.encode(item.id ?: source)}" +
-            "?srtUrl=${Uri.encode("")}" +
-            "&sourceUrl=${Uri.encode(source)}" +
-            "&title=${Uri.encode(item.title ?: source)}"
-        navController.navigate(route)
+        // Server-side yt-dlp download, then play the finished file in-app
+        val client = ApiClient(ServerConfig.getInstance(context))
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            val startResult = client.startDownload(source)
+            val entry = kotlinx.coroutines.withContext(Dispatchers.Main) {
+                startResult.onSuccess { downloadState = it }
+                    .onFailure { e ->
+                        Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                startResult.getOrNull()
+            } ?: return@launch
+
+            // Poll until completed/failed
+            var current = entry
+            while (current.status !in listOf("completed", "failed")) {
+                delay(1500)
+                val statusResult = client.getDownloadStatus(current.download_id)
+                current = statusResult.getOrNull() ?: current
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    downloadState = current
+                }
+            }
+
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                if (current.status == "completed" && current.rel_path != null) {
+                    val mediaPath = current.rel_path
+                    val route = "player/${Uri.encode(current.download_id)}" +
+                        "?srtUrl=${Uri.encode("")}" +
+                        "&sourceUrl=${Uri.encode("")}" +
+                        "&title=${Uri.encode(current.title ?: source)}" +
+                        "&mediaUrl=${Uri.encode("/api/v1/media/file?path=$mediaPath")}"
+                    downloadState = null
+                    navController.navigate(route)
+                } else {
+                    downloadState = null
+                    Toast.makeText(
+                        context,
+                        "Download failed: ${current.error ?: "unknown"}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
     }
 
     fun transcribeOnline(item: VideoSearchResult) {
@@ -307,6 +345,45 @@ fun SearchScreen(navController: NavController) {
                     }
                 }
             }
+        }
+
+        // Download progress dialog
+        downloadState?.let { entry ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { /* downloading; let it finish */ },
+                title = { Text("Downloading") },
+                text = {
+                    Column {
+                        Text(
+                            text = entry.title ?: entry.source,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        val progress = entry.progress?.toFloat()
+                        if (progress != null) {
+                            androidx.compose.material3.LinearProgressIndicator(
+                                progress = { progress.coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            androidx.compose.material3.LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = entry.status.replaceFirstChar { it.uppercase() } +
+                                (entry.progress?.let { " · ${(it * 100).toInt()}%" } ?: "") +
+                                (entry.speed_mbps?.let { " · ${it}MB/s" } ?: ""),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {},
+            )
         }
     }
 }

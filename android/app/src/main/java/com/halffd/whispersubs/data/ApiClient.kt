@@ -308,6 +308,42 @@ class ApiClient(private val serverConfig: ServerConfig) {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Downloads API (server-side yt-dlp downloads)
+    // -----------------------------------------------------------------
+
+    suspend fun startDownload(source: String): Result<DownloadEntry> {
+        return try {
+            val response = client.post(url("/api/v1/download")) {
+                contentType(ContentType.Application.Json)
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+                setBody(DownloadRequest(source = source))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<DownloadEntry>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getDownloadStatus(downloadId: String): Result<DownloadEntry> {
+        return try {
+            val response = client.get(url("/api/v1/download/$downloadId")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<DownloadEntry>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     fun close() {
         client.close()
         okClient.dispatcher.executorService.shutdown()

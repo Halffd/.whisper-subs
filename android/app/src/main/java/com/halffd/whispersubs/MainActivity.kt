@@ -109,24 +109,27 @@ private fun AppNavHost(
             LocalPlayerScreen(navController = navController)
         }
         composable(
-            route = "player/{itemId}?srtUrl={srtUrl}&sourceUrl={sourceUrl}&title={title}",
+            route = "player/{itemId}?srtUrl={srtUrl}&sourceUrl={sourceUrl}&title={title}&mediaUrl={mediaUrl}",
             arguments = listOf(
                 navArgument("itemId") { type = NavType.StringType },
                 navArgument("srtUrl") { type = NavType.StringType; defaultValue = "" },
                 navArgument("sourceUrl") { type = NavType.StringType; defaultValue = "" },
                 navArgument("title") { type = NavType.StringType; defaultValue = "" },
+                navArgument("mediaUrl") { type = NavType.StringType; defaultValue = "" },
             )
         ) { backStackEntry ->
             val itemId = backStackEntry.arguments?.getString("itemId").orEmpty()
             val sourceUrl = backStackEntry.arguments?.getString("sourceUrl").orEmpty()
             val srtUrl = backStackEntry.arguments?.getString("srtUrl").orEmpty()
             val title = backStackEntry.arguments?.getString("title").orEmpty()
+            val mediaUrl = backStackEntry.arguments?.getString("mediaUrl").orEmpty()
             PlayerScreen(
                 itemId = itemId,
                 sourceUrl = sourceUrl,
                 srtUrl = srtUrl,
                 title = title,
                 navController = navController,
+                mediaUrl = mediaUrl,
             )
         }
         composable("settings") {

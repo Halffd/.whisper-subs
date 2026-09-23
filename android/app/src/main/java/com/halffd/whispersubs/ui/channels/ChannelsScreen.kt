@@ -51,7 +51,9 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.Channel
+import com.halffd.whispersubs.data.OfflineCache
 import com.halffd.whispersubs.data.ServerConfig
+import com.halffd.whispersubs.ui.common.OfflineBanner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,16 +70,28 @@ fun ChannelsScreen(navController: NavController) {
     var isLoading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var searchText by remember { mutableStateOf("") }
+    var cachedAtMs by remember { mutableStateOf<Long?>(null) }
+    val offlineCache = remember { OfflineCache(context) }
 
     fun loadChannels() {
         isLoading = true
         error = null
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             val result = apiClient.getChannels()
+                .also { it.onSuccess { resp -> offlineCache.saveChannels(resp) } }
+            val appliedCache = if (result.isFailure) offlineCache.loadChannels() else null
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 isLoading = false
-                result.onSuccess { channels = it.channels }
-                    .onFailure { error = it.message ?: "Failed to load channels" }
+                if (appliedCache != null) {
+                    channels = appliedCache.data.channels
+                    cachedAtMs = appliedCache.cachedAtMs
+                } else {
+                    result.onSuccess {
+                        channels = it.channels
+                        cachedAtMs = null
+                    }
+                        .onFailure { error = it.message ?: "Failed to load channels" }
+                }
             }
         }
     }
@@ -107,6 +121,8 @@ fun ChannelsScreen(navController: NavController) {
             },
             singleLine = true
         )
+
+        OfflineBanner(cachedAtMs = cachedAtMs, onRefresh = ::loadChannels)
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

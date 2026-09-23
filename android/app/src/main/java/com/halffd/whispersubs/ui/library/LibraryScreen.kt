@@ -54,7 +54,9 @@ import com.halffd.whispersubs.R
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.LibraryItem
 import com.halffd.whispersubs.data.LocalLibraryRepository
+import com.halffd.whispersubs.data.OfflineCache
 import com.halffd.whispersubs.data.ServerConfig
+import com.halffd.whispersubs.ui.common.OfflineBanner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -70,24 +72,39 @@ fun LibraryScreen(
     val serverConfig = ServerConfig.getInstance(context)
     val apiClient: ApiClient = hiltViewModel()
     val localRepo: LocalLibraryRepository = hiltViewModel()
+    val offlineCache = remember { OfflineCache(context) }
 
     var serverItems by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
     var localItems by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var cachedAtMs by remember { mutableStateOf<Long?>(null) }
 
     fun loadAll() {
         isLoading = true
         error = null
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             val serverResult = apiClient.getLibrary()
+                .also { it.onSuccess { resp -> offlineCache.saveLibrary(resp) } }
+            val appliedCache = if (serverResult.isFailure) offlineCache.loadLibrary() else null
             val localResult = localRepo.getLocalItems()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 isLoading = false
-                serverResult.onSuccess { serverItems = it.library }
-                    .onFailure { error = it.message ?: "Failed to load library" }
+                if (appliedCache != null) {
+                    // Offline: serve the last successful response with a banner
+                    serverItems = appliedCache.data.library
+                    cachedAtMs = appliedCache.cachedAtMs
+                } else {
+                    serverResult.onSuccess {
+                        serverItems = it.library
+                        cachedAtMs = null
+                    }
+                        .onFailure { error = it.message ?: "Failed to load library" }
+                }
                 localResult.onSuccess { localItems = it }
-                    .onFailure { error = it.message ?: "Failed to load local library" }
+                    .onFailure { e ->
+                        if (error == null) error = e.message ?: "Failed to load local library"
+                    }
             }
         }
     }
@@ -113,6 +130,8 @@ fun LibraryScreen(
                 }
             }
         )
+
+        OfflineBanner(cachedAtMs = cachedAtMs, onRefresh = ::loadAll)
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

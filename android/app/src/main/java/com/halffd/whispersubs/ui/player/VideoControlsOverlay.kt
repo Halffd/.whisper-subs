@@ -31,10 +31,12 @@ import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Replay30
 import androidx.compose.material.icons.filled.Speed
@@ -170,6 +172,7 @@ fun VideoControlsOverlay(
     onSetRepeatB: () -> Unit,
     onClearRepeat: () -> Unit,
     onJumpDialog: () -> Unit,
+    onShare: (String) -> Unit,
     onToggleLock: () -> Unit,
     onInteraction: () -> Unit,
     modifier: Modifier = Modifier,
@@ -324,6 +327,7 @@ fun VideoControlsOverlay(
                         onSetRepeatB = onSetRepeatB,
                         onClearRepeat = onClearRepeat,
                         onJumpDialog = onJumpDialog,
+                        onShare = onShare,
                         onInteraction = onInteraction,
                     )
                     FullscreenButton(isFullscreen, onToggleFullscreen, onInteraction)
@@ -346,6 +350,7 @@ fun VideoControlsOverlay(
                         onSetRepeatB = onSetRepeatB,
                         onClearRepeat = onClearRepeat,
                         onJumpDialog = onJumpDialog,
+                        onShare = onShare,
                         onInteraction = onInteraction,
                     )
                     FullscreenButton(isFullscreen, onToggleFullscreen, onInteraction)
@@ -419,10 +424,34 @@ private fun MoreMenuButton(
     onSetRepeatB: () -> Unit,
     onClearRepeat: () -> Unit,
     onJumpDialog: () -> Unit,
+    onShare: (String) -> Unit,
     onInteraction: () -> Unit,
 ) {
     Box {
         DropdownMenu(expanded = expanded, onDismissRequest = { onExpanded(false) }) {
+            DropdownMenuItem(
+                text = { Text("Share as SRT") },
+                leadingIcon = {
+                    Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(20.dp))
+                },
+                onClick = {
+                    onExpanded(false)
+                    onShare("srt")
+                    onInteraction()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Share as TXT") },
+                leadingIcon = {
+                    Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(20.dp))
+                },
+                onClick = {
+                    onExpanded(false)
+                    onShare("txt")
+                    onInteraction()
+                }
+            )
+            HorizontalDivider()
             DropdownMenuItem(
                 text = { Text("Jump to time…") },
                 onClick = {

@@ -2,8 +2,10 @@ package com.halffd.whispersubs.ui.player
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
+import android.widget.Toast
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -103,6 +105,7 @@ fun PlayerScreen(
     var isLoading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var srtBlocks by remember { mutableStateOf<List<SrtBlock>>(emptyList()) }
+    var srtText by remember { mutableStateOf("") }
     var isLive by remember { mutableStateOf(false) }
     var playerError by remember { mutableStateOf<String?>(null) }
     var playbackSpeed by remember { mutableStateOf(1.0f) }
@@ -189,12 +192,38 @@ fun PlayerScreen(
         bumpHide()
     }
 
+    // Export/share current subtitles (SRT or plain text)
+    fun shareSubtitles(format: String) {
+        val content = when (format) {
+            "txt" -> srtBlocks.joinToString("\n") { it.text }
+            else -> srtText.ifBlank {
+                // Live case: raw SRT was never fetched; rebuild from blocks
+                srtBlocks.joinToString("\n") { b ->
+                    "${b.index}\n${srtTimestamp(b.start)} --> ${srtTimestamp(b.end)}\n${b.text}\n"
+                }
+            }
+        }
+        if (content.isBlank()) {
+            Toast.makeText(context, "No subtitles yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val sendIntent = Intent().apply {
+            action = Intent.ACTION_SEND
+            putExtra(Intent.EXTRA_TEXT, content)
+            type = "text/plain"
+        }
+        context.startActivity(
+            Intent.createChooser(sendIntent, "Share subtitles (${format.uppercase()})")
+        )
+    }
+
     LaunchedEffect(itemId, sourceUrl, srtUrl) {
         isLive = srtUrl.contains("/api/v1/tasks/") && srtUrl.contains("/subtitles/stream")
 
         // Fetch SRT (static for library, growing for live)
         if (srtUrl.isNotBlank() && !isLive) {
             apiClient.fetchSrtText(srtUrl).onSuccess { srt ->
+                srtText = srt
                 srtBlocks = SrtParser.parseSrt(srt)
             }
         }
@@ -727,6 +756,7 @@ fun PlayerScreen(
                             bumpHide()
                         },
                         onJumpDialog = { showJumpDialog = true },
+                        onShare = { fmt -> shareSubtitles(fmt) },
                         onToggleLock = { isLocked = !isLocked },
                         onInteraction = { bumpHide() },
                         modifier = Modifier.fillMaxSize(),
@@ -746,4 +776,14 @@ fun PlayerScreen(
             )
         }
     }
+}
+
+/** SRT timestamp: HH:MM:SS,mmm */
+private fun srtTimestamp(sec: Double): String {
+    val totalMs = (sec * 1000).toLong()
+    val h = totalMs / 3_600_000
+    val m = (totalMs % 3_600_000) / 60_000
+    val s = (totalMs % 60_000) / 1000
+    val ms = totalMs % 1000
+    return "%02d:%02d:%02d,%03d".format(h, m, s, ms)
 }

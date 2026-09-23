@@ -308,6 +308,41 @@ class ApiClient(private val serverConfig: ServerConfig) {
         }
     }
 
+    /** Record a search query in per-user history (fire-and-forget friendly). */
+    suspend fun recordSearchHistory(q: String, scope: String = "subtitles"): Result<Unit> {
+        return try {
+            val encodedQ = URLEncoder.encode(q, "UTF-8")
+            val encodedScope = URLEncoder.encode(scope, "UTF-8")
+            val response = client.post(url("/api/v1/search/history?q=$encodedQ&scope=$encodedScope")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Autocomplete suggestions: recent history + library titles + channel names. */
+    suspend fun getSuggestions(q: String, limit: Int = 8): Result<SuggestionsResponse> {
+        return try {
+            val encodedQ = URLEncoder.encode(q, "UTF-8")
+            val response = client.get(url("/api/v1/search/suggestions?q=$encodedQ&limit=$limit")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<SuggestionsResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     // -----------------------------------------------------------------
     // Downloads API (server-side yt-dlp downloads)
     // -----------------------------------------------------------------

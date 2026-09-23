@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,9 +26,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -46,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -69,6 +75,7 @@ import com.halffd.whispersubs.data.DownloadEntry
 import com.halffd.whispersubs.data.ServerConfig
 import com.halffd.whispersubs.data.SubtitleMatch
 import com.halffd.whispersubs.data.SubtitleSearchResult
+import com.halffd.whispersubs.data.Suggestion
 import com.halffd.whispersubs.data.VideoSearchResult
 import kotlinx.coroutines.delay
 import com.halffd.whispersubs.local.LocalSearch
@@ -105,14 +112,30 @@ fun SearchScreen(navController: NavController) {
     var twitchLive by remember { mutableStateOf<VideoSearchResult?>(null) }
     var downloadState by remember { mutableStateOf<DownloadEntry?>(null) }
 
+    // Suggestions / history (autocomplete)
+    var searchFocused by remember { mutableStateOf(false) }
+    var suggestions by remember { mutableStateOf<List<Suggestion>>(emptyList()) }
+
+    // Debounced autocomplete fetch while the search field is focused
+    LaunchedEffect(query, searchFocused) {
+        if (!searchFocused) return@LaunchedEffect
+        delay(300)
+        apiClient.getSuggestions(query.trim())
+            .onSuccess { suggestions = it.suggestions }
+    }
+
     fun runSearch() {
         val q = query.trim()
         if (q.isEmpty()) return
         submittedQuery = q
         isSearching = true
         error = null
+        searchFocused = false
+        suggestions = emptyList()
 
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            // Record in per-user history (fire-and-forget)
+            apiClient.recordSearchHistory(q, scope.lowercase())
             try {
                 when (scope) {
                     "Local" -> {
@@ -253,7 +276,9 @@ fun SearchScreen(navController: NavController) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .onFocusChanged { searchFocused = it.isFocused },
                 placeholder = {
                     Text(
                         when (scope) {
@@ -298,8 +323,58 @@ fun SearchScreen(navController: NavController) {
             }
         }
 
-        // Results
-        if (isSearching) {
+        // Results (suggestions panel takes over while the field is focused)
+        if (searchFocused && suggestions.isNotEmpty()) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                item {
+                    Text(
+                        text = if (query.isBlank()) "Recent searches" else "Suggestions",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                }
+                items(suggestions) { s ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                query = s.text
+                                runSearch()
+                            }
+                            .background(
+                                MaterialTheme.colorScheme.surface,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(12.dp, 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = when (s.source) {
+                                "history" -> Icons.Filled.History
+                                "channel" -> Icons.Filled.Tv
+                                else -> Icons.Filled.VideoLibrary
+                            },
+                            contentDescription = s.source,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = s.text,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        } else if (isSearching) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }

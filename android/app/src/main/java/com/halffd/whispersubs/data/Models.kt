@@ -265,3 +265,16 @@ data class DownloadEntry(
     val created_at: Double? = null,
     val updated_at: Double? = null,
 )
+
+@Serializable
+data class Suggestion(
+    val text: String,
+    val source: String,          // history | library | channel
+    val scope: String? = null
+)
+
+@Serializable
+data class SuggestionsResponse(
+    val suggestions: List<Suggestion>,
+    val query: String
+)

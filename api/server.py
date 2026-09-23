@@ -1051,25 +1051,45 @@ def list_batches():
 
 @app.websocket("/ws/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
-    """WebSocket endpoint for real-time task progress updates"""
-    await sio.connect(websocket)
+    """WebSocket endpoint for real-time task progress updates.
+
+    Sends {"type": "status", "task": {...}} whenever the task changes,
+    {"type": "done"} on completion/failure/cancel, {"type": "ping"} every 30s.
+    """
+    await websocket.accept()
     try:
-        # Join room for this task
-        await sio.enter_room(task_id)
-
-        # Send current status
-        if task_id in task_status:
-            await websocket.send_json(task_status[task_id])
-
-        # Keep connection alive
+        last_snapshot = None
+        ticks_since_ping = 0
         while True:
-            await asyncio.sleep(30)
-            await websocket.send_json({"type": "ping"})
+            with task_lock:
+                snapshot = (
+                    dict(task_status[task_id]) if task_id in task_status else None
+                )
+            if snapshot != last_snapshot:
+                await websocket.send_json({"type": "status", "task": snapshot})
+                last_snapshot = snapshot
+                if snapshot and snapshot.get("status") in (
+                    "completed",
+                    "failed",
+                    "cancelled",
+                ):
+                    await websocket.send_json({"type": "done"})
+                    break
+            ticks_since_ping += 1
+            if ticks_since_ping >= 30:
+                await websocket.send_json({"type": "ping"})
+                ticks_since_ping = 0
+            await asyncio.sleep(1.0)
 
     except WebSocketDisconnect:
-        await sio.leave_room(task_id)
+        pass
     except Exception as e:
         print(f"WebSocket error: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get("/tasks/{task_id}/cancel")
@@ -2186,6 +2206,237 @@ async def api_list_downloads(
 
     downloads_mod.clear_finished()
     return downloads_mod.list_downloads()
+
+
+# =============================================================================
+# Job Monitor / Export / Search History
+# =============================================================================
+
+
+@app.get("/api/v1/jobs/monitor")
+async def api_jobs_monitor(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Job queue monitoring: counts per status, per-user, recent failures."""
+    with task_lock:
+        tasks = [dict(t) for t in task_status.values()]
+
+    by_status: Dict[str, int] = {}
+    for t in tasks:
+        s = t.get("status", "unknown")
+        by_status[s] = by_status.get(s, 0) + 1
+
+    by_user: Dict[str, int] = {}
+    for t in tasks:
+        u = t.get("user") or "anonymous"
+        by_user[u] = by_user.get(u, 0) + 1
+
+    recent_failures = [
+        {
+            "task_id": t.get("task_id"),
+            "source": t.get("source"),
+            "model_name": t.get("model_name"),
+            "error": t.get("error"),
+            "created_at": t.get("created_at"),
+        }
+        for t in tasks
+        if t.get("status") == "failed"
+    ][:10]
+
+    return {
+        "total_tasks": len(tasks),
+        "by_status": by_status,
+        "by_user": by_user,
+        "active": by_status.get("processing", 0) + by_status.get("pending", 0),
+        "recent_failures": recent_failures,
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/v1/export/subtitles")
+async def api_export_subtitles(
+    path: str,
+    format: str = Query("srt", pattern="^(srt|txt|json)$"),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Export a transcription as SRT (raw), TXT (plain text), or JSON (blocks)."""
+    file_path = _safe_output_path(path)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not file_path.endswith(".srt"):
+        raise HTTPException(status_code=400, detail="Not an SRT file")
+
+    content = open(file_path, encoding="utf-8", errors="ignore").read()
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+    if format == "srt":
+        return FileResponse(
+            file_path,
+            media_type="text/plain",
+            filename=f"{base_name}.srt",
+        )
+
+    if format == "txt":
+        # Plain text: strip indices/timestamps, one segment per line
+        lines_out = []
+        for block in re.split(r"\n\s*\n", content):
+            seg = [
+                l.strip()
+                for l in block.strip().split("\n")
+                if l.strip() and "-->" not in l and not re.fullmatch(r"\d+", l.strip())
+            ]
+            if seg:
+                lines_out.append(" ".join(seg))
+        from fastapi.responses import Response as FastResponse
+
+        return FastResponse(
+            content="\n".join(lines_out),
+            media_type="text/plain",
+            headers={"Content-Disposition": f'inline; filename="{base_name}.txt"'},
+        )
+
+    # json: blocks with start/end/text
+    blocks_json = []
+    index = 0
+    for block in re.split(r"\n\s*\n", content):
+        lines = [l.strip() for l in block.strip().split("\n") if l.strip()]
+        if len(lines) < 2:
+            continue
+        ts = next((l for l in lines if "-->" in l), None)
+        text = " ".join(
+            l for l in lines if "-->" not in l and not re.fullmatch(r"\d+", l)
+        )
+        if not ts:
+            continue
+        start_s, end_s = [t.strip().replace(",", ".") for t in ts.split("-->")]
+
+        def _ts_to_sec(t):
+            parts = t.split(":")
+            try:
+                if len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + float(parts[1])
+            except ValueError:
+                return 0.0
+            return 0.0
+
+        index += 1
+        blocks_json.append(
+            {
+                "index": index,
+                "start": _ts_to_sec(start_s),
+                "end": _ts_to_sec(end_s),
+                "text": text,
+            }
+        )
+    return {
+        "file": base_name,
+        "format": "json",
+        "blocks": blocks_json,
+        "count": len(blocks_json),
+    }
+
+
+# Search history: per-user recent queries (persisted JSON, in-memory fallback)
+SEARCH_HISTORY_FILE = os.path.expanduser("~/.config/WhisperSubs/search_history.json")
+_search_history_lock = threading.Lock()
+_search_history_memory: Dict[str, Any] = {}
+
+
+def _load_search_history() -> Dict[str, Any]:
+    """File-backed history merged with in-memory session records."""
+    merged: Dict[str, Any] = {}
+    try:
+        with open(SEARCH_HISTORY_FILE, "r") as f:
+            merged.update(json.load(f))
+    except Exception:
+        pass  # missing or unreadable -> memory only
+    for user, entries in _search_history_memory.items():
+        merged_entries = [e for e in merged.get(user, [])] + [
+            e for e in entries if e not in merged.get(user, [])
+        ]
+        merged[user] = merged_entries[:50]
+    return merged
+
+
+def _save_search_history(history: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(SEARCH_HISTORY_FILE), exist_ok=True)
+        with open(SEARCH_HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except OSError:
+        pass  # read-only FS -> history lives in memory for this session
+
+
+@app.post("/api/v1/search/history")
+async def api_record_search(
+    q: str = Query(...),
+    scope: str = Query("subtitles"),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Record a search query (per-user, most recent first, deduped, max 50)."""
+    user = current_user or "anonymous"
+    q = q.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    with _search_history_lock:
+        history = _load_search_history()
+        entries = history.get(user, [])
+        entries = [e for e in entries if e.get("q") != q]
+        entries.insert(0, {"q": q, "scope": scope, "at": datetime.now().isoformat()})
+        history[user] = entries[:50]
+        _search_history_memory[user] = history[user][:50]
+        _save_search_history(history)
+    return {"recorded": q, "count": len(history[user])}
+
+
+@app.get("/api/v1/search/suggestions")
+async def api_search_suggestions(
+    q: str = Query(""),
+    limit: int = 8,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """
+    Autocomplete suggestions: recent history (prefix match) + library titles
+    + channel names.
+    """
+    q = q.strip().lower()
+    with _search_history_lock:
+        history = _load_search_history()
+    user = current_user or "anonymous"
+
+    suggestions: List[Dict[str, Any]] = []
+    seen = set()
+
+    # 1. History (prefix or substring match)
+    for entry in history.get(user, []):
+        text = entry.get("q", "")
+        if text and (not q or q in text.lower()) and text.lower() not in seen:
+            suggestions.append(
+                {"text": text, "source": "history", "scope": entry.get("scope")}
+            )
+            seen.add(text.lower())
+
+    # 2. Library titles + channel names
+    for item in _library_items():
+        if len(suggestions) >= limit:
+            break
+        title = item.get("title", "")
+        channel = item.get("channel", "")
+        if title and (not q or q in title.lower()) and title.lower() not in seen:
+            suggestions.append(
+                {"text": title, "source": "library", "scope": "subtitles"}
+            )
+            seen.add(title.lower())
+        if channel and q and q in channel.lower() and channel.lower() not in seen:
+            suggestions.append(
+                {"text": channel, "source": "channel", "scope": "subtitles"}
+            )
+            seen.add(channel.lower())
+
+    return {"suggestions": suggestions[:limit], "query": q}
 
 
 @app.get("/channels")

@@ -1,5 +1,6 @@
 package com.halffd.whispersubs
 
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -25,6 +26,7 @@ import com.halffd.whispersubs.ui.library.LibraryScreen
 import com.halffd.whispersubs.ui.live.LiveScreen
 import com.halffd.whispersubs.ui.local.LocalPlayerScreen
 import com.halffd.whispersubs.ui.local.LocalScreen
+import com.halffd.whispersubs.ui.player.PipState
 import com.halffd.whispersubs.ui.player.PlayerScreen
 import com.halffd.whispersubs.ui.settings.SettingsScreen
 import com.halffd.whispersubs.ui.theme.WhisperSubsTheme
@@ -56,6 +58,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPiP: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPiP, newConfig)
+        PipState.isInPip = isInPiP
     }
 }
 

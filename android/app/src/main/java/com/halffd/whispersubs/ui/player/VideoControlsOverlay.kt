@@ -1,5 +1,6 @@
 package com.halffd.whispersubs.ui.player
 
+import android.os.Build
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -35,10 +36,13 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Replay30
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
@@ -173,6 +177,9 @@ fun VideoControlsOverlay(
     onClearRepeat: () -> Unit,
     onJumpDialog: () -> Unit,
     onShare: (String) -> Unit,
+    onPrevSubtitle: () -> Unit,
+    onNextSubtitle: () -> Unit,
+    onPip: () -> Unit,
     onToggleLock: () -> Unit,
     onInteraction: () -> Unit,
     modifier: Modifier = Modifier,
@@ -328,6 +335,9 @@ fun VideoControlsOverlay(
                         onClearRepeat = onClearRepeat,
                         onJumpDialog = onJumpDialog,
                         onShare = onShare,
+                        onPrevSubtitle = onPrevSubtitle,
+                        onNextSubtitle = onNextSubtitle,
+                        onPip = onPip,
                         onInteraction = onInteraction,
                     )
                     FullscreenButton(isFullscreen, onToggleFullscreen, onInteraction)
@@ -351,6 +361,9 @@ fun VideoControlsOverlay(
                         onClearRepeat = onClearRepeat,
                         onJumpDialog = onJumpDialog,
                         onShare = onShare,
+                        onPrevSubtitle = onPrevSubtitle,
+                        onNextSubtitle = onNextSubtitle,
+                        onPip = onPip,
                         onInteraction = onInteraction,
                     )
                     FullscreenButton(isFullscreen, onToggleFullscreen, onInteraction)
@@ -425,10 +438,51 @@ private fun MoreMenuButton(
     onClearRepeat: () -> Unit,
     onJumpDialog: () -> Unit,
     onShare: (String) -> Unit,
+    onPrevSubtitle: () -> Unit,
+    onNextSubtitle: () -> Unit,
+    onPip: () -> Unit,
     onInteraction: () -> Unit,
 ) {
     Box {
         DropdownMenu(expanded = expanded, onDismissRequest = { onExpanded(false) }) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                DropdownMenuItem(
+                    text = { Text("Picture in picture") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.PictureInPictureAlt, contentDescription = null, modifier = Modifier.size(20.dp))
+                    },
+                    onClick = {
+                        onExpanded(false)
+                        onPip()
+                        onInteraction()
+                    }
+                )
+            }
+            if (!isLive) {
+                DropdownMenuItem(
+                    text = { Text("Previous subtitle") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.SkipPrevious, contentDescription = null, modifier = Modifier.size(20.dp))
+                    },
+                    onClick = {
+                        onExpanded(false)
+                        onPrevSubtitle()
+                        onInteraction()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Next subtitle") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.SkipNext, contentDescription = null, modifier = Modifier.size(20.dp))
+                    },
+                    onClick = {
+                        onExpanded(false)
+                        onNextSubtitle()
+                        onInteraction()
+                    }
+                )
+                HorizontalDivider()
+            }
             DropdownMenuItem(
                 text = { Text("Share as SRT") },
                 leadingIcon = {

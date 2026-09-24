@@ -31,6 +31,7 @@
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleTop"
+            android:supportsPictureInPicture="true"
             android:theme="@style/Theme.WhisperSubs"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>

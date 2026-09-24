@@ -1,10 +1,13 @@
 package com.halffd.whispersubs.ui.player
 
 import android.app.Activity
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
+import android.os.Build
+import android.util.Rational
 import android.widget.Toast
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -74,6 +77,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.navigation.NavController
 import com.halffd.whispersubs.data.ApiClient
+import com.halffd.whispersubs.data.ResumeStore
 import com.halffd.whispersubs.data.SrtBlock
 import com.halffd.whispersubs.player.SrtParser
 import kotlinx.coroutines.Job
@@ -100,7 +104,11 @@ fun PlayerScreen(
     val audioManager = remember(context) {
         context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     }
+    val resumeStore = remember { ResumeStore(context) }
     val scope = rememberCoroutineScope()
+
+    // Key used to remember/restore playback position
+    val resumeKey = itemId.ifBlank { if (sourceUrl.isNotBlank()) sourceUrl else mediaUrl }
 
     var isLoading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -134,16 +142,25 @@ fun PlayerScreen(
     var seekFeedback by remember { mutableStateOf<SeekFeedback?>(null) }
     var gestureIndicator by remember { mutableStateOf<GestureIndicator?>(null) }
 
-    // Poll playback position/buffered/duration for subtitle sync + seek bar
+    // Poll playback position/buffered/duration for subtitle sync + seek bar,
+    // and persist resume position every 5s while playing (PotPlayer-style)
     var positionMs by remember { mutableLongStateOf(0L) }
     var bufferedMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(exoPlayer) {
+        var lastSaveMs = 0L
         while (true) {
             positionMs = exoPlayer.currentPosition
             bufferedMs = exoPlayer.bufferedPosition
             val d = exoPlayer.duration
             durationMs = if (d > 0) d else 0L
+            if (resumeKey.isNotBlank() && !isLive && exoPlayer.playWhenReady) {
+                val now = System.currentTimeMillis()
+                if (now - lastSaveMs > 5000) {
+                    lastSaveMs = now
+                    resumeStore.save(resumeKey, positionMs, durationMs)
+                }
+            }
             delay(250)
         }
     }
@@ -217,6 +234,50 @@ fun PlayerScreen(
         )
     }
 
+    // Resume position (PotPlayer-style continue)
+    fun restoreResumePosition() {
+        if (isLive || resumeKey.isBlank()) return
+        val saved = resumeStore.load(resumeKey)
+        if (saved > 0L) {
+            exoPlayer.seekTo(saved)
+            Toast.makeText(context, "Resumed from ${formatMs(saved)}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Subtitle-line navigation (PotPlayer Alt+Left/Right)
+    fun seekToPrevSubtitle() {
+        if (srtBlocks.isEmpty()) return
+        val cur = positionMs / 1000.0
+        val prev = srtBlocks.lastOrNull { it.start < cur - 0.5 }
+        if (prev != null) {
+            exoPlayer.seekTo((prev.start * 1000).toLong().coerceAtLeast(0L))
+        } else {
+            Toast.makeText(context, "No previous subtitle", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun seekToNextSubtitle() {
+        if (srtBlocks.isEmpty()) return
+        val cur = positionMs / 1000.0
+        val next = srtBlocks.firstOrNull { it.start > cur + 0.5 }
+        if (next != null) {
+            exoPlayer.seekTo((next.start * 1000).toLong())
+        } else {
+            Toast.makeText(context, "No next subtitle", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Picture-in-picture (YouTube-style mini playback)
+    fun enterPip() {
+        val act = activity ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val params = PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(16, 9))
+                .build()
+            act.enterPictureInPictureMode(params)
+        }
+    }
+
     LaunchedEffect(itemId, sourceUrl, srtUrl) {
         isLive = srtUrl.contains("/api/v1/tasks/") && srtUrl.contains("/subtitles/stream")
 
@@ -235,6 +296,7 @@ fun PlayerScreen(
             controlsVisible = true
             exoPlayer.setMediaItem(MediaItem.fromUri(mediaUrl))
             exoPlayer.prepare()
+            restoreResumePosition()
             exoPlayer.playWhenReady = true
         } else if (sourceUrl.isNotBlank()) {
             apiClient.getPlayInfo(sourceUrl, if (isLive) null else srtUrl)
@@ -251,6 +313,7 @@ fun PlayerScreen(
                     }
                     exoPlayer.setMediaItem(mediaItem)
                     exoPlayer.prepare()
+                    restoreResumePosition()
                     exoPlayer.playWhenReady = true
                 }
                 .onFailure { e ->
@@ -293,6 +356,10 @@ fun PlayerScreen(
         }
         exoPlayer.addListener(listener)
         onDispose {
+            if (resumeKey.isNotBlank()) {
+                val dur = exoPlayer.duration
+                resumeStore.save(resumeKey, exoPlayer.currentPosition, if (dur > 0) dur else 0L)
+            }
             exoPlayer.removeListener(listener)
             exoPlayer.release()
         }
@@ -337,9 +404,13 @@ fun PlayerScreen(
         null
     }
 
+    // PiP: hide chrome/gestures, video fills the mini window
+    val inPip = PipState.isInPip
+
     // Unified gesture handler: tap toggles controls, double-tap seeks ±10s,
     // horizontal drag scrubs, vertical drag adjusts brightness (left half) / volume (right half)
-    val gestureModifier = Modifier.pointerInput(exoPlayer, isLive) {
+    val gestureModifier = Modifier.pointerInput(exoPlayer, isLive, inPip) {
+        if (inPip) return@pointerInput
         val boxWidth = size.width.toFloat().coerceAtLeast(1f)
         val boxHeight = size.height.toFloat().coerceAtLeast(1f)
         val slop = viewConfiguration.touchSlop
@@ -459,7 +530,7 @@ fun PlayerScreen(
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0D1117))) {
         Column(modifier = Modifier.fillMaxSize()) {
-            if (!isFullscreen) {
+            if (!isFullscreen && !inPip) {
                 TopAppBar(
                     title = {
                         Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.White)
@@ -480,7 +551,7 @@ fun PlayerScreen(
                 Box(
                     modifier = Modifier
                         .then(
-                            if (isFullscreen) Modifier.fillMaxSize()
+                            if (isFullscreen || inPip) Modifier.fillMaxSize()
                             else Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                         )
                         .background(Color.Black)
@@ -697,7 +768,7 @@ fun PlayerScreen(
                         title = title,
                         isLive = isLive,
                         isFullscreen = isFullscreen,
-                        visible = controlsVisible && !isLoading && error == null,
+                        visible = controlsVisible && !isLoading && error == null && !inPip,
                         locked = isLocked,
                         playbackSpeed = playbackSpeed,
                         subtitleOffsetMs = subtitleOffsetMs,
@@ -757,6 +828,9 @@ fun PlayerScreen(
                         },
                         onJumpDialog = { showJumpDialog = true },
                         onShare = { fmt -> shareSubtitles(fmt) },
+                        onPrevSubtitle = { seekToPrevSubtitle() },
+                        onNextSubtitle = { seekToNextSubtitle() },
+                        onPip = { enterPip() },
                         onToggleLock = { isLocked = !isLocked },
                         onInteraction = { bumpHide() },
                         modifier = Modifier.fillMaxSize(),

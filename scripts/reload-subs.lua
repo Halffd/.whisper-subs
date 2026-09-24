@@ -155,6 +155,9 @@ local function check_transcription_complete()
     return false
 end
 
+-- Forward declaration: defined below, used by switch_to_final_srt
+local get_external_subtitle_tracks
+
 -- NEW: Switch from .unfinished.srt to final .srt
 local function switch_to_final_srt(final_path)
     final_srt_path = final_path or final_srt_path
@@ -286,7 +289,7 @@ local function find_subtitle_files()
     return subtitle_candidates
 end
 -- Function to get currently loaded external subtitle tracks
-local function get_external_subtitle_tracks()
+get_external_subtitle_tracks = function()
     local tracks = mp.get_property_native("track-list") or {}
     local external_subs = {}
     
@@ -427,8 +430,19 @@ local function check_subtitle_changes()
     
     for _, file_path in ipairs(subtitle_files) do
         local current_mtime = get_mtime(file_path)
+
+        -- If file is a symlink to a growing .unfinished.srt, the target's
+        -- mtime is the one that changes; include it in change detection
+        local sym_target = unfinished_symlinks[file_path]
+        if sym_target then
+            local target_mtime = get_mtime(sym_target)
+            if target_mtime and (not current_mtime or target_mtime > current_mtime) then
+                current_mtime = target_mtime
+            end
+        end
+
         local stored_mtime = subtitle_mtimes[file_path]
-        
+
         if not current_mtime then
             -- File was deleted
             log("info", "Subtitle file deleted: " .. file_path)

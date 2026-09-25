@@ -155,10 +155,9 @@ local function check_transcription_complete()
     return false
 end
 
--- Forward declaration: defined below, used by switch_to_final_srt
-local get_external_subtitle_tracks
+local get_external_subtitle_tracks  -- defined below; used by switch_to_final_srt
 
--- NEW: Switch from .unfinished.srt to final .srt
+-- Switch from .unfinished.srt (or a symlinked final .srt) to the final file
 local function switch_to_final_srt(final_path)
     final_srt_path = final_path or final_srt_path
     if not final_srt_path or not file_exists(final_srt_path) then
@@ -186,35 +185,84 @@ local function switch_to_final_srt(final_path)
     mp.osd_message("Switched to final subtitle", 3)
 end
 
--- Function to find subtitle files in video directory
--- Function to find subtitle files in video directory
-local function find_subtitle_files()
+-- Extract --sub-file arguments from mpv's own command line. Needed for URL
+-- playback where the subtitle path is not derivable from the video path,
+-- and works even if the file did not exist when mpv started.
+local function sub_files_from_cmdline()
+    local paths = {}
+    local f = io.open("/proc/self/cmdline", "r")
+    if not f then return paths end
+    local data = f:read("*a") or ""
+    f:close()
+
+    for arg in data:gmatch("[^%z]+") do
+        local path = arg:match("^%-%-sub%-file=(.+)$")
+        if path then
+            table.insert(paths, path)
+        end
+    end
+
+    return paths
+end
+
+-- Function to find subtitle files in video directory.
+-- loaded_subs: external sub tracks captured before they were removed, needed
+-- for URL playback where the subtitle path cannot be derived from the video.
+local function find_subtitle_files(loaded_subs)
     local video_path = mp.get_property("path")
     
     if not video_path then
         return {}
     end
     
-    -- For URLs, mpv has no local video path. Prefer the directory of the
-    -- subtitle mpv already loaded (e.g. via --sub-file); fall back to
-    -- working directory.
-    local video_dir
-    if video_path:match("^https?://") or video_path:match("^ytdl://") then
-        local tracks = mp.get_property_native("track-list") or {}
-        for _, track in ipairs(tracks) do
-            if track.type == "sub" and track.external
-               and track.external_filename and track.external_filename ~= "" then
-                video_dir = utils.split_path(track.external_filename)
-                break
+    local is_url = video_path:match("^https?://") or video_path:match("^ytdl://")
+    
+    -- For URLs there is no local video file, so the video base name cannot
+    -- be derived. Only the subtitles mpv already loaded (e.g. via
+    -- --sub-file) are relevant: loading every .srt in the folder would add
+    -- dozens of unrelated tracks.
+    if is_url then
+        local loaded = {}
+        local source = loaded_subs or get_external_subtitle_tracks()
+        for _, sub in ipairs(source) do
+            local filename = type(sub) == "table" and sub.filename or sub
+            if filename then
+                table.insert(loaded, filename)
             end
         end
-        if not video_dir then
-            video_dir = mp.get_property("working-directory")
+
+        -- Also honour --sub-file paths, including files mpv failed to open
+        -- at startup (transcription may not have started yet)
+        for _, path in ipairs(sub_files_from_cmdline()) do
+            local found = false
+            for _, existing in ipairs(loaded) do
+                if existing == path then
+                    found = true
+                    break
+                end
+            end
+            if not found and file_exists(path) then
+                table.insert(loaded, path)
+            end
         end
-        log("debug", "Video is a URL, using directory: " .. tostring(video_dir))
-    else
-        video_dir = utils.split_path(video_path)
+        log("debug", "Video is a URL, tracking subtitles: " .. #loaded)
+
+        for _, path in ipairs(loaded) do
+            local target = unfinished_symlink_target(path)
+            if target then
+                unfinished_symlinks[path] = target
+                log("info", "Tracking unfinished symlink: " .. path)
+            elseif path:match("%.unfinished%.srt$") then
+                using_unfinished = true
+                final_srt_path = path:gsub("%.unfinished%.srt$", ".srt")
+                log("info", "Tracking unfinished subtitle: " .. path)
+            end
+        end
+
+        return loaded
     end
+
+    local video_dir = utils.split_path(video_path)
     
     if not video_dir then
         return {}
@@ -229,9 +277,6 @@ local function find_subtitle_files()
     local subtitle_candidates = {}
     local found_unfinished = false
     
-    -- For URLs, we can't match by video name, so just find ALL subtitle files
-    local is_url = video_path:match("^https?://") or video_path:match("^ytdl://")
-    
     for _, file in ipairs(files) do
         if has_supported_extension(file) then
             local full_path = utils.join_path(video_dir, file)
@@ -243,18 +288,12 @@ local function find_subtitle_files()
                 log("debug", "Found unfinished symlink: " .. full_path .. " -> " .. sym_target)
             end
 
-            -- For URLs: include any subtitle file
-            -- For local files: only include if basename matches
+            -- Local files: only include if basename matches the video
             local should_include = false
-
-            if is_url then
-                should_include = true
-            else
-                local video_basename = get_video_basename()
-                if video_basename then
-                    local sub_basename = file:match("(.+)%..+$") or file
-                    should_include = sub_basename:find(video_basename, 1, true) == 1
-                end
+            local video_basename = get_video_basename()
+            if video_basename then
+                local sub_basename = file:match("(.+)%..+$") or file
+                should_include = sub_basename:find(video_basename, 1, true) == 1
             end
             
             if should_include then
@@ -341,8 +380,9 @@ local function reload_all_subs(quiet, force_rescan)
     local subtitle_candidates = {}
     
     if force_rescan then
-        -- Find all subtitle files in directory
-        subtitle_candidates = find_subtitle_files()
+        -- Find subtitle files. Pass the tracks captured before removal, since
+        -- URL mode relies on them and they are gone from the track list now.
+        subtitle_candidates = find_subtitle_files(external_subs)
     else
         -- Use existing tracked files
         for _, filename in ipairs(subtitle_files) do

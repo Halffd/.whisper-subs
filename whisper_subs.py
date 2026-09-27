@@ -1873,6 +1873,11 @@ Examples:
         "-m", "--run", action="store_true", help="Run player in background."
     )
     process_group.add_argument(
+        "--play",
+        action="store_true",
+        help="Launch player (mpv) with live subtitle updates (alias for --run).",
+    )
+    process_group.add_argument(
         "--live",
         action="store_true",
         help="Transcribe live streams in real-time (for Twitch/YouTube live streams).",
@@ -2040,7 +2045,7 @@ Examples:
                     force=args.force,
                     ignore_subs=args.ignore_subs,
                     sub_lang=args.language,
-                    run_mpv=args.run,
+                    run_mpv=args.run or args.play,
                     strict_language_tier=args.cross_tier,
                     force_retry=args.force_retry,
                     vad_filter=args.vad_filter,
@@ -2236,7 +2241,7 @@ Examples:
             force=args.force,
             ignore_subs=args.ignore_subs,
             sub_lang=args.language,
-            run_mpv=args.run,
+            run_mpv=args.run or args.play,
             strict_language_tier=args.cross_tier,
             force_retry=args.force_retry,
             vad_filter=args.vad_filter,

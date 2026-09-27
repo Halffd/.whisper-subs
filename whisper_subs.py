@@ -157,7 +157,7 @@ def get_last_unfinished_job():
     for job in reversed(jobs):
         if job["status"] not in ["completed", "failed"]:
             return job
-    return None, ""
+    return None
 
 
 def list_jobs():

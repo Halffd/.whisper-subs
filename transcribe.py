@@ -1347,7 +1347,10 @@ def try_transcribe(
         # --- END RESUME LOGIC ---
 
         # Create helper files for the final SRT file (not unfinished)
-        make_files(srt_file)
+        # NOTE: caller (whisper_subs.py) already created helper files for the
+        # unfinished path. Calling make_files(srt_file) here would trigger
+        # cleanup_unfinished and delete the .unfinished.srt we're writing to.
+        # make_files(srt_file)
 
         # Create symlink from srt_file -> unfinished_srt so players see in-progress transcription
         if os.path.exists(srt_file) or os.path.islink(srt_file):

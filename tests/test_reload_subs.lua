@@ -294,7 +294,31 @@ for _, cmd in ipairs(commands) do
 end
 check("final .srt replaces the symlink and is re-added", switched)
 
--- 6: local files only match subtitles sharing the video base name
+-- 6: .unfinished.srt directly renamed to final .srt (no symlink)
+reset()
+write_sub(sub_path, "1\n00:00:00,000 --> 00:00:03,000\nHello\n\n")
+-- No symlink - the .sh points directly to .unfinished.srt
+track_list = {
+    { type = "sub", external = true,
+      external_filename = sub_path, selected = true, id = 1 },
+}
+load_script()
+tick()
+
+-- transcription finished: .unfinished.srt renamed to final .srt
+os.execute("mv '" .. sub_path .. "' '" .. dir .. "/video.large-v3.srt'")
+commands = {}
+tick()
+local renamed = false
+for _, cmd in ipairs(commands) do
+    if cmd:match("^sub%-add") and cmd:match("video%.large%-v3%.srt") then
+        renamed = true
+    end
+end
+check("renamed .unfinished.srt -> final .srt is detected and switched", renamed,
+      table.concat(commands, " | "))
+
+-- 7: local files only match subtitles sharing the video base name
 reset({ path = dir .. "/video.large-v3.mp4" })
 write_sub(dir .. "/video.large-v3.srt", "1\n00:00:00,000 --> 00:00:03,000\nHello\n\n")
 write_sub(dir .. "/someone_else.large-v3.srt", "X\n")

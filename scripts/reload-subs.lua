@@ -126,7 +126,7 @@ local function check_transcription_complete()
         return false
     end
     
-    -- Check if final .srt exists and is newer/larger than .unfinished.srt
+    -- Check if final .srt exists
     if file_exists(final_srt_path) then
         local final_info = get_file_info(final_srt_path)
         
@@ -142,12 +142,24 @@ local function check_transcription_complete()
         if unfinished_path then
             local unfinished_info = get_file_info(unfinished_path)
             
-            -- If final file exists and is different size, transcription is done
+            -- Case 1: both exist - compare sizes (original logic)
             if final_info and unfinished_info then
                 if final_info.size > 0 and final_info.size ~= unfinished_info.size then
                     log("info", "Transcription complete! Switching to final .srt")
                     return true
                 end
+            end
+            
+            -- Case 2: final exists but unfinished is gone - rename happened
+            if final_info and not unfinished_info then
+                log("info", "Transcription complete (unfinished renamed to final): " .. final_srt_path)
+                return true
+            end
+        else
+            -- No unfinished tracked but final exists - also complete
+            if final_info then
+                log("info", "Transcription complete (final exists): " .. final_srt_path)
+                return true
             end
         end
     end

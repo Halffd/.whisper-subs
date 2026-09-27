@@ -250,6 +250,23 @@ def srt_time_to_seconds(time_str: str) -> float:
         return 0.0
 
 
+def parse_time_to_seconds(time_str: Optional[str]) -> Optional[float]:
+    """Parse time string (HH:MM:SS, MM:SS, or minutes as int/float) to seconds."""
+    if time_str is None:
+        return None
+    try:
+        if ":" in str(time_str):
+            parts = str(time_str).split(":")
+            if len(parts) == 3:  # HH:MM:SS
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            elif len(parts) == 2:  # MM:SS
+                return int(parts[0]) * 60 + float(parts[1])
+        # Plain number (int or float) = minutes
+        return float(time_str) * 60
+    except (ValueError, IndexError):
+        return None
+
+
 def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     """
     Parses an SRT file to find the last segment's number and end time.
@@ -498,6 +515,7 @@ def transcribe_audio(
     write: Callable = print,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
+    start_force: bool = False,
     temperature: float = 0.0,
     merge_lines: bool = False,
     # Parameters for compatibility; ignored for API
@@ -525,6 +543,32 @@ def transcribe_audio(
         write(f"Using {provider} adapter for transcription with model {model_name}")
         audio_to_transcribe = audio_file
         start_offset_seconds = 0.0
+
+        # --- TWO-PASS TRANSCRIPTION for --start without --start-force ---
+        if start_time and not start_force:
+            write("Two-pass transcription: start_time given without --start-force")
+            start_seconds = parse_time_to_seconds(start_time)
+            if start_seconds is not None and start_seconds > 0:
+                return _two_pass_transcribe_adapter(
+                    audio_file=audio_file,
+                    model_name=model_name,
+                    srt_file=srt_file,
+                    language=language,
+                    device=device,
+                    compute_type=compute_type,
+                    cpu_threads=cpu_threads,
+                    write=write,
+                    start_time=start_time,
+                    end_time=end_time,
+                    start_offset_seconds=start_seconds,
+                    temperature=temperature,
+                    merge_lines=merge_lines,
+                    vad_filter=vad_filter,
+                    vad_params=vad_params,
+                    mpv_ipc_reload=mpv_ipc_reload,
+                    on_srt_created=on_srt_created,
+                    **kwargs,
+                )
 
         if start_time or end_time:
             trimmed_audio_path = os.path.splitext(audio_file)[0] + ".trimmed.m4a"
@@ -993,6 +1037,7 @@ def process_create(
     merge_lines: bool = False,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
+    start_force: bool = False,
     mpv_ipc_reload: Optional[Callable] = None,
     on_srt_created: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
@@ -1017,6 +1062,7 @@ def process_create(
             write=write,
             start_time=start_time,
             end_time=end_time,
+            start_force=start_force,
             temperature=temperature,
             merge_lines=merge_lines,
             vad_filter=vad_filter,
@@ -1064,6 +1110,7 @@ def process_create(
             merge_lines,
             start_time,
             end_time,
+            start_force,
         )
         if success:
             return True
@@ -1091,6 +1138,7 @@ def process_create(
                     merge_lines,
                     start_time,
                     end_time,
+                    start_force,
                 )
                 if success:
                     write(f"Successfully transcribed with {current_model}")
@@ -1121,6 +1169,457 @@ def process_create(
     return False
 
 
+def _two_pass_transcribe(
+    file: str,
+    current_model: str,
+    srt_file: str,
+    language: str,
+    device: str,
+    compute_type: str,
+    force_device: bool,
+    write: Callable,
+    cpu_threads: Optional[int] = None,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    diarization: bool = False,
+    diarization_params: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+    merge_lines: bool = False,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    start_offset_seconds: float = 0.0,
+    mpv_ipc_reload: Optional[Callable] = None,
+) -> bool:
+    """
+    Two-pass transcription for --start without --start-force:
+    1. First pass: transcribe from start_time to end_time (or end of file)
+    2. Second pass: transcribe from 0 to start_time
+    3. Merge both SRTs with proper timestamp offsets
+    """
+    write(f"Two-pass transcription: first pass from {start_time} to end")
+
+    # Parse end time if provided
+    end_seconds = parse_time_to_seconds(end_time) if end_time else None
+
+    # === FIRST PASS: from start_time to end_time (or end) ===
+    # Create a temporary SRT file for the first pass
+    first_pass_srt = srt_file.replace(".srt", ".first_pass.srt")
+    first_pass_unfinished = first_pass_srt.replace(".srt", ".unfinished.srt")
+
+    # Transcribe from start_time to end
+    success = _transcribe_single_pass(
+        file=file,
+        current_model=current_model,
+        srt_file=first_pass_srt,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        force_device=force_device,
+        write=write,
+        cpu_threads=cpu_threads,
+        vad_filter=vad_filter,
+        vad_params=vad_params,
+        diarization=diarization,
+        diarization_params=diarization_params,
+        temperature=temperature,
+        merge_lines=merge_lines,
+        start_time=start_time,
+        end_time=end_time,
+        start_offset_seconds=start_offset_seconds,
+        mpv_ipc_reload=mpv_ipc_reload,
+    )
+
+    if not success:
+        write("First pass transcription failed")
+        return False
+
+    write(f"Two-pass transcription: second pass from 0 to {start_time}")
+
+    # === SECOND PASS: from 0 to start_time ===
+    second_pass_srt = srt_file.replace(".srt", ".second_pass.srt")
+
+    success = _transcribe_single_pass(
+        file=file,
+        current_model=current_model,
+        srt_file=second_pass_srt,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        force_device=force_device,
+        write=write,
+        cpu_threads=cpu_threads,
+        vad_filter=vad_filter,
+        vad_params=vad_params,
+        diarization=diarization,
+        diarization_params=diarization_params,
+        temperature=temperature,
+        merge_lines=merge_lines,
+        start_time=None,  # Start from beginning
+        end_time=start_time,  # End at start_time
+        start_offset_seconds=0.0,
+        mpv_ipc_reload=mpv_ipc_reload,
+    )
+
+    if not success:
+        write("Second pass transcription failed")
+        return False
+
+    # === MERGE BOTH PASSES ===
+    write("Merging two-pass transcription results")
+    return _merge_srt_files(
+        first_pass_srt=first_pass_srt,
+        second_pass_srt=second_pass_srt,
+        final_srt=srt_file,
+        start_offset_seconds=start_offset_seconds,
+        write=write,
+    )
+
+
+def _transcribe_single_pass(
+    file: str,
+    current_model: str,
+    srt_file: str,
+    language: Optional[str],
+    device: str,
+    compute_type: str,
+    force_device: bool,
+    write: Callable,
+    cpu_threads: Optional[int] = None,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    diarization: bool = False,
+    diarization_params: Optional[Dict[str, Any]] = None,
+    temperature: float = 0,
+    merge_lines: bool = False,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    start_offset_seconds: float = 0.0,
+    mpv_ipc_reload: Optional[Callable] = None,
+) -> bool:
+    """
+    Transcribe a single time range and save to srt_file.
+    This is a simplified version of try_transcribe for a single pass.
+    """
+    # For now, reuse try_transcribe with start_force=True to avoid code duplication
+    return try_transcribe(
+        file=file,
+        current_model=current_model,
+        srt_file=srt_file,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        force_device=force_device,
+        write=write,
+        cpu_threads=cpu_threads,
+        vad_filter=vad_filter,
+        vad_params=vad_params,
+        diarization=diarization,
+        diarization_params=diarization_params,
+        temperature=temperature,
+        merge_lines=merge_lines,
+        start_time=start_time,
+        end_time=end_time,
+        start_force=True,  # Force single-pass mode
+        mpv_ipc_reload=mpv_ipc_reload,
+    )
+
+
+def _merge_srt_files(
+    first_pass_srt: str,
+    second_pass_srt: str,
+    final_srt: str,
+    start_offset_seconds: float,
+    write: Callable,
+) -> bool:
+    """
+    Merge two SRT files:
+    - second_pass_srt: 0 to start_time (timestamps already 0-based)
+    - first_pass_srt: start_time to end (timestamps need offset added)
+    """
+    try:
+        # Read second pass (0 to start_time) - timestamps are already correct
+        with open(second_pass_srt, "r", encoding="utf-8") as f:
+            second_content = f.read().strip()
+
+        # Read first pass (start_time to end) - need to add offset to timestamps
+        with open(first_pass_srt, "r", encoding="utf-8") as f:
+            first_content = f.read().strip()
+
+        # Parse and offset first pass timestamps
+        offset_td = datetime.timedelta(seconds=start_offset_seconds)
+        first_lines = first_content.split("\n")
+        offset_first_lines = []
+        for line in first_lines:
+            # Check if this is a timestamp line (HH:MM:SS,mmm --> HH:MM:SS,mmm)
+            match = re.match(
+                r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})", line
+            )
+            if match:
+                start_ts = match.group(1)
+                end_ts = match.group(2)
+                # Add offset
+                start_seconds = srt_time_to_seconds(start_ts)
+                end_seconds = srt_time_to_seconds(end_ts)
+                start_seconds += start_offset_seconds
+                end_seconds += start_offset_seconds
+                new_start = format_timestamp_srt(start_seconds)
+                new_end = format_timestamp_srt(end_seconds)
+                line = f"{new_start} --> {new_end}"
+            offset_first_lines.append(line)
+
+        offset_first_content = "\n".join(offset_first_lines)
+
+        # Merge: second pass first (0 to start_time), then first pass (start_time to end)
+        merged_content = second_content + "\n\n" + offset_first_content
+
+        # Write final SRT
+        with open(final_srt, "w", encoding="utf-8") as f:
+            f.write(merged_content)
+
+        write(f"Merged two-pass transcription saved to {final_srt}")
+
+        # Clean up temporary files
+        for temp_file in [
+            first_pass_srt,
+            second_pass_srt,
+            first_pass_srt.replace(".srt", ".unfinished.srt"),
+            second_pass_srt.replace(".srt", ".unfinished.srt"),
+        ]:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except:
+                pass
+
+        return True
+    except Exception as e:
+        write(f"Error merging SRT files: {e}")
+        return False
+
+
+def format_timestamp_srt(seconds: float) -> str:
+    """Format seconds as HH:MM:SS,mmm for SRT."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _two_pass_transcribe_adapter(
+    audio_file: str,
+    model_name: str,
+    srt_file: str,
+    language: Optional[str],
+    device: str,
+    compute_type: str,
+    cpu_threads: Optional[int] = None,
+    write: Callable = print,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    start_offset_seconds: float = 0.0,
+    temperature: float = 0.0,
+    merge_lines: bool = False,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    mpv_ipc_reload: Optional[Callable] = None,
+    on_srt_created: Optional[Callable[[str, str], None]] = None,
+    **kwargs,
+) -> bool:
+    """
+    Two-pass transcription for adapter models with --start without --start-force:
+    1. First pass: transcribe from start_time to end_time (or end of file)
+    2. Second pass: transcribe from 0 to start_time
+    3. Merge both SRTs with proper timestamp offsets
+    """
+    write(f"Two-pass transcription (adapter): first pass from {start_time} to end")
+
+    # Parse end time if provided
+    end_seconds = parse_time_to_seconds(end_time) if end_time else None
+
+    # === FIRST PASS: from start_time to end_time (or end) ===
+    first_pass_srt = srt_file.replace(".srt", ".first_pass.srt")
+
+    success = _transcribe_single_pass_adapter(
+        audio_file=audio_file,
+        model_name=model_name,
+        srt_file=first_pass_srt,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+        write=write,
+        start_time=start_time,
+        end_time=end_time,
+        start_offset_seconds=start_offset_seconds,
+        temperature=temperature,
+        merge_lines=merge_lines,
+        vad_filter=vad_filter,
+        vad_params=vad_params,
+        mpv_ipc_reload=mpv_ipc_reload,
+        on_srt_created=on_srt_created,
+        **kwargs,
+    )
+
+    if not success:
+        write("First pass transcription failed")
+        return False
+
+    write(f"Two-pass transcription (adapter): second pass from 0 to {start_time}")
+
+    # === SECOND PASS: from 0 to start_time ===
+    second_pass_srt = srt_file.replace(".srt", ".second_pass.srt")
+
+    success = _transcribe_single_pass_adapter(
+        audio_file=audio_file,
+        model_name=model_name,
+        srt_file=second_pass_srt,
+        language=language,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+        write=write,
+        start_time=None,  # Start from beginning
+        end_time=start_time,  # End at start_time
+        start_offset_seconds=0.0,
+        temperature=temperature,
+        merge_lines=merge_lines,
+        vad_filter=vad_filter,
+        vad_params=vad_params,
+        mpv_ipc_reload=mpv_ipc_reload,
+        on_srt_created=on_srt_created,
+        **kwargs,
+    )
+
+    if not success:
+        write("Second pass transcription failed")
+        return False
+
+    # === MERGE BOTH PASSES ===
+    write("Merging two-pass transcription results")
+    return _merge_srt_files(
+        first_pass_srt=first_pass_srt,
+        second_pass_srt=second_pass_srt,
+        final_srt=srt_file,
+        start_offset_seconds=start_offset_seconds,
+        write=write,
+    )
+
+
+def _transcribe_single_pass_adapter(
+    audio_file: str,
+    model_name: str,
+    srt_file: str,
+    language: Optional[str],
+    device: str,
+    compute_type: str,
+    cpu_threads: Optional[int] = None,
+    write: Callable = print,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    start_offset_seconds: float = 0.0,
+    temperature: float = 0.0,
+    merge_lines: bool = False,
+    vad_filter: bool = False,
+    vad_params: Optional[Dict[str, Any]] = None,
+    mpv_ipc_reload: Optional[Callable] = None,
+    on_srt_created: Optional[Callable[[str, str], None]] = None,
+    **kwargs,
+) -> bool:
+    """
+    Transcribe a single time range using adapter and save to srt_file.
+    """
+    # Create a temporary file for the trimmed audio if needed
+    temp_audio = audio_file
+    temp_audio_path = None
+
+    if start_time or end_time:
+        temp_audio_path = (
+            os.path.splitext(audio_file)[0] + f".trimmed_{os.getpid()}.m4a"
+        )
+        ffmpeg_cmd = ["ffmpeg", "-y"]
+
+        start_sec = 0.0
+        if start_time:
+            if ":" in str(start_time):
+                parts = str(start_time).split(":")
+                if len(parts) == 3:
+                    start_sec = (
+                        int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    )
+                elif len(parts) == 2:
+                    start_sec = int(parts[0]) * 60 + float(parts[1])
+                ffmpeg_cmd.extend(["-ss", str(start_time)])
+            else:
+                start_sec = float(start_time) * 60
+                ffmpeg_cmd.extend(["-ss", str(datetime.timedelta(seconds=start_sec))])
+
+        ffmpeg_cmd.extend(["-i", audio_file])
+
+        if end_time:
+            end_sec = 0.0
+            if ":" in str(end_time):
+                parts = str(end_time).split(":")
+                if len(parts) == 3:
+                    end_sec = (
+                        int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    )
+                elif len(parts) == 2:
+                    end_sec = int(parts[0]) * 60 + float(parts[1])
+            else:
+                end_sec = float(end_time) * 60
+
+            if start_time:
+                duration = end_sec - start_sec
+            else:
+                duration = end_sec
+            ffmpeg_cmd.extend(["-t", str(datetime.timedelta(seconds=duration))])
+
+        ffmpeg_cmd.extend(
+            [
+                "-vn",
+                "-acodec",
+                "aac",
+                "-b:a",
+                "128k",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                temp_audio_path,
+            ]
+        )
+
+        write(f"Cutting audio for adapter pass...")
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            temp_audio = temp_audio_path
+            write(f"Created trimmed audio: {temp_audio_path}")
+        else:
+            write(
+                f"Warning: FFmpeg trimming failed: {result.stderr}, using original file"
+            )
+
+    # Call the adapter transcription
+    return _transcribe_with_adapter(
+        audio_file=temp_audio,
+        model_name=model_name,
+        srt_file=srt_file,
+        language=language,
+        start_offset_seconds=start_offset_seconds,
+        temperature=temperature,
+        write=write,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+        vad_filter=vad_filter,
+        vad_params=vad_params,
+        mpv_ipc_reload=mpv_ipc_reload,
+        on_srt_created=on_srt_created,
+        **kwargs,
+    )
+
+
 def try_transcribe(
     file: str,
     current_model: str,
@@ -1139,6 +1638,7 @@ def try_transcribe(
     merge_lines: bool = False,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
+    start_force: bool = False,
     mpv_ipc_reload: Optional[Callable] = None,
     _loop_retry_count: int = 0,
 ) -> bool:
@@ -1149,6 +1649,37 @@ def try_transcribe(
     try:
         unfinished_srt = srt_file.replace(".srt", ".unfinished.srt")
         os.makedirs(os.path.dirname(unfinished_srt) or ".", exist_ok=True)
+
+        # --- TWO-PASS TRANSCRIPTION for --start without --start-force ---
+        # If start_time is given and start_force is False, we transcribe in two passes:
+        # 1. First pass: from start_time to end_time (or end of file)
+        # 2. Second pass: from 0 to start_time
+        # Then merge both SRTs with proper timestamp offsets
+        if start_time and not start_force:
+            write("Two-pass transcription: start_time given without --start-force")
+            start_seconds = parse_time_to_seconds(start_time)
+            if start_seconds is not None and start_seconds > 0:
+                return _two_pass_transcribe(
+                    file=file,
+                    current_model=current_model,
+                    srt_file=srt_file,
+                    language=language,
+                    device=device,
+                    compute_type=compute_type,
+                    force_device=force_device,
+                    write=write,
+                    cpu_threads=cpu_threads,
+                    vad_filter=vad_filter,
+                    vad_params=vad_params,
+                    diarization=diarization,
+                    diarization_params=diarization_params,
+                    temperature=temperature,
+                    merge_lines=merge_lines,
+                    start_time=start_time,
+                    end_time=end_time,
+                    start_offset_seconds=start_seconds,
+                    mpv_ipc_reload=mpv_ipc_reload,
+                )
 
         # --- TIME RANGE CUTTING ---
         audio_to_transcribe = file
@@ -1733,6 +2264,7 @@ finally:
                     merge_lines,
                     start_time,
                     end_time,
+                    start_force,
                     mpv_ipc_reload,
                     _loop_retry_count=_loop_retry_count + 1,
                 )

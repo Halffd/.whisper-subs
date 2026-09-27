@@ -215,6 +215,7 @@ class WhisperSubs:
         merge_lines: bool = False,
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
+        start_force: bool = False,
         mpv_ipc: bool = False,
         mpv_socket: Optional[str] = None,
         cpu_threads: Optional[int] = None,
@@ -263,6 +264,7 @@ class WhisperSubs:
         # Time range settings
         self.start_time = start_time
         self.end_time = end_time
+        self.start_force = start_force
         # MPV IPC settings
         self.mpv_ipc = mpv_ipc
         self.mpv_socket = mpv_socket or "/tmp/mpvsocket"
@@ -1941,6 +1943,11 @@ Examples:
         help="Start time to transcribe (format: HH:MM:SS, MM:SS, or minutes as int/float).",
     )
     advanced_group.add_argument(
+        "--start-force",
+        action="store_true",
+        help="Force transcribe only from --start-time to end (default: transcribe both parts and merge).",
+    )
+    advanced_group.add_argument(
         "--end-time",
         "--end",
         type=str,
@@ -2057,6 +2064,7 @@ Examples:
                     merge_lines=args.merge_lines,
                     start_time=args.start_time,
                     end_time=args.end_time,
+                    start_force=args.start_force,
                     mpv_ipc=args.mpv_ipc,
                     mpv_socket=args.mpv_socket,
                     cpu_threads=args.cpu_threads,
@@ -2253,6 +2261,7 @@ Examples:
             merge_lines=args.merge_lines,
             start_time=args.start_time,
             end_time=args.end_time,
+            start_force=args.start_force,
             mpv_ipc=args.mpv_ipc,
             mpv_socket=args.mpv_socket,
             cpu_threads=args.cpu_threads,

@@ -218,6 +218,7 @@ class WhisperSubs:
         start_force: bool = False,
         mpv_ipc: bool = False,
         mpv_socket: Optional[str] = None,
+        mpv_auto: bool = False,
         cpu_threads: Optional[int] = None,
         save_video: bool = False,
         save_thumbnail: bool = True,
@@ -268,6 +269,7 @@ class WhisperSubs:
         # MPV IPC settings
         self.mpv_ipc = mpv_ipc
         self.mpv_socket = mpv_socket or "/tmp/mpvsocket"
+        self.mpv_auto = mpv_auto
         # CPU threads setting
         self.cpu_threads = cpu_threads
 
@@ -1437,6 +1439,9 @@ class WhisperSubs:
                 merge_lines=self.merge_lines if hasattr(self, "merge_lines") else False,
                 start_time=getattr(self, "start_time", None),
                 end_time=getattr(self, "end_time", None),
+                mpv_auto=getattr(self, "mpv_auto", False),
+                mpv_socket=self.mpv_socket,
+                media_source=audio_file if is_local else task_source,
             ):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
@@ -1880,6 +1885,11 @@ Examples:
         help="Launch player (mpv) with live subtitle updates (alias for --run).",
     )
     process_group.add_argument(
+        "--mpv",
+        action="store_true",
+        help="Launch mpv when first subtitle segment is written (live preview).",
+    )
+    process_group.add_argument(
         "--live",
         action="store_true",
         help="Transcribe live streams in real-time (for Twitch/YouTube live streams).",
@@ -2067,6 +2077,7 @@ Examples:
                     start_force=args.start_force,
                     mpv_ipc=args.mpv_ipc,
                     mpv_socket=args.mpv_socket,
+                    mpv_auto=args.mpv,
                     cpu_threads=args.cpu_threads,
                     save_video=args.video,
                     save_thumbnail=args.save_thumbnail,
@@ -2264,6 +2275,7 @@ Examples:
             start_force=args.start_force,
             mpv_ipc=args.mpv_ipc,
             mpv_socket=args.mpv_socket,
+            mpv_auto=args.mpv,
             cpu_threads=args.cpu_threads,
             save_video=args.video,
             save_thumbnail=args.save_thumbnail,

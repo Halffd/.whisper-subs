@@ -1040,6 +1040,9 @@ def process_create(
     start_force: bool = False,
     mpv_ipc_reload: Optional[Callable] = None,
     on_srt_created: Optional[Callable[[str, str], None]] = None,
+    mpv_auto: bool = False,
+    mpv_socket: str = "/tmp/mpvsocket",
+    media_source: Optional[str] = None,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
     if file is None:
@@ -1111,6 +1114,9 @@ def process_create(
             start_time,
             end_time,
             start_force,
+            mpv_auto,
+            mpv_socket,
+            media_source,
         )
         if success:
             return True
@@ -1139,6 +1145,9 @@ def process_create(
                     start_time,
                     end_time,
                     start_force,
+                    mpv_auto,
+                    mpv_socket,
+                    media_source,
                 )
                 if success:
                     write(f"Successfully transcribed with {current_model}")
@@ -1163,6 +1172,10 @@ def process_create(
                     merge_lines,
                     start_time,
                     end_time,
+                    start_force,
+                    mpv_auto,
+                    mpv_socket,
+                    media_source,
                 )
     else:
         write("No model")
@@ -1639,6 +1652,9 @@ def try_transcribe(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     start_force: bool = False,
+    mpv_auto: bool = False,
+    mpv_socket: str = "/tmp/mpvsocket",
+    media_source: Optional[str] = None,
     mpv_ipc_reload: Optional[Callable] = None,
     _loop_retry_count: int = 0,
 ) -> bool:
@@ -2208,10 +2224,36 @@ finally:
             universal_newlines=True,
         )
 
+        mpv_launched = {"flag": False}
+
         def log_output(pipe, prefix):
             for line in pipe:
                 if line := line.strip():
                     write(f"{prefix}: {line}")
+                    # Launch mpv when first segment is written (if --mpv flag is set)
+                    if (
+                        not mpv_launched["flag"]
+                        and mpv_auto
+                        and "Written 1 new segments" in line
+                        and media_source
+                    ):
+                        mpv_launched["flag"] = True
+                        try:
+                            mpv_cmd = [
+                                "mpv",
+                                media_source,
+                                "--pause",
+                                f"--input-ipc-server={mpv_socket}",
+                                f"--sub-file={unfinished_srt}",
+                            ]
+                            subprocess.Popen(
+                                mpv_cmd,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                            write(f"Launched mpv for live preview: {' '.join(mpv_cmd)}")
+                        except Exception as e:
+                            write(f"Warning: Failed to launch mpv: {e}")
 
         stdout_thread = threading.Thread(
             target=log_output, args=(process.stdout, "Out"), daemon=True
@@ -2265,6 +2307,9 @@ finally:
                     start_time,
                     end_time,
                     start_force,
+                    mpv_auto,
+                    mpv_socket,
+                    media_source,
                     mpv_ipc_reload,
                     _loop_retry_count=_loop_retry_count + 1,
                 )

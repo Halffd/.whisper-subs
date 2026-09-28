@@ -146,6 +146,22 @@ class TestRunner:
         except Exception as e:
             self._record("UI model list", "FAIL", str(e))
 
+        # --- Live segment logging ---
+        try:
+            import transcribe
+            lines = []
+            transcribe.log_segment_line(lines.append, "00:01:02,345", "  hello world  ")
+            assert len(lines) == 1, lines
+            assert "\N{CLOCK FACE THREE OCLOCK} 00:01:02.345: hello world" in lines[0], lines[0]
+            assert lines[0].startswith("["), lines[0]
+            parsed = transcribe.parse_segment_log_line("SEGMENT_LINE\t00:01:02,345\thello\tworld")
+            assert parsed == ("00:01:02,345", "hello\tworld"), parsed
+            assert transcribe.parse_segment_log_line("Out: FIRST_SEGMENT_WRITTEN") is None
+            assert transcribe.parse_segment_log_line("SEGMENT_LINE\t00:00:00,000\t") is None
+            self._record("Live segment logging", "PASS", lines[0])
+        except Exception as e:
+            self._record("Live segment logging", "FAIL", str(e))
+
         # --- All Python files compile ---
         try:
             import py_compile

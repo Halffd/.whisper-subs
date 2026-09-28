@@ -143,6 +143,7 @@ def _transcribe_with_adapter(
                 srt.write(f"{i}\n")
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
+                log_segment_line(write, start_time, segment.text)
 
         if loop_detected:
             write(
@@ -744,7 +745,6 @@ def transcribe_audio(
 
         # Distil-whisper models need special parameters for best performance
         transcribe_params = {
-            "audio_file": audio_file,
             "language": language,
             "vad_filter": False,
         }
@@ -761,7 +761,9 @@ def transcribe_audio(
             write(f"Using distil-whisper optimized parameters")
 
         # Process in smaller chunks with progress tracking
-        result_segments, info = whisper_model.transcribe(**transcribe_params)
+        result_segments, info = whisper_model.transcribe(
+            audio_file, **transcribe_params
+        )
 
         # Stream segments with real-time loop/hallucination detection
         loop_window = []
@@ -859,6 +861,7 @@ def transcribe_audio(
                 srt.write(f"{start_ts} --> {end_ts}\n")
                 srt.write(f"{segment.text}\n\n")
                 srt.flush()
+                log_segment_line(write, start_ts, segment.text)
 
                 if progress:
                     progress.update(segment.start, segment.end)
@@ -989,6 +992,34 @@ def format_timestamp(timestamp):
     seconds = int(timestamp % 60)
     milliseconds = int((timestamp % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
+SEGMENT_LOG_PREFIX = "SEGMENT_LINE\t"
+
+
+def log_segment_line(write, start_time: str, text: str) -> None:
+    """Prints a subtitle line as soon as it is written to the SRT.
+
+    Format mirrors the mpv SimpleHistory output: wall-clock time, media
+    timestamp, then the transcribed text.
+    """
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    media_time = start_time.replace(",", ".")
+    write(f"[{now}] \N{CLOCK FACE THREE OCLOCK} {media_time}: {text.strip()}")
+
+
+def parse_segment_log_line(line: str) -> Optional[Tuple[str, str]]:
+    """Parses a worker SEGMENT_LINE payload into (start_time, text).
+
+    Returns None when the line is not a segment payload.
+    """
+    if not line.startswith(SEGMENT_LOG_PREFIX):
+        return None
+    _, _, payload = line.partition("\t")
+    start_time, _, text = payload.partition("\t")
+    if not text:
+        return None
+    return start_time, text
 
 
 def read_segments_from_json(json_file: str) -> List[Segment]:
@@ -2002,6 +2033,10 @@ def write_segments():
                 f.write(f"{{segment.text.strip()}}\\n\\n")
                 f.flush()
 
+                segment_text = segment.text.strip()
+                if segment_text:
+                    print("SEGMENT_LINE\\t" + start_time + "\\t" + segment_text.replace("\\n", " ").replace("\\t", " "), flush=True)
+
                 current_index += 1
                 segments_written += 1
                 segment_queue.task_done()
@@ -2233,6 +2268,9 @@ finally:
         def log_output(pipe, prefix):
             for line in pipe:
                 if line := line.strip():
+                    if segment := parse_segment_log_line(line):
+                        log_segment_line(write, *segment)
+                        continue
                     write(f"{prefix}: {line}")
                     # Launch mpv when first segment is written (if --mpv flag is set)
                     if (

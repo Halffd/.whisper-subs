@@ -2007,6 +2007,10 @@ def write_segments():
                 segment_queue.task_done()
                 write_event.set()
 
+                if segments_written == 1:
+                    print("FIRST_SEGMENT_WRITTEN")
+                    sys.stdout.flush()
+
                 text_normalized = segment.text.strip().lower()
                 if text_normalized:
                     loop_window.append((text_normalized, adjusted_end))
@@ -2234,7 +2238,7 @@ finally:
                     if (
                         not mpv_launched["flag"]
                         and mpv_auto
-                        and "Written 1 new segments" in line
+                        and "FIRST_SEGMENT_WRITTEN" in line
                         and media_source
                     ):
                         mpv_launched["flag"] = True

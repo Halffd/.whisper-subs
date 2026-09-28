@@ -2221,7 +2221,7 @@ Examples:
             source_url = sources[0]
 
         # Create live stream transcriber and start transcription
-        live_transcriber = livestream_transcriber.LiveStreamTranscriber(
+        live_transcriber = _get_livestream_transcriber().LiveStreamTranscriber(
             model_name=model_to_use,
             device="cuda" if args.gpu else args.device,
             compute_type=args.compute,
@@ -2229,6 +2229,8 @@ Examples:
             log_func=lambda msg: print(f"[LIVE] {msg}"),
             live_poll=args.live_poll,
             live_growth=args.live_growth,
+            mpv_auto=getattr(args, "mpv", False),
+            mpv_socket=args.mpv_socket,
         )
 
         try:

@@ -33,6 +33,8 @@ class LiveStreamTranscriber:
         on_srt_created: Optional[Callable[[str, str], None]] = None,
         live_poll: int = 10,
         live_growth: float = 1.02,
+        mpv_auto: bool = False,
+        mpv_socket: str = "/tmp/mpvsocket",
     ):
         self.model_name = model_name
         self.device = device
@@ -44,6 +46,8 @@ class LiveStreamTranscriber:
         self.live_poll = live_poll
         self.live_growth = live_growth
         self.on_srt_created = on_srt_created
+        self.mpv_auto = mpv_auto
+        self.mpv_socket = mpv_socket
         self.download_process = None
         self.transcription_process = None
         self.is_running = False
@@ -54,13 +58,16 @@ class LiveStreamTranscriber:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.log_func(f"[{timestamp}] [LIVE] {message}")
 
-    def download_stream(self, url, output_file):
+    def download_stream(self, url, output_file, live_from_start=True):
         """Download live stream in background."""
         self.log(f"Starting live stream download from: {url}")
 
         download_opts = [
             "yt-dlp",
-            "--live-from-start",
+        ]
+        if live_from_start:
+            download_opts.append("--live-from-start")
+        download_opts += [
             "--no-part",  # Write directly to final file instead of .part
             "-f",
             "bestaudio/best[height<=720]/best",  # Best audio or best video with max 720p
@@ -115,6 +122,9 @@ class LiveStreamTranscriber:
                 write=self.log,
                 mpv_ipc_reload=self.mpv_ipc_reload,
                 on_srt_created=self.on_srt_created,
+                mpv_auto=self.mpv_auto,
+                mpv_socket=self.mpv_socket,
+                media_source=audio_file,
             )
 
             if not success:
@@ -154,6 +164,9 @@ class LiveStreamTranscriber:
                         write=self.log,
                         mpv_ipc_reload=self.mpv_ipc_reload,
                         on_srt_created=self.on_srt_created,
+                        mpv_auto=False,  # mpv already launched on first segment
+                        mpv_socket=self.mpv_socket,
+                        media_source=audio_file,
                     )
 
                     if success:
@@ -213,7 +226,21 @@ class LiveStreamTranscriber:
                 self.log(
                     f"Download process exited with code {self.download_process.returncode}"
                 )
-                self.log(f"Error: {stderr.decode()}")
+                stderr_str = stderr.decode() if stderr else ""
+                self.log(f"Error: {stderr_str}")
+
+                # --live-from-start fails on streams that just started
+                # (no VOD from the beginning yet). Retry without the flag.
+                if "live-from-start" in stderr_str:
+                    self.log("Retrying download without --live-from-start...")
+                    if self.download_stream(url, audio_file, live_from_start=False):
+                        self.log("Waiting for live stream to end...")
+                        stdout, stderr = self.download_process.communicate()
+                        if self.download_process.returncode != 0:
+                            self.log(
+                                f"Download process exited with code {self.download_process.returncode}"
+                            )
+                            self.log(f"Error: {stderr.decode() if stderr else ''}")
 
             # Wait a bit for final transcription
             time.sleep(10)

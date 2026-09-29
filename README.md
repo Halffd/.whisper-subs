@@ -12,6 +12,9 @@ Transcribe YouTube videos, local audio/video files, and live streams to subtitle
 - **API server**: FastAPI/Flask transcription endpoints
 - **Auto-adapter discovery**: Only adapters with installed dependencies appear as available
 - **Provider-grouped model lists**: GUI dropdowns organized by provider with separator headers
+- **Segment preview**: `--show` prints each subtitle line as it is written
+- **Force-mode backups**: `-f`/`-r` keep the previous subtitle as `name.2.srt`, `name.3.srt`, ... instead of overwriting
+- **Subtitle metadata**: every run writes `name.metadata.json` with channel, stats, thumbnails, duration, and the build (version + commit) that produced it
 
 ## Quick Start
 
@@ -86,6 +89,35 @@ python whisper_subs.py whisperx:large-v3 audio.wav        # needs whisperx packa
 python whisper_subs.py canary:canary-1b-flash audio.wav   # needs nemo package
 python whisper_subs.py parakeet:parakeet-ctc-1.1b audio.wav # needs nemo package
 ```
+
+### Output files
+
+Each transcription writes next to the media:
+
+- `name.srt` — the subtitle (a symlink to `name.unfinished.srt` while transcribing, so players see progress live)
+- `name.metadata.json` — one file per subtitle, always via `app_meta.write_metadata()`
+
+The metadata contains transcription facts (`model`, `language`, `segments_count`, `duration_seconds`, settings) merged with source facts:
+
+| Field | Source |
+|---|---|
+| `channel_name`, `channel_id`, `channel_url` | yt-dlp video info (`local_files` for local files) |
+| `thumbnail_url`, `channel_thumbnail_url` | best yt-dlp thumbnail; channel avatar from the channel page `og:image` |
+| `views`, `likes`, `dislikes`, `comments_count` | yt-dlp stats (`None` when not published) |
+| `upload_timestamp` | yt-dlp `timestamp` / `release_timestamp` / `upload_date` |
+| `has_human_subs`, `has_automatic_subs` | yt-dlp `subtitles` / `automatic_captions` |
+| `transcription_timestamp`, `version`, `commit_hash` | the build that produced the file |
+
+```bash
+# Print each new subtitle line as it is written
+python whisper_subs.py base.en video.mp4 --show
+
+# Force re-transcription; the old subtitle is kept:
+#   name.srt -> name.2.srt (then .3.srt, ...), metadata moves with it
+python whisper_subs.py base.en video.mp4 -r
+```
+
+Note: `-f/--force` bypasses the audio cache and human-subtitle checks; the "already processed" history is only overridden by `-r/--force-retry`, and the backup runs for either flag.
 
 ### Environment Variables
 

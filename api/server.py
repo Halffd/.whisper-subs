@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import WhisperSubs
 from whisper_subs import WhisperSubs, add_job, get_jobs, list_jobs as get_job_list
 import model
+import app_meta
 
 # Import SRT tailer for real-time subtitle streaming
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -111,7 +112,7 @@ API_KEY_QUERY = APIKeyQuery(name="api_key", auto_error=False)
 app = FastAPI(
     title="WhisperSubs API",
     description="API for transcribing audio from various sources using Whisper",
-    version="3.0.0",
+    version=app_meta.APP_VERSION,
 )
 
 
@@ -544,7 +545,11 @@ class TaskStatusResponse(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "WhisperSubs API", "status": "running", "version": "3.0.0"}
+    return {
+        "message": "WhisperSubs API",
+        "status": "running",
+        **app_meta.get_build_info(),
+    }
 
 
 # Authentication Endpoints

@@ -23,6 +23,7 @@ Usage:
     # Generate test audio file
     python tests/run_tests.py --generate-audio
 """
+
 import argparse
 import json
 import os
@@ -30,7 +31,7 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 class TestRunner:
@@ -55,8 +56,12 @@ class TestRunner:
         print("=" * 60)
 
         from model import (
-            Segment, TranscriptionContext, ALL_MODEL_NAMES,
-            ADAPTER_MODEL_NAMES, MODEL_NAMES, _ADAPTER_CLASSES,
+            Segment,
+            TranscriptionContext,
+            ALL_MODEL_NAMES,
+            ADAPTER_MODEL_NAMES,
+            MODEL_NAMES,
+            _ADAPTER_CLASSES,
         )
 
         # --- Segment ---
@@ -70,7 +75,9 @@ class TestRunner:
         # --- Adapter count ---
         try:
             assert len(_ADAPTER_CLASSES) >= 13
-            self._record("Adapter classes >= 13", "PASS", f"{len(_ADAPTER_CLASSES)} registered")
+            self._record(
+                "Adapter classes >= 13", "PASS", f"{len(_ADAPTER_CLASSES)} registered"
+            )
         except Exception as e:
             self._record("Adapter classes >= 13", "FAIL", str(e))
 
@@ -78,7 +85,9 @@ class TestRunner:
         try:
             dupes = [m for m in ALL_MODEL_NAMES if ALL_MODEL_NAMES.count(m) > 1]
             assert len(dupes) == 0, f"Duplicates: {set(dupes)}"
-            self._record("No duplicate model names", "PASS", f"{len(ALL_MODEL_NAMES)} unique")
+            self._record(
+                "No duplicate model names", "PASS", f"{len(ALL_MODEL_NAMES)} unique"
+            )
         except Exception as e:
             self._record("No duplicate model names", "FAIL", str(e))
 
@@ -88,7 +97,7 @@ class TestRunner:
                 inst = cls.__new__(cls)
                 p = inst.prefix
                 if p:
-                    assert ':' not in p and ' ' not in p and p == p.lower()
+                    assert ":" not in p and " " not in p and p == p.lower()
             self._record("Adapter prefix format", "PASS")
         except Exception as e:
             self._record("Adapter prefix format", "FAIL", str(e))
@@ -96,10 +105,14 @@ class TestRunner:
         # --- ADAPTER_MODEL_NAMES format ---
         try:
             for name in ADAPTER_MODEL_NAMES:
-                assert ':' in name
-                prefix, model = name.split(':', 1)
+                assert ":" in name
+                prefix, model = name.split(":", 1)
                 assert prefix and model
-            self._record("ADAPTER_MODEL_NAMES format", "PASS", f"{len(ADAPTER_MODEL_NAMES)} names")
+            self._record(
+                "ADAPTER_MODEL_NAMES format",
+                "PASS",
+                f"{len(ADAPTER_MODEL_NAMES)} names",
+            )
         except Exception as e:
             self._record("ADAPTER_MODEL_NAMES format", "FAIL", str(e))
 
@@ -121,15 +134,22 @@ class TestRunner:
                     a, m = ctx.resolve(f"{prefix}:{models[0]}")
                     assert a is adapter
                     tested += 1
-            self._record("Context.resolve() prefixed", "PASS",
-                f"tested {tested} available adapters, {len(ctx._adapter_map) - tested} unavailable correctly rejected")
+            self._record(
+                "Context.resolve() prefixed",
+                "PASS",
+                f"tested {tested} available adapters, {len(ctx._adapter_map) - tested} unavailable correctly rejected",
+            )
         except Exception as e:
             self._record("Context.resolve() prefixed", "FAIL", str(e))
 
         # --- is_api_model ---
         try:
             ctx = TranscriptionContext()
-            assert ctx.is_api_model("groq:whisper-large-v3") == (True, "groq", "whisper-large-v3")
+            assert ctx.is_api_model("groq:whisper-large-v3") == (
+                True,
+                "groq",
+                "whisper-large-v3",
+            )
             assert ctx.is_api_model("large-v3")[0] is False
             self._record("Context.is_api_model()", "PASS")
         except Exception as e:
@@ -138,39 +158,260 @@ class TestRunner:
         # --- UI models ---
         try:
             from ui.models import get_flat_display_list, is_separator
+
             flat = get_flat_display_list()
             seps = [x for x in flat if is_separator(x)]
             models = [x for x in flat if not is_separator(x)]
             assert len(seps) >= 5 and len(models) >= 20
-            self._record("UI model list", "PASS", f"{len(seps)} groups, {len(models)} models")
+            self._record(
+                "UI model list", "PASS", f"{len(seps)} groups, {len(models)} models"
+            )
         except Exception as e:
             self._record("UI model list", "FAIL", str(e))
 
         # --- Live segment logging ---
         try:
             import transcribe
+
             lines = []
             transcribe.log_segment_line(lines.append, "00:01:02,345", "  hello world  ")
             assert len(lines) == 1, lines
-            assert "\N{CLOCK FACE THREE OCLOCK} 00:01:02.345: hello world" in lines[0], lines[0]
+            assert (
+                "\N{CLOCK FACE THREE OCLOCK} 00:01:02.345: hello world" in lines[0]
+            ), lines[0]
             assert lines[0].startswith("["), lines[0]
-            parsed = transcribe.parse_segment_log_line("SEGMENT_LINE\t00:01:02,345\thello\tworld")
+            parsed = transcribe.parse_segment_log_line(
+                "SEGMENT_LINE\t00:01:02,345\thello\tworld"
+            )
             assert parsed == ("00:01:02,345", "hello\tworld"), parsed
-            assert transcribe.parse_segment_log_line("Out: FIRST_SEGMENT_WRITTEN") is None
-            assert transcribe.parse_segment_log_line("SEGMENT_LINE\t00:00:00,000\t") is None
+            assert (
+                transcribe.parse_segment_log_line("Out: FIRST_SEGMENT_WRITTEN") is None
+            )
+            assert (
+                transcribe.parse_segment_log_line("SEGMENT_LINE\t00:00:00,000\t")
+                is None
+            )
             self._record("Live segment logging", "PASS", lines[0])
         except Exception as e:
             self._record("Live segment logging", "FAIL", str(e))
 
+        # --- Subtitle metadata ---
+        try:
+            import shutil
+            import tempfile
+            import app_meta
+
+            info = app_meta.build_source_info(
+                {
+                    "id": "abc123",
+                    "title": "Example Video",
+                    "channel": "Example Channel",
+                    "channel_id": "UC123",
+                    "channel_url": "https://www.youtube.com/@example",
+                    "view_count": 1234,
+                    "like_count": 56,
+                    "dislike_count": 7,
+                    "comment_count": 89,
+                    "duration": 95.0,
+                    "upload_date": "20260102",
+                    "subtitles": {"en": [{}]},
+                    "automatic_captions": {"en": [{}]},
+                    "thumbnails": [
+                        {"url": "http://x/small.jpg", "preference": -100, "width": 120},
+                        {"url": "http://x/big.jpg", "preference": -100, "width": 1280},
+                    ],
+                },
+                source_url="https://youtu.be/abc123",
+                channel_thumbnail_url="http://x/channel.jpg",
+            )
+            assert info["video_id"] == "abc123"
+            assert info["channel_name"] == "Example Channel"
+            assert info["channel_url"] == "https://www.youtube.com/@example"
+            assert info["thumbnail_url"] == "http://x/big.jpg", info["thumbnail_url"]
+            assert info["channel_thumbnail_url"] == "http://x/channel.jpg"
+            assert info["views"] == 1234 and info["likes"] == 56
+            assert info["dislikes"] == 7 and info["comments_count"] == 89
+            assert info["duration_seconds"] == 95.0
+            assert info["upload_timestamp"] == "2026-01-02", info["upload_timestamp"]
+            assert info["has_human_subs"] is True and info["has_automatic_subs"] is True
+            assert app_meta.build_source_info(None)["channel_name"] is None
+            assert (
+                app_meta.build_source_info({"channel_name": "local_files"})[
+                    "channel_name"
+                ]
+                == "local_files"
+            )
+
+            tmp = tempfile.mkdtemp()
+            try:
+                srt = os.path.join(tmp, "Example.base.en.srt")
+                meta_path = app_meta.write_metadata(
+                    srt, {"model": "base.en", "segments_count": 3}, source_info=info
+                )
+                assert meta_path == os.path.join(tmp, "Example.base.en.metadata.json")
+                with open(meta_path, encoding="utf-8") as f:
+                    saved = json.load(f)
+                assert (
+                    saved["views"] == 1234
+                    and saved["channel_name"] == "Example Channel"
+                )
+                assert saved["model"] == "base.en" and saved["segments_count"] == 3
+                assert saved["version"] == app_meta.APP_VERSION
+                assert saved["commit_hash"]
+                assert saved["date"] and saved["transcription_timestamp"]
+                # Transcription facts win over source facts on shared keys.
+                app_meta.write_metadata(
+                    srt, {"duration_seconds": 12.5}, source_info=info
+                )
+                with open(meta_path, encoding="utf-8") as f:
+                    assert json.load(f)["duration_seconds"] == 12.5
+            finally:
+                shutil.rmtree(tmp)
+            self._record("Subtitle metadata", "PASS", f"{len(info)} source fields")
+        except Exception as e:
+            self._record("Subtitle metadata", "FAIL", str(e))
+
+        # --- Force-mode subtitle backup ---
+        try:
+            import shutil
+            import tempfile
+            from whisper_subs import WhisperSubs
+
+            tmp = tempfile.mkdtemp()
+            try:
+                ws = WhisperSubs.__new__(WhisperSubs)
+                ws.log = lambda message: None
+                base = os.path.join(tmp, "Video.base.en")
+                srt = base + ".srt"
+                meta = base + ".metadata.json"
+
+                assert ws.backup_existing_sub(srt) is None, "nothing to back up"
+
+                for first in ("first", "second"):
+                    with open(srt, "w", encoding="utf-8") as f:
+                        f.write(first)
+                    with open(meta, "w", encoding="utf-8") as f:
+                        json.dump({"model": "base.en"}, f)
+                    backup = ws.backup_existing_sub(srt)
+                    assert backup, f"no backup on {first} run"
+
+                assert sorted(f for f in os.listdir(tmp) if f.endswith(".srt")) == [
+                    "Video.base.en.2.srt",
+                    "Video.base.en.3.srt",
+                ], sorted(os.listdir(tmp))
+                assert os.path.exists(base + ".2.metadata.json")
+                assert os.path.exists(base + ".3.metadata.json")
+                assert not os.path.exists(srt)
+                assert not os.path.exists(meta)
+
+                # A symlinked final subtitle is preserved under the final name.
+                unfinished = base + ".unfinished.srt"
+                with open(unfinished, "w", encoding="utf-8") as f:
+                    f.write("live")
+                with open(meta, "w", encoding="utf-8") as f:
+                    json.dump({"model": "base.en"}, f)
+                os.symlink(os.path.basename(unfinished), srt)
+                assert ws.backup_existing_sub(srt) == base + ".4.srt"
+                assert not os.path.exists(srt)
+                assert os.path.exists(base + ".4.metadata.json")
+            finally:
+                shutil.rmtree(tmp)
+            self._record("Force subtitle backup", "PASS", "numbering .2 .3 .4")
+        except Exception as e:
+            self._record("Force subtitle backup", "FAIL", str(e))
+
+        # --- --show flag wiring ---
+        try:
+            import inspect
+            import transcribe
+            from whisper_subs import WhisperSubs
+            from livestream_transcriber import LiveStreamTranscriber
+
+            for func in (transcribe.process_create, transcribe.transcribe_audio):
+                params = inspect.signature(func).parameters
+                assert params["show_segments"].default is False, func.__name__
+                assert "source_info" in params, func.__name__
+            assert WhisperSubs.__init__.__defaults__[-1] is False
+            assert LiveStreamTranscriber.__init__.__defaults__[-1] is False
+            self._record("--show wiring", "PASS", "opt-in, default False")
+        except Exception as e:
+            self._record("--show wiring", "FAIL", str(e))
+
+        # --- Source info is fetched once per video ---
+        try:
+            import whisper_subs
+            from whisper_subs import WhisperSubs
+
+            def bare(**attrs):
+                obj = WhisperSubs.__new__(WhisperSubs)
+                obj.log = lambda message: None
+                for key, value in attrs.items():
+                    setattr(obj, key, value)
+                return obj
+
+            calls = []
+
+            class FakeYDL:
+                def __init__(self, opts):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def extract_info(self, url, download=False):
+                    calls.append(url)
+                    return {
+                        "id": "abc",
+                        "title": "T",
+                        "channel": "C",
+                        "view_count": 7,
+                    }
+
+            real_ydl = whisper_subs.yt_dlp.YoutubeDL
+            whisper_subs.yt_dlp.YoutubeDL = FakeYDL
+            try:
+                ws = bare(
+                    log_file=None,
+                    specified_browser=None,
+                    info_cache={},
+                    source_info_cache={},
+                    channel_thumb_cache={},
+                )
+                url = "https://youtu.be/abc"
+                assert ws.get_video_info(url) == ("T", "C")
+                source = ws.get_source_info(url)
+                assert len(calls) == 1, f"refetched video info: {calls}"
+                assert source["view_count"] == 7, source
+                assert source["id"] == "abc", source
+                # build_source_info maps the raw keys to metadata fields.
+                built = ws.build_source_info(url, is_local=False)
+                assert built["views"] == 7 and built["channel_name"] == "C", built
+                # Cached data is reused, and failures do not raise.
+                assert ws.get_source_info(url)["view_count"] == 7
+                assert len(calls) == 1, calls
+            finally:
+                whisper_subs.yt_dlp.YoutubeDL = real_ydl
+            self._record(
+                "Source info fetched once", "PASS", "cache shared with get_video_info"
+            )
+        except Exception as e:
+            self._record("Source info fetched once", "FAIL", str(e))
+
         # --- All Python files compile ---
         try:
             import py_compile
+
             errors = []
-            for root, dirs, files in os.walk(os.path.join(os.path.dirname(__file__), '..')):
-                if '__pycache__' in root or '.git' in root:
+            for root, dirs, files in os.walk(
+                os.path.join(os.path.dirname(__file__), "..")
+            ):
+                if "__pycache__" in root or ".git" in root:
                     continue
                 for f in files:
-                    if f.endswith('.py'):
+                    if f.endswith(".py"):
                         path = os.path.join(root, f)
                         try:
                             py_compile.compile(path, doraise=True)
@@ -189,11 +430,13 @@ class TestRunner:
         print("=" * 60)
 
         from model import TranscriptionContext
+
         ctx = TranscriptionContext()
         ctx._ensure_initialized()
 
         all_adapters = {}
         from model import _ADAPTER_CLASSES
+
         for cls in _ADAPTER_CLASSES:
             try:
                 inst = cls()
@@ -227,16 +470,23 @@ class TestRunner:
             reason = info.get("error", "missing dependency/key")
             print(f"    {prefix:20s}  {info['class']:25s}  ({reason})")
 
-        self._record("Adapters available", "PASS" if available else "SKIP",
-                      f"{len(available)}/{len(all_adapters)}")
+        self._record(
+            "Adapters available",
+            "PASS" if available else "SKIP",
+            f"{len(available)}/{len(all_adapters)}",
+        )
 
-    def run_transcribe_test(self, audio_file: str, model_name: str, language: str = None):
+    def run_transcribe_test(
+        self, audio_file: str, model_name: str, language: str = None
+    ):
         print("\n" + "=" * 60)
         print(f"TRANSCRIPTION TEST: {model_name}")
         print("=" * 60)
 
         if not os.path.exists(audio_file):
-            self._record(f"Transcribe {model_name}", "SKIP", f"audio not found: {audio_file}")
+            self._record(
+                f"Transcribe {model_name}", "SKIP", f"audio not found: {audio_file}"
+            )
             return
 
         from model import TranscriptionContext
@@ -263,14 +513,18 @@ class TestRunner:
             full_text = " ".join(s.text for s in segments)
             print(f"\n  Segments: {len(segments)}")
             print(f"  Time:     {elapsed:.1f}s")
-            print(f"  Text:     {full_text[:200]}{'...' if len(full_text) > 200 else ''}")
+            print(
+                f"  Text:     {full_text[:200]}{'...' if len(full_text) > 200 else ''}"
+            )
 
             if segments and any(s.text.strip() for s in segments):
-                self._record(f"Transcribe {model_name}", "PASS",
-                             f"{len(segments)} segments, {elapsed:.1f}s")
+                self._record(
+                    f"Transcribe {model_name}",
+                    "PASS",
+                    f"{len(segments)} segments, {elapsed:.1f}s",
+                )
             else:
-                self._record(f"Transcribe {model_name}", "FAIL",
-                             "no text in segments")
+                self._record(f"Transcribe {model_name}", "FAIL", "no text in segments")
 
         except Exception as e:
             elapsed = time.time() - start
@@ -278,6 +532,7 @@ class TestRunner:
 
     def run_all_transcribe_tests(self, audio_file: str, language: str = None):
         from model import TranscriptionContext
+
         ctx = TranscriptionContext()
         ctx._ensure_initialized()
 
@@ -304,12 +559,16 @@ class TestRunner:
     def generate_audio(self):
         print("Generating test audio...")
         subprocess.run(
-            [sys.executable, os.path.join(os.path.dirname(__file__), 'generate_test_audio.py')],
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "generate_test_audio.py"),
+            ],
             check=True,
         )
 
     def list_adapters(self):
         from model import TranscriptionContext, _ADAPTER_CLASSES
+
         ctx = TranscriptionContext()
         ctx._ensure_initialized()
 
@@ -342,18 +601,26 @@ class TestRunner:
             print(f"  [{icon}] {r['name']}{detail}")
 
         total = self.passed + self.failed + self.skipped
-        print(f"\n  {self.passed}/{total} passed, {self.failed} failed, {self.skipped} skipped")
+        print(
+            f"\n  {self.passed}/{total} passed, {self.failed} failed, {self.skipped} skipped"
+        )
         print("=" * 60)
         return 0 if self.failed == 0 else 1
 
 
 def main():
     parser = argparse.ArgumentParser(description="whisper-subs test runner")
-    parser.add_argument('--audio', help="Audio file for transcription tests")
-    parser.add_argument('--model', help="Specific model to test (e.g. groq:whisper-large-v3)")
-    parser.add_argument('--lang', help="Language code (e.g. en, ja, es)")
-    parser.add_argument('--list-adapters', action='store_true', help="List all adapters and exit")
-    parser.add_argument('--generate-audio', action='store_true', help="Generate test audio files")
+    parser.add_argument("--audio", help="Audio file for transcription tests")
+    parser.add_argument(
+        "--model", help="Specific model to test (e.g. groq:whisper-large-v3)"
+    )
+    parser.add_argument("--lang", help="Language code (e.g. en, ja, es)")
+    parser.add_argument(
+        "--list-adapters", action="store_true", help="List all adapters and exit"
+    )
+    parser.add_argument(
+        "--generate-audio", action="store_true", help="Generate test audio files"
+    )
     args = parser.parse_args()
 
     runner = TestRunner()
@@ -378,5 +645,5 @@ def main():
     return runner.print_summary()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

@@ -20,6 +20,7 @@ import random
 import pyperclip
 import yt_dlp
 import hashlib
+import app_meta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
@@ -222,6 +223,7 @@ class WhisperSubs:
         cpu_threads: Optional[int] = None,
         save_video: bool = False,
         save_thumbnail: bool = True,
+        show: bool = False,
     ):
         self.model_name = model_name
         self.device = device
@@ -236,6 +238,7 @@ class WhisperSubs:
         self.strict_language_tier = strict_language_tier
         self.save_video = save_video
         self.save_thumbnail = save_thumbnail
+        self.show = show
         self.model = None
         self.log_file = os.path.join(
             os.path.expanduser("~/.config/WhisperSubs"), "whisper_subs.log"
@@ -243,6 +246,9 @@ class WhisperSubs:
         self.info_cache: Dict[
             str, Tuple[str, str]
         ] = {}  # Cache for video info to avoid re-fetching
+        # Full yt-dlp info dicts and channel avatars, for subtitle metadata
+        self.source_info_cache: Dict[str, Dict[str, Any]] = {}
+        self.channel_thumb_cache: Dict[str, Optional[str]] = {}
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         self.delay = 30
         self.start_delay = 30
@@ -367,6 +373,10 @@ class WhisperSubs:
             if not info:
                 return "unknown_title", "unknown_channel"
 
+            # Keep the full dict so the subtitle metadata does not have to
+            # fetch the same page again.
+            self.source_info_cache[url] = dict(info)
+
             title = info.get("title", "unknown_title")
             channel = info.get("channel") or info.get("uploader") or "unknown_channel"
             return title, channel
@@ -386,6 +396,127 @@ class WhisperSubs:
         info = self.get_video_info(clean_url)
         self.info_cache[clean_url] = info
         return info
+
+    def get_source_info(self, url: str) -> Dict[str, Any]:
+        """Full yt-dlp info dict for a URL, cached to avoid re-fetching.
+
+        Used for the subtitle metadata (channel, stats, thumbnail, subs
+        availability). Local files have no yt-dlp info and return {}.
+        """
+        if self.is_local_file(url):
+            return {}
+
+        clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
+        if clean_url in self.source_info_cache:
+            return self.source_info_cache[clean_url]
+
+        try:
+            ydl_opts = self._get_ytdlp_base_opts(skip_download=True)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                raw_info = ydl.extract_info(url, download=False)
+            info: Dict[str, Any] = dict(raw_info) if raw_info else {}
+        except Exception as e:
+            self.log(f"Warning: could not fetch video info for metadata: {e}")
+            info = {}
+
+        self.source_info_cache[clean_url] = info
+        return info
+
+    def get_channel_thumbnail(self, channel_url: Optional[str]) -> Optional[str]:
+        """Channel avatar URL from the channel page, cached per channel.
+
+        yt-dlp does not expose channel avatars in video info, so the channel
+        page is read once per channel. Returns None when unavailable.
+        """
+        if not channel_url:
+            return None
+        if channel_url in self.channel_thumb_cache:
+            return self.channel_thumb_cache[channel_url]
+
+        thumbnail = None
+        try:
+            import requests
+
+            response = requests.get(
+                channel_url,
+                timeout=15,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept-Language": "en-US,en",
+                },
+            )
+            if response.ok:
+                match = re.search(
+                    r'<meta property="og:image" content="([^"]+)"', response.text
+                )
+                if match:
+                    thumbnail = match.group(1)
+        except Exception:
+            thumbnail = None
+
+        self.channel_thumb_cache[channel_url] = thumbnail
+        return thumbnail
+
+    def build_source_info(self, url: str, is_local: bool) -> Dict[str, Any]:
+        """Video/channel fields stored in the subtitle metadata."""
+        if is_local:
+            return app_meta.build_source_info(
+                {"title": os.path.basename(url), "channel_name": "local_files"},
+                source_url=url,
+            )
+
+        info = self.get_source_info(url)
+        channel_url = info.get("channel_url") or info.get("uploader_url")
+        return app_meta.build_source_info(
+            info,
+            source_url=url,
+            channel_thumbnail_url=self.get_channel_thumbnail(channel_url),
+        )
+
+    def backup_existing_sub(self, srt_file: str) -> Optional[str]:
+        """Moves an existing subtitle aside before a forced re-transcription.
+
+        `name.srt` becomes `name.2.srt`, then `name.3.srt` and so on; the
+        matching metadata file is kept with it. Returns the new path, or None
+        when there was nothing to preserve.
+        """
+        if not srt_file or not (os.path.exists(srt_file) or os.path.islink(srt_file)):
+            return None
+
+        if os.path.islink(srt_file):
+            target = os.path.realpath(srt_file)
+            os.remove(srt_file)
+            existing = target if os.path.exists(target) else None
+        else:
+            existing = srt_file
+
+        if not existing:
+            return None
+
+        stem = os.path.splitext(existing)[0]
+        # A symlinked final subtitle points at "<name>.unfinished.srt"; back it
+        # up as "<name>.2.srt" so the numbered files match the subtitle naming.
+        if stem.endswith(".unfinished"):
+            stem = stem[: -len(".unfinished")]
+        number = 2
+        while True:
+            backup = f"{stem}.{number}.srt"
+            if not os.path.exists(backup):
+                break
+            number += 1
+
+        os.rename(existing, backup)
+        self.log(f"Kept previous subtitle: {backup}")
+
+        old_meta = os.path.splitext(srt_file)[0] + ".metadata.json"
+        if os.path.exists(old_meta):
+            new_meta = os.path.splitext(backup)[0] + ".metadata.json"
+            try:
+                os.rename(old_meta, new_meta)
+            except OSError as e:
+                self.log(f"Warning: could not move subtitle metadata: {e}")
+
+        return backup
 
     def clean_youtube_url(self, url: str) -> str:
         """Clean YouTube URLs by removing tracking parameters and extracting just the video ID.
@@ -1362,6 +1493,15 @@ class WhisperSubs:
                 srt_file = os.path.join(channel_dir, f"{base_name}.srt")
                 srt_file_secondary = None
 
+            # Keep the previous subtitle when forcing a re-transcription
+            if self.force or self.force_retry:
+                self.backup_existing_sub(srt_file)
+                if srt_file_secondary:
+                    self.backup_existing_sub(srt_file_secondary)
+
+            # Video/channel facts stored in the subtitle metadata
+            source_info = self.build_source_info(task_source, is_local)
+
             # Create helper files (bash, bat, thumbnail) before transcription
             unfinished_srt = srt_file.replace(".srt", ".unfinished.srt")
             _get_helper_files().make_files(unfinished_srt, url=task_source)
@@ -1442,6 +1582,8 @@ class WhisperSubs:
                 mpv_auto=getattr(self, "mpv_auto", False),
                 mpv_socket=self.mpv_socket,
                 media_source=audio_file if is_local else task_source,
+                show_segments=getattr(self, "show", False),
+                source_info=source_info,
             ):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
@@ -1890,6 +2032,11 @@ Examples:
         help="Launch mpv when first subtitle segment is written (live preview).",
     )
     process_group.add_argument(
+        "--show",
+        action="store_true",
+        help="Print each new subtitle line as it is transcribed.",
+    )
+    process_group.add_argument(
         "--live",
         action="store_true",
         help="Transcribe live streams in real-time (for Twitch/YouTube live streams).",
@@ -2081,6 +2228,7 @@ Examples:
                     cpu_threads=args.cpu_threads,
                     save_video=args.video,
                     save_thumbnail=args.save_thumbnail,
+                    show=args.show,
                 )
                 processor.process(source_info["url"])
 
@@ -2231,6 +2379,7 @@ Examples:
             live_growth=args.live_growth,
             mpv_auto=getattr(args, "mpv", False),
             mpv_socket=args.mpv_socket,
+            show_segments=getattr(args, "show", False),
         )
 
         try:
@@ -2281,6 +2430,7 @@ Examples:
             cpu_threads=args.cpu_threads,
             save_video=args.video,
             save_thumbnail=args.save_thumbnail,
+            show=args.show,
         )
         processor.process(job_or_source)
 

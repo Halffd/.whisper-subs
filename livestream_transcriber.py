@@ -35,6 +35,7 @@ class LiveStreamTranscriber:
         live_growth: float = 1.02,
         mpv_auto: bool = False,
         mpv_socket: str = "/tmp/mpvsocket",
+        show_segments: bool = False,
     ):
         self.model_name = model_name
         self.device = device
@@ -48,6 +49,7 @@ class LiveStreamTranscriber:
         self.on_srt_created = on_srt_created
         self.mpv_auto = mpv_auto
         self.mpv_socket = mpv_socket
+        self.show_segments = show_segments
         self.download_process = None
         self.transcription_process = None
         self.is_running = False
@@ -125,6 +127,7 @@ class LiveStreamTranscriber:
                 mpv_auto=self.mpv_auto,
                 mpv_socket=self.mpv_socket,
                 media_source=audio_file,
+                show_segments=self.show_segments,
             )
 
             if not success:
@@ -167,6 +170,7 @@ class LiveStreamTranscriber:
                         mpv_auto=False,  # mpv already launched on first segment
                         mpv_socket=self.mpv_socket,
                         media_source=audio_file,
+                        show_segments=self.show_segments,
                     )
 
                     if success:

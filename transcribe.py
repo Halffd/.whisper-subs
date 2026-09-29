@@ -10,6 +10,7 @@ local faster-whisper pipeline for backward compatibility.
 """
 import model as _model_module
 from model import Segment, TranscriptionContext, get_context
+import app_meta
 import logging
 import psutil
 import time
@@ -66,6 +67,8 @@ def _transcribe_with_adapter(
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
     on_srt_created: Optional[Callable[[str, str], None]] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> bool:
     """Transcribe using the adapter system (for all prefixed models).
@@ -143,7 +146,8 @@ def _transcribe_with_adapter(
                 srt.write(f"{i}\n")
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
-                log_segment_line(write, start_time, segment.text)
+                if show_segments:
+                    log_segment_line(write, start_time, segment.text)
 
         if loop_detected:
             write(
@@ -156,19 +160,20 @@ def _transcribe_with_adapter(
                 f"Loop detected at {loop_timestamp:.1f}s during adapter transcription",
             )
 
-        metadata_file = os.path.splitext(srt_file)[0] + ".metadata.json"
         try:
-            metadata = {
-                "model": stripped_model,
-                "provider": prefix,
-                "date": datetime.datetime.now().isoformat(),
-                "source_file": os.path.basename(audio_file),
-                "language": language or "auto-detect",
-                "segments_count": len(segments),
-                "start_offset_seconds": start_offset_seconds,
-            }
-            with open(metadata_file, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            metadata_file = app_meta.write_metadata(
+                srt_file,
+                {
+                    "model": stripped_model,
+                    "provider": prefix,
+                    "source_file": os.path.basename(audio_file),
+                    "language": language or "auto-detect",
+                    "segments_count": len(segments),
+                    "duration_seconds": segments[-1].end if segments else None,
+                    "start_offset_seconds": start_offset_seconds,
+                },
+                source_info=source_info,
+            )
             write(f"Metadata saved to: {metadata_file}")
         except Exception as e:
             write(f"Warning: Could not create metadata file: {e}")
@@ -524,6 +529,8 @@ def transcribe_audio(
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
     on_srt_created: Optional[Callable[[str, str], None]] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> bool:
     """
@@ -568,6 +575,8 @@ def transcribe_audio(
                     vad_params=vad_params,
                     mpv_ipc_reload=mpv_ipc_reload,
                     on_srt_created=on_srt_created,
+                    show_segments=show_segments,
+                    source_info=source_info,
                     **kwargs,
                 )
 
@@ -665,6 +674,8 @@ def transcribe_audio(
                 vad_params=vad_params,
                 mpv_ipc_reload=mpv_ipc_reload,
                 on_srt_created=on_srt_created,
+                show_segments=show_segments,
+                source_info=source_info,
             )
         except LoopDetectedError as e:
             write(
@@ -861,7 +872,8 @@ def transcribe_audio(
                 srt.write(f"{start_ts} --> {end_ts}\n")
                 srt.write(f"{segment.text}\n\n")
                 srt.flush()
-                log_segment_line(write, start_ts, segment.text)
+                if show_segments:
+                    log_segment_line(write, start_ts, segment.text)
 
                 if progress:
                     progress.update(segment.start, segment.end)
@@ -907,34 +919,33 @@ def transcribe_audio(
             os.rename(temp_srt, original)
 
             # Create JSON metadata file
-            metadata_file = os.path.splitext(original)[0] + ".metadata.json"
             try:
-                metadata = {
-                    "model": model_name,
-                    "date": datetime.datetime.now().isoformat(),
-                    "source_file": os.path.basename(audio_file),
-                    "duration_seconds": total_duration,
-                    "duration_formatted": str(
-                        datetime.timedelta(seconds=int(total_duration))
-                    )
-                    if total_duration
-                    else "unknown",
-                    "language": language or "auto-detect",
-                    "device": device,
-                    "compute_type": compute_type,
-                    "cpu_threads": cpu_threads,
-                    "vad_enabled": vad_filter,
-                    "vad_params": vad_params,
-                    "temperature": temperature,
-                    "merge_lines": merge_lines,
-                    "time_range": {"start": start_time, "end": end_time}
-                    if start_time or end_time
-                    else None,
-                    "segments_count": len(segments_list),
-                    "output_files": {"srt": original, "json": metadata_file},
-                }
-                with open(metadata_file, "w", encoding="utf-8") as f:
-                    json.dump(metadata, f, indent=2, ensure_ascii=False)
+                metadata_file = app_meta.write_metadata(
+                    original,
+                    {
+                        "model": model_name,
+                        "source_file": os.path.basename(audio_file),
+                        "duration_seconds": total_duration or None,
+                        "duration_formatted": str(
+                            datetime.timedelta(seconds=int(total_duration))
+                        )
+                        if total_duration
+                        else None,
+                        "language": language or "auto-detect",
+                        "device": device,
+                        "compute_type": compute_type,
+                        "cpu_threads": cpu_threads,
+                        "vad_enabled": vad_filter,
+                        "vad_params": vad_params,
+                        "temperature": temperature,
+                        "merge_lines": merge_lines,
+                        "time_range": {"start": start_time, "end": end_time}
+                        if start_time or end_time
+                        else None,
+                        "segments_count": len(segments_list),
+                    },
+                    source_info=source_info,
+                )
                 write(f"Metadata saved to: {metadata_file}")
             except Exception as e:
                 write(f"Warning: Could not create metadata file: {e}")
@@ -962,6 +973,8 @@ def transcribe_audio(
                 vad_filter=vad_filter,
                 vad_params=vad_params,
                 mpv_ipc_reload=mpv_ipc_reload,
+                show_segments=show_segments,
+                source_info=source_info,
             )
         else:
             print(f"Error during transcription: {e}", file=sys.stderr)
@@ -1074,6 +1087,8 @@ def process_create(
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
     media_source: Optional[str] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
     if file is None:
@@ -1103,6 +1118,8 @@ def process_create(
             vad_params=vad_params,
             mpv_ipc_reload=mpv_ipc_reload,
             on_srt_created=on_srt_created,
+            show_segments=show_segments,
+            source_info=source_info,
         )
 
     # Only switch to CPU if not forcing device
@@ -1148,6 +1165,8 @@ def process_create(
             mpv_auto,
             mpv_socket,
             media_source,
+            show_segments=show_segments,
+            source_info=source_info,
         )
         if success:
             return True
@@ -1179,6 +1198,8 @@ def process_create(
                     mpv_auto,
                     mpv_socket,
                     media_source,
+                    show_segments=show_segments,
+                    source_info=source_info,
                 )
                 if success:
                     write(f"Successfully transcribed with {current_model}")
@@ -1207,6 +1228,8 @@ def process_create(
                     mpv_auto,
                     mpv_socket,
                     media_source,
+                    show_segments=show_segments,
+                    source_info=source_info,
                 )
     else:
         write("No model")
@@ -1233,6 +1256,8 @@ def _two_pass_transcribe(
     end_time: Optional[str] = None,
     start_offset_seconds: float = 0.0,
     mpv_ipc_reload: Optional[Callable] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Two-pass transcription for --start without --start-force:
@@ -1271,6 +1296,8 @@ def _two_pass_transcribe(
         end_time=end_time,
         start_offset_seconds=start_offset_seconds,
         mpv_ipc_reload=mpv_ipc_reload,
+        show_segments=show_segments,
+        source_info=source_info,
     )
 
     if not success:
@@ -1302,6 +1329,8 @@ def _two_pass_transcribe(
         end_time=start_time,  # End at start_time
         start_offset_seconds=0.0,
         mpv_ipc_reload=mpv_ipc_reload,
+        show_segments=show_segments,
+        source_info=source_info,
     )
 
     if not success:
@@ -1339,6 +1368,8 @@ def _transcribe_single_pass(
     end_time: Optional[str] = None,
     start_offset_seconds: float = 0.0,
     mpv_ipc_reload: Optional[Callable] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Transcribe a single time range and save to srt_file.
@@ -1365,6 +1396,8 @@ def _transcribe_single_pass(
         end_time=end_time,
         start_force=True,  # Force single-pass mode
         mpv_ipc_reload=mpv_ipc_reload,
+        show_segments=show_segments,
+        source_info=source_info,
     )
 
 
@@ -1468,6 +1501,8 @@ def _two_pass_transcribe_adapter(
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
     on_srt_created: Optional[Callable[[str, str], None]] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> bool:
     """
@@ -1502,6 +1537,8 @@ def _two_pass_transcribe_adapter(
         vad_params=vad_params,
         mpv_ipc_reload=mpv_ipc_reload,
         on_srt_created=on_srt_created,
+        show_segments=show_segments,
+        source_info=source_info,
         **kwargs,
     )
 
@@ -1532,6 +1569,8 @@ def _two_pass_transcribe_adapter(
         vad_params=vad_params,
         mpv_ipc_reload=mpv_ipc_reload,
         on_srt_created=on_srt_created,
+        show_segments=show_segments,
+        source_info=source_info,
         **kwargs,
     )
 
@@ -1568,6 +1607,8 @@ def _transcribe_single_pass_adapter(
     vad_params: Optional[Dict[str, Any]] = None,
     mpv_ipc_reload: Optional[Callable] = None,
     on_srt_created: Optional[Callable[[str, str], None]] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> bool:
     """
@@ -1660,6 +1701,8 @@ def _transcribe_single_pass_adapter(
         vad_params=vad_params,
         mpv_ipc_reload=mpv_ipc_reload,
         on_srt_created=on_srt_created,
+        show_segments=show_segments,
+        source_info=source_info,
         **kwargs,
     )
 
@@ -1687,6 +1730,8 @@ def try_transcribe(
     mpv_socket: str = "/tmp/mpvsocket",
     media_source: Optional[str] = None,
     mpv_ipc_reload: Optional[Callable] = None,
+    show_segments: bool = False,
+    source_info: Optional[Dict[str, Any]] = None,
     _loop_retry_count: int = 0,
 ) -> bool:
     """Try transcription with given parameters, supporting resume."""
@@ -1726,6 +1771,8 @@ def try_transcribe(
                     end_time=end_time,
                     start_offset_seconds=start_seconds,
                     mpv_ipc_reload=mpv_ipc_reload,
+                    show_segments=show_segments,
+                    source_info=source_info,
                 )
 
         # --- TIME RANGE CUTTING ---
@@ -2002,7 +2049,9 @@ temperature = {temperature}
 merge_lines = {str(merge_lines).capitalize()}
 mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else "None"}
 start_offset_seconds = {start_offset_seconds}
+show_segments = {show_segments}
 segments_written = 0
+last_segment_end = 0.0
 audio_duration = {audio_duration}
 loop_detect_file = r"{unfinished_srt}".replace(".srt", ".loop_detect")
 loop_window = []
@@ -2014,6 +2063,7 @@ compression_fail_max = 20
 
 def write_segments():
     global segments_written
+    global last_segment_end
     current_index = {start_index} + 1
     with open(r"{unfinished_srt}", "{open_mode}", encoding="utf-8") as f:
         if "{open_mode}" == "a" and os.path.getsize(r"{unfinished_srt}") > 0:
@@ -2034,11 +2084,12 @@ def write_segments():
                 f.flush()
 
                 segment_text = segment.text.strip()
-                if segment_text:
+                if show_segments and segment_text:
                     print("SEGMENT_LINE\\t" + start_time + "\\t" + segment_text.replace("\\n", " ").replace("\\t", " "), flush=True)
 
                 current_index += 1
                 segments_written += 1
+                last_segment_end = adjusted_end
                 segment_queue.task_done()
                 write_event.set()
 
@@ -2207,22 +2258,28 @@ try:
         
         # Create JSON metadata file
         import json
-        metadata_file = r"{srt_file}".replace('.srt', '.metadata.json')
-        metadata = {{
-            "model": "{current_model}",
-            "date": datetime.datetime.now().isoformat(),
-            "source_file": r"{audio_to_transcribe}",
-            "language": {language_param},
-            "device": "{device}",
-            "compute_type": "{compute_type}",
-            "cpu_threads": {cpu_threads if cpu_threads else "None"},
-            "vad_enabled": {vad_filter},
-            "temperature": {temperature},
-            "segments_count": segments_count
-        }}
+        import app_meta
+        source_info = json.loads(os.environ.get("WHISPERSUBS_SOURCE_INFO") or "{{}}")
+        duration_seconds = round(audio_duration, 3) if audio_duration > 0 else (
+            round(last_segment_end, 3) if last_segment_end else None
+        )
         try:
-            with open(metadata_file, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            metadata_file = app_meta.write_metadata(
+                r"{srt_file}",
+                {{
+                    "model": "{current_model}",
+                    "source_file": r"{audio_to_transcribe}",
+                    "language": {language_param},
+                    "device": "{device}",
+                    "compute_type": "{compute_type}",
+                    "cpu_threads": {cpu_threads if cpu_threads else "None"},
+                    "vad_enabled": {vad_filter},
+                    "temperature": {temperature},
+                    "segments_count": segments_count,
+                    "duration_seconds": duration_seconds
+                }},
+                source_info=source_info,
+            )
             print(f"Metadata saved to: {{metadata_file}}")
         except Exception as e:
             print(f"Warning: Could not create metadata file: {{e}}")
@@ -2252,6 +2309,10 @@ finally:
         args = [sys.executable, script_path]
         write(f"Running transcription with model {current_model} on {device}")
 
+        process_env = dict(os.environ)
+        if source_info:
+            process_env["WHISPERSUBS_SOURCE_INFO"] = json.dumps(source_info)
+
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -2261,6 +2322,7 @@ finally:
             text=True,
             bufsize=1,
             universal_newlines=True,
+            env=process_env,
         )
 
         mpv_launched = {"flag": False}
@@ -2353,6 +2415,8 @@ finally:
                     mpv_socket,
                     media_source,
                     mpv_ipc_reload,
+                    show_segments=show_segments,
+                    source_info=source_info,
                     _loop_retry_count=_loop_retry_count + 1,
                 )
             else:

@@ -155,6 +155,7 @@ class TranscriptionThread(QThread):
         self.replace_subs: bool = False
         self.backup_subs: bool = True
         self.retry: bool = True
+        self.show: bool = False
 
         main_window = QApplication.activeWindow()
         if main_window:
@@ -203,6 +204,7 @@ class TranscriptionThread(QThread):
             self.replace_subs = hasattr(main_window, 'replace_subs_check') and main_window.replace_subs_check.isChecked()
             self.backup_subs = hasattr(main_window, 'backup_subs_check') and main_window.backup_subs_check.isChecked()
             self.retry = hasattr(main_window, 'retry_check') and main_window.retry_check.isChecked()
+            self.show = hasattr(main_window, 'show_check') and main_window.show_check.isChecked()
 
         else:
             self.device = 'cuda'
@@ -226,6 +228,7 @@ class TranscriptionThread(QThread):
             self.replace_subs = False
             self.backup_subs = True
             self.retry = True
+            self.show = False
 
         import socketio
         self.sio = socketio.Client()
@@ -350,6 +353,7 @@ class TranscriptionThread(QThread):
                 start_time=self.start_time,
                 end_time=self.end_time,
                 mpv_ipc_reload=mpv_reload_callback,
+                show_segments=self.show,
                 write=lambda msg: self.progress.emit(str(msg))
             )
 
@@ -382,7 +386,8 @@ class TranscriptionThread(QThread):
                 model_name=self.model_name,
                 device=self.device,
                 compute_type=self.compute_type,
-                browser=self.browser if self.use_cookies else None
+                browser=self.browser if self.use_cookies else None,
+                show=self.show
             )
             yt.process(url)
         except Exception as e:
@@ -667,6 +672,9 @@ class TranscriptionApp(QWidget):
         self.retry_check = QCheckBox("Retry on failure (smaller models)")
         self.retry_check.setChecked(True)
         options_layout.addWidget(self.retry_check, 1, 1)
+
+        self.show_check = QCheckBox("Show segments as they are written")
+        options_layout.addWidget(self.show_check, 2, 0)
 
         options_group.setLayout(options_layout)
         advanced_layout.addWidget(options_group)

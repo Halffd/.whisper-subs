@@ -2310,6 +2310,10 @@ finally:
         write(f"Running transcription with model {current_model} on {device}")
 
         process_env = dict(os.environ)
+        # Keep child output unbuffered: with a pipe, print() buffers 8KB in the
+        # child, which freezes progress output until the buffer fills or the
+        # child exits.
+        process_env["PYTHONUNBUFFERED"] = "1"
         if source_info:
             process_env["WHISPERSUBS_SOURCE_INFO"] = json.dumps(source_info)
 
@@ -2368,7 +2372,19 @@ finally:
         stdout_thread.start()
         stderr_thread.start()
 
-        exit_code = process.wait()
+        try:
+            exit_code = process.wait()
+        except KeyboardInterrupt:
+            # Ctrl+C must stop the whole transcription, not just this thread.
+            # Kill the worker so it does not continue writing subtitles, give
+            # the reader threads a moment to finish, then re-raise.
+            write("Interrupted, stopping transcription...")
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait()
+            raise
 
         stdout_thread.join(timeout=5)
         stderr_thread.join(timeout=5)

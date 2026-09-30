@@ -698,7 +698,10 @@ class WhisperSubs:
 
             self.log(f"Found {len(urls)} videos in channel/playlist")
 
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            # Use an explicit executor so Ctrl+C cancels pending lookups
+            # instead of joining every in-flight extract_info call.
+            executor = ThreadPoolExecutor(max_workers=5)
+            try:
                 futures = {
                     executor.submit(self.get_video_info_cached, url): url
                     for url in urls
@@ -728,6 +731,8 @@ class WhisperSubs:
                                 "status": "pending",
                                 "title": os.path.basename(url),
                             }
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
             if processed_count > 0:
                 self.log(
@@ -1815,7 +1820,14 @@ class WhisperSubs:
                 job["source"] = [job["source"]]
 
         # Use lazy resolution for better performance and resume capability
-        self.process_with_lazy_resolution(job)
+        try:
+            self.process_with_lazy_resolution(job)
+        except KeyboardInterrupt:
+            self.log("Interrupted by user (Ctrl+C), stopping job.")
+            try:
+                update_job(job["id"], {"status": "interrupted"})
+            except Exception:
+                pass
 
 
 def read_sources_from_file(filename):

@@ -15,6 +15,7 @@ Transcribe YouTube videos, local audio/video files, and live streams to subtitle
 - **Segment preview**: `--show` prints each subtitle line as it is written
 - **Force-mode backups**: `-f`/`-r` keep the previous subtitle as `name.2.srt`, `name.3.srt`, ... instead of overwriting
 - **Subtitle metadata**: every run writes `name.metadata.json` with channel, stats, thumbnails, duration, and the build (version + commit) that produced it
+- **Terminal UI** (`tui/`): browse and search the subtitle library, full-text cue search, job history, YouTube search + transcription, and mpv playback — see [tui/README.md](tui/README.md)
 
 ## Quick Start
 
@@ -234,7 +235,18 @@ pip install -r requirements_api.txt
 │   ├── test_adapter_registry.py  # Adapter registry unit tests
 │   ├── test_transcribe.py   # Single-model transcription test
 │   ├── generate_test_audio.py # Generate test WAV files
-│   └── fixtures/            # Test audio files
+│   └── fixtures/            # Test audio (test_sine.wav is committed; regenerate
+│                            # speech audio with tests/generate_test_audio.py)
+├── tui/                     # Rust terminal UI (subtitle search, jobs, YouTube, mpv playback)
+│   ├── run.sh               # Launcher: builds then starts
+│   ├── src/
+│   │   ├── index.rs         # SQLite index + FTS5 cue search + metadata parsing
+│   │   ├── app.rs           # Tabs, event loop, key handling
+│   │   ├── youtube.rs       # yt-dlp search + transcription subprocess
+│   │   ├── player.rs        # mpv JSON IPC
+│   │   ├── srt.rs           # Subtitle parsing
+│   │   └── config.rs        # Paths and tui.toml
+│   └── README.md            # TUI keys, config, and media discovery
 ├── scripts/                 # Docker/build scripts
 ├── Dockerfile
 ├── docker-compose.yml

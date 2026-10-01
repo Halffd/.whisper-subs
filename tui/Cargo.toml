@@ -1,0 +1,22 @@
+[package]
+name = "whisper-subs-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI to search the whisper-subs library, YouTube, and subtitle text, with embedded mpv playback"
+
+[[bin]]
+name = "whisper-subs-tui"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
+toml = "0.8"
+walkdir = "2.5"
+chrono = "0.4"
+regex = "1.11"
+mpvipc = "1.3"

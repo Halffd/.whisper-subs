@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -122,6 +123,66 @@ def test_legacy_entry_without_timeday():
     print("  [PASS] legacy entry without timeday works")
 
 
+def test_put_replaces_stale_file():
+    """put() with changed content replaces the old cached file."""
+    with _TempCache() as cache:
+        import audio_cache
+
+        src_old = cache.make_source("old.m4a", b"old-content-bytes")
+        src_new = cache.make_source("new.m4a", b"new-bytes")
+        audio_cache.put("https://youtu.be/replace", src_old, "2026-01-01_00-00")
+        cached = audio_cache.put("https://youtu.be/replace", src_new, "2026-02-02_00-00")
+
+        with open(cached, "rb") as f:
+            assert f.read() == b"new-bytes"
+        entry = audio_cache.get_meta("https://youtu.be/replace")
+        assert entry["size"] == len(b"new-bytes"), entry
+        assert entry["timeday"] == "2026-02-02_00-00", entry
+    print("  [PASS] put() replaces stale cached file")
+
+
+def test_expired_entry_removed():
+    """get_meta() drops expired entries and deletes their files."""
+    with _TempCache() as cache:
+        import audio_cache
+
+        src = cache.make_source("exp.m4a")
+        cached = audio_cache.put("https://youtu.be/expired", src)
+        index = cache.read_index()
+        key = audio_cache._cache_key("https://youtu.be/expired")
+        index["entries"][key]["mtime"] = time.time() - (
+            audio_cache.MAX_AGE_DAYS * 86400 + 100
+        )
+        cache.write_index(index)
+
+        assert audio_cache.get_meta("https://youtu.be/expired") is None
+        assert audio_cache.get("https://youtu.be/expired") is None
+        assert not os.path.exists(cached), "expired file must be deleted"
+        assert key not in cache.read_index()["entries"]
+    print("  [PASS] expired entry removed with its file")
+
+
+def test_stats_and_missing_lookups():
+    """stats() counts entries; missing sources return None."""
+    with _TempCache() as cache:
+        import audio_cache
+
+        assert audio_cache.get("https://youtu.be/missing") is None
+        assert audio_cache.get_meta("https://youtu.be/missing") is None
+        assert audio_cache.stats()["total_entries"] == 0
+
+        s1 = cache.make_source("s1.m4a", b"a" * 10)
+        s2 = cache.make_source("s2.m4a", b"b" * 20)
+        audio_cache.put("https://youtu.be/one", s1)
+        audio_cache.put("https://youtu.be/two", s2)
+
+        stats = audio_cache.stats()
+        assert stats["total_entries"] == 2, stats
+        assert stats["existing_files"] == 2, stats
+        assert stats["total_size_bytes"] == 30, stats
+    print("  [PASS] stats() counts and missing lookups return None")
+
+
 def test_identical_file_put_refreshes_timeday():
     """put() on an already-cached identical file must refresh timeday metadata."""
     with _TempCache() as cache:
@@ -203,6 +264,9 @@ def main():
         test_put_stores_timeday,
         test_legacy_entry_without_timeday,
         test_identical_file_put_refreshes_timeday,
+        test_put_replaces_stale_file,
+        test_expired_entry_removed,
+        test_stats_and_missing_lookups,
         test_download_audio_cache_hit_returns_two_tuple,
         test_download_audio_failure_returns_none,
     ]

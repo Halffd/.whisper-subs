@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -568,6 +569,345 @@ class TestRunner:
             )
         except Exception as e:
             self._record("Adapter two-pass", "FAIL", str(e))
+
+        # --- Resume info returns the LAST complete block ---
+        try:
+            import transcribe as tr
+
+            with tempfile.TemporaryDirectory() as tmp:
+                srt = os.path.join(tmp, "resume.srt")
+                with open(srt, "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:01,000 --> 00:00:04,000\none\n\n"
+                        "2\n00:00:05,000 --> 00:00:08,000\ntwo\n\n"
+                        "3\n00:00:09,000 --> 00:00:12,000\nthree\n\n"
+                    )
+                # used to return the second-to-last block (8.0, 2),
+                # re-transcribing and duplicating the last segment
+                assert tr.get_srt_resume_info(srt) == (12.0, 3)
+
+                # truncated tail (killed mid-write) is skipped
+                with open(srt, "a", encoding="utf-8") as f:
+                    f.write("4\n00:00:13,000 --> ")
+                assert tr.get_srt_resume_info(srt) == (12.0, 3)
+
+                # empty / placeholder content
+                with open(srt, "w", encoding="utf-8") as f:
+                    f.write("Transcription in progress...")
+                assert tr.get_srt_resume_info(srt) == (0.0, 0)
+            self._record("Resume info last block", "PASS", "no segment duplication")
+        except Exception as e:
+            self._record("Resume info last block", "FAIL", str(e))
+
+        # --- Kill mid-transcription keeps progress (OOM/SIGKILL fix) ---
+        try:
+            import transcribe as tr
+
+            class FakePopen:
+                """Popen stand-in: simulates a worker that wrote some
+                segments then died (truncated tail block included)."""
+
+                def __init__(self, args, **kwargs):
+                    self.returncode = None
+                    self._exit_code = kwargs.pop("fake_exit_code", -9)
+                    unfinished = kwargs.pop("fake_unfinished")
+                    partial = (
+                        "1\n00:00:01,000 --> 00:00:04,000\nhello\n\n"
+                        "2\n00:00:05,000 --> 00:00:08,000\nworld\n\n"
+                        "3\n00:00:09,000 --> "  # killed mid-write
+                    )
+                    with open(unfinished, "w", encoding="utf-8") as f:
+                        f.write(partial)
+                    self.stdout = io.StringIO("")
+                    self.stderr = io.StringIO("")
+
+                def wait(self, timeout=None):
+                    self.returncode = self._exit_code
+                    return self._exit_code
+
+                def kill(self):
+                    pass
+
+                def poll(self):
+                    return None
+
+            real_popen = tr.subprocess.Popen
+            with tempfile.TemporaryDirectory() as tmp:
+                srt = os.path.join(tmp, "video.srt")
+                unfinished = os.path.join(tmp, "video.unfinished.srt")
+                audio = os.path.join(tmp, "video.m4a")
+                with open(audio, "wb") as f:
+                    f.write(b"fake")
+
+                def make_popen(exit_code):
+                    def factory(args, **kwargs):
+                        kwargs["fake_exit_code"] = exit_code
+                        kwargs["fake_unfinished"] = unfinished
+                        return FakePopen(args, **kwargs)
+
+                    return factory
+
+                # worker OOM-killed (SIGKILL -> returncode -9)
+                tr.subprocess.Popen = make_popen(-9)
+                try:
+                    ok = tr.try_transcribe(
+                        file=audio,
+                        current_model="tiny",
+                        srt_file=srt,
+                        language="none",
+                        device="cpu",
+                        compute_type="int8",
+                        force_device=True,
+                        write=lambda m: None,
+                    )
+                    assert ok is False
+                    # progress kept: symlink + unfinished intact
+                    assert os.path.islink(srt), "srt_file must stay a symlink"
+                    assert os.path.exists(unfinished), "unfinished was renamed away"
+                    with open(unfinished, encoding="utf-8") as f:
+                        assert "hello" in f.read()
+                    # resume reads the last COMPLETE block, tolerating the
+                    # truncated tail
+                    end_time, number = tr.get_srt_resume_info(unfinished)
+                    assert end_time == 8.0 and number == 2, (end_time, number)
+                finally:
+                    tr.subprocess.Popen = real_popen
+            self._record(
+                "Kill keeps progress", "PASS", "symlink + unfinished kept, resumable"
+            )
+        except Exception as e:
+            self._record("Kill keeps progress", "FAIL", str(e))
+
+        # --- Success finalizes; keep_unfinished preserves the chain ---
+        try:
+            import transcribe as tr
+
+            class OkPopen:
+                def __init__(self, args, unfinished, **kwargs):
+                    self.returncode = None
+                    with open(unfinished, "w", encoding="utf-8") as f:
+                        f.write("1\n00:00:01,000 --> 00:00:04,000\nhello\n\n")
+                    self.stdout = io.StringIO("")
+                    self.stderr = io.StringIO("")
+
+                def wait(self, timeout=None):
+                    self.returncode = 0
+                    return 0
+
+                def kill(self):
+                    pass
+
+                def poll(self):
+                    return None
+
+            real_popen = tr.subprocess.Popen
+
+            def ok_factory(unfinished):
+                def factory(args, **kwargs):
+                    return OkPopen(args, unfinished=unfinished, **kwargs)
+
+                return factory
+
+            tr.subprocess.Popen = ok_factory(
+                os.path.join("x-unused-x", "never-used.unfinished.srt")
+            )
+            try:
+                # normal success: symlink replaced by the real file
+                with tempfile.TemporaryDirectory() as tmp:
+                    srt = os.path.join(tmp, "video.srt")
+                    unfinished = os.path.join(tmp, "video.unfinished.srt")
+                    audio = os.path.join(tmp, "video.m4a")
+                    with open(audio, "wb") as f:
+                        f.write(b"fake")
+                    tr.subprocess.Popen = ok_factory(unfinished)
+                    ok = tr.try_transcribe(
+                        file=audio,
+                        current_model="tiny",
+                        srt_file=srt,
+                        language="none",
+                        device="cpu",
+                        compute_type="int8",
+                        force_device=True,
+                        write=lambda m: None,
+                    )
+                    assert ok is True
+                    assert not os.path.islink(srt), "must be finalized, not a symlink"
+                    with open(srt, encoding="utf-8") as f:
+                        assert "hello" in f.read()
+                    assert not os.path.exists(unfinished)
+
+                # incremental (keep_unfinished): chain preserved on success
+                with tempfile.TemporaryDirectory() as tmp:
+                    srt = os.path.join(tmp, "video.srt")
+                    unfinished = os.path.join(tmp, "video.unfinished.srt")
+                    audio = os.path.join(tmp, "video.m4a")
+                    with open(audio, "wb") as f:
+                        f.write(b"fake")
+                    tr.subprocess.Popen = ok_factory(unfinished)
+                    ok = tr.try_transcribe(
+                        file=audio,
+                        current_model="tiny",
+                        srt_file=srt,
+                        language="none",
+                        device="cpu",
+                        compute_type="int8",
+                        force_device=True,
+                        write=lambda m: None,
+                        keep_unfinished=True,
+                    )
+                    assert ok is True
+                    assert os.path.islink(srt), "live mode keeps the symlink"
+                    assert os.path.exists(unfinished), "live mode keeps unfinished"
+                    with open(unfinished, encoding="utf-8") as f:
+                        assert "hello" in f.read()
+            finally:
+                tr.subprocess.Popen = real_popen
+            self._record(
+                "Finalize vs keep_unfinished", "PASS", "success renames, live keeps"
+            )
+        except Exception as e:
+            self._record("Finalize vs keep_unfinished", "FAIL", str(e))
+
+        # --- finalize_unfinished handles both naming conventions ---
+        try:
+            import transcribe as tr
+
+            with tempfile.TemporaryDirectory() as tmp:
+                # local naming: <base>.unfinished.srt + symlink
+                srt = os.path.join(tmp, "local.srt")
+                unfinished = os.path.join(tmp, "local.unfinished.srt")
+                with open(unfinished, "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:02,000\ntext\n\n")
+                os.symlink(os.path.basename(unfinished), srt)
+                assert tr.finalize_unfinished(srt) is True
+                assert not os.path.islink(srt)
+                with open(srt, encoding="utf-8") as f:
+                    assert "text" in f.read()
+                assert not os.path.exists(unfinished)
+
+                # adapter naming: <srt>.unfinished
+                srt2 = os.path.join(tmp, "adapter.srt")
+                unfinished2 = os.path.join(tmp, "adapter.srt.unfinished")
+                with open(unfinished2, "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:02,000\ntext\n\n")
+                assert tr.finalize_unfinished(srt2) is True
+                with open(srt2, encoding="utf-8") as f:
+                    assert "text" in f.read()
+
+                # nothing to finalize
+                assert tr.finalize_unfinished(os.path.join(tmp, "none.srt")) is False
+            self._record("finalize_unfinished", "PASS", "local + adapter naming")
+        except Exception as e:
+            self._record("finalize_unfinished", "FAIL", str(e))
+
+        # --- Live transcriber: incremental passes + safe stream-end move ---
+        try:
+            import transcribe as tr
+            from livestream_transcriber import LiveStreamTranscriber
+
+            with tempfile.TemporaryDirectory() as tmp:
+                outdir = os.path.join(tmp, "out")
+                os.makedirs(outdir)
+                records = []
+
+                def fake_process_create(**kwargs):
+                    records.append(kwargs)
+                    return True
+
+                real_pc = tr.process_create
+                tr.process_create = fake_process_create
+                try:
+                    ls = LiveStreamTranscriber(
+                        model_name="tiny",
+                        output_dir=outdir,
+                        log_func=lambda m: None,
+                        live_poll=0.05,
+                    )
+                    ls.is_running = True
+                    audio = os.path.join(tmp, "live.m4a")
+                    with open(audio, "wb") as f:
+                        f.write(b"\0" * 600_000)  # above the 500KB initial wait
+                    srt = os.path.join(tmp, "live.srt")
+                    ls.transcribe_in_background(audio, srt)
+                    ls.is_running = False
+                    ls.transcription_process.join(timeout=10)
+                    assert not ls.transcription_process.is_alive()
+                    assert records, "process_create was not called"
+                    assert records[0]["keep_unfinished"] is True, records[0]
+                finally:
+                    tr.process_create = real_pc
+
+                # stream end: symlinked srt must become a real moved file
+                srt = os.path.join(tmp, "live.srt")
+                unfinished = os.path.join(tmp, "live.unfinished.srt")
+                with open(unfinished, "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:02,000\nlive text\n\n")
+                os.symlink(os.path.basename(unfinished), srt)
+                audio = os.path.join(tmp, "live.m4a")
+                ls._finalize_live_files(srt, audio)
+
+                final_srt = os.path.join(outdir, "live.srt")
+                assert os.path.exists(final_srt), "final srt not saved"
+                assert not os.path.islink(final_srt), "moved a dangling symlink"
+                with open(final_srt, encoding="utf-8") as f:
+                    assert "live text" in f.read()
+                assert not os.path.exists(unfinished)
+                assert os.path.exists(os.path.join(outdir, "live.m4a"))
+
+                # no subtitles at all: must not raise
+                ls._finalize_live_files(
+                    os.path.join(tmp, "missing.srt"), os.path.join(tmp, "missing.m4a")
+                )
+            self._record(
+                "Live incremental + finalize", "PASS", "keep_unfinished + real file move"
+            )
+        except Exception as e:
+            self._record("Live incremental + finalize", "FAIL", str(e))
+
+        # --- Two-pass merge extras: empty pass, multiline text, CRLF, order ---
+        try:
+            import transcribe as tr
+
+            with tempfile.TemporaryDirectory() as tmp:
+                final = os.path.join(tmp, "v.srt")
+                second = os.path.join(tmp, "v.second_pass.srt")
+                # empty second pass, multiline + CRLF in first pass
+                with open(second, "w", encoding="utf-8") as f:
+                    f.write("")
+                with open(final, "w", encoding="utf-8") as f:
+                    f.write("7\n00:10:00,000 --> 00:10:05,000\r\nline one\r\nline two\r\n\r\n")
+                ok = tr._merge_srt_files(
+                    second_pass_srt=second,
+                    first_pass_srt=final,
+                    final_srt=final,
+                    write=lambda m: None,
+                )
+                assert ok
+                with open(final, encoding="utf-8") as f:
+                    content = f.read()
+                assert "1\n00:10:00,000 --> 00:10:05,000\nline one\nline two" in content, content
+
+                # out-of-order inputs get sorted by start time
+                with open(final, "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:30,000 --> 00:00:35,000\nlater\n\n")
+                with open(second, "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:05,000\nfirst\n\n")
+                ok = tr._merge_srt_files(
+                    second_pass_srt=second,
+                    first_pass_srt=final,
+                    final_srt=final,
+                    write=lambda m: None,
+                )
+                assert ok
+                with open(final, encoding="utf-8") as f:
+                    content = f.read()
+                assert content.index("first") < content.index("later")
+                assert content.startswith("1\n00:00:01,000"), content
+            self._record(
+                "Two-pass merge extras", "PASS", "empty pass, multiline, CRLF, sorted"
+            )
+        except Exception as e:
+            self._record("Two-pass merge extras", "FAIL", str(e))
 
         # --- All Python files compile ---
         try:

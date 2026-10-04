@@ -69,6 +69,7 @@ def _transcribe_with_adapter(
     on_srt_created: Optional[Callable[[str, str], None]] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
+    keep_unfinished: bool = False,
     **kwargs,
 ) -> bool:
     """Transcribe using the adapter system (for all prefixed models).
@@ -203,11 +204,16 @@ def _transcribe_with_adapter(
             except Exception as e:
                 write(f"MPV IPC reload failed: {e}")
 
-        if os.path.islink(srt_file):
-            os.remove(srt_file)
-        if os.path.exists(real_srt):
-            os.rename(real_srt, srt_file)
-            write(f"Successfully finalized: {srt_file}")
+        if keep_unfinished:
+            # incremental/live: keep srt_file -> in-progress symlink so the
+            # next pass keeps appending and players see live subtitles
+            write(f"Transcription completed (incremental): {srt_file}")
+        else:
+            if os.path.islink(srt_file):
+                os.remove(srt_file)
+            if os.path.exists(real_srt):
+                os.rename(real_srt, srt_file)
+                write(f"Successfully finalized: {srt_file}")
             make_files(srt_file)
 
         if mpv_ipc_reload is not None:
@@ -287,10 +293,6 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
     if not os.path.exists(srt_path) or os.path.getsize(srt_path) < 10:
         return 0.0, 0
 
-    last_segment_number = 0
-    last_end_time = 0.0
-    valid_segments_found = 0
-
     try:
         with open(srt_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
@@ -299,7 +301,13 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
         if not segments:
             return 0.0, 0
 
-        # Iterate backwards to find the last COMPLETE valid segment block
+        # Iterate backwards and return the FIRST complete block found —
+        # that is the last complete segment. Incomplete trailing blocks
+        # (worker killed mid-write) have no full timestamp line and are
+        # skipped naturally.
+        # NOTE: this used to require two valid blocks and returned the
+        # earlier one, so every resume re-transcribed the last segment
+        # and appended it again (duplicate/overlapping segments).
         for segment_block in reversed(segments):
             lines = segment_block.strip().split("\n")
             if len(lines) >= 3:  # Need: number, timestamp, text
@@ -314,39 +322,40 @@ def get_srt_resume_info(srt_path: str) -> Tuple[float, int]:
                         time_line,
                     )
                     if match:
-                        end_time_str = match.group(1)
-                        last_end_time = srt_time_to_seconds(end_time_str)
-                        last_segment_number = current_segment_number
-                        valid_segments_found += 1
-
-                        # Need at least 2 valid segments to be confident
-                        if valid_segments_found >= 2:
-                            return last_end_time, last_segment_number
+                        return (
+                            srt_time_to_seconds(match.group(1)),
+                            current_segment_number,
+                        )
                 except (ValueError, IndexError):
                     # This block is malformed, continue to the previous one
                     continue
-            elif len(lines) == 2:
-                # Might be incomplete last segment - check if it has timestamp
-                try:
-                    time_line = lines[1] if lines[0].isdigit() else lines[0]
-                    match = re.search(
-                        r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})",
-                        time_line,
-                    )
-                    if match:
-                        # Incomplete segment - don't use this, use previous
-                        continue
-                except:
-                    pass
-
-        # If we found at least one valid segment, use it
-        if valid_segments_found >= 1:
-            return last_end_time, last_segment_number
 
         return 0.0, 0  # No valid segments found
     except Exception as e:
         print(f"Could not parse SRT for resume info: {e}")
         return 0.0, 0
+
+
+def finalize_unfinished(srt_file: str) -> bool:
+    """Rename an in-progress SRT to its final name.
+
+    Handles both in-progress naming conventions:
+    - local flow:   <base>.unfinished.srt
+    - adapter flow: <srt>.unfinished
+    A symlink at srt_file is replaced by the real file. Returns True when
+    a file was finalized, False when no in-progress content was found.
+    """
+    candidates = [
+        srt_file.replace(".srt", ".unfinished.srt"),
+        srt_file + ".unfinished",
+    ]
+    for unfinished in candidates:
+        if os.path.exists(unfinished) and os.path.getsize(unfinished) > 0:
+            if os.path.islink(srt_file) or os.path.exists(srt_file):
+                os.remove(srt_file)
+            os.rename(unfinished, srt_file)
+            return True
+    return False
 
 
 def _trim_srt_to_timestamp(srt_path: str, max_end_seconds: float):
@@ -531,6 +540,7 @@ def transcribe_audio(
     on_srt_created: Optional[Callable[[str, str], None]] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
+    keep_unfinished: bool = False,
     **kwargs,
 ) -> bool:
     """
@@ -676,6 +686,7 @@ def transcribe_audio(
                 on_srt_created=on_srt_created,
                 show_segments=show_segments,
                 source_info=source_info,
+                keep_unfinished=keep_unfinished,
             )
         except LoopDetectedError as e:
             write(
@@ -964,6 +975,7 @@ def transcribe_audio(
                 language=language,
                 device="cpu",
                 compute_type=compute_type,
+                keep_unfinished=keep_unfinished,
                 cpu_threads=cpu_threads,
                 write=write,
                 start_time=start_time,
@@ -1089,6 +1101,7 @@ def process_create(
     media_source: Optional[str] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
+    keep_unfinished: bool = False,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
     if file is None:
@@ -1107,6 +1120,7 @@ def process_create(
             language=language,
             device="cpu",
             compute_type="int8",
+            keep_unfinished=keep_unfinished,
             cpu_threads=cpu_threads,
             write=write,
             start_time=start_time,
@@ -1167,6 +1181,7 @@ def process_create(
             media_source,
             show_segments=show_segments,
             source_info=source_info,
+            keep_unfinished=keep_unfinished,
         )
         if success:
             return True
@@ -1200,6 +1215,7 @@ def process_create(
                     media_source,
                     show_segments=show_segments,
                     source_info=source_info,
+                    keep_unfinished=keep_unfinished,
                 )
                 if success:
                     write(f"Successfully transcribed with {current_model}")
@@ -1230,6 +1246,7 @@ def process_create(
                     media_source,
                     show_segments=show_segments,
                     source_info=source_info,
+                    keep_unfinished=keep_unfinished,
                 )
     else:
         write("No model")
@@ -1803,11 +1820,21 @@ def try_transcribe(
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
     _loop_retry_count: int = 0,
+    keep_unfinished: bool = False,
 ) -> bool:
-    """Try transcription with given parameters, supporting resume."""
+    """Try transcription with given parameters, supporting resume.
+
+    keep_unfinished=True (live/incremental mode): on success the
+    <name>.unfinished.srt file and the srt_file symlink are kept so the
+    next pass resumes from where this one stopped and players keep
+    seeing live subtitles. On failure they are always kept now — a
+    killed/crashed worker must not have its partial progress renamed
+    to the final filename.
+    """
     script_path = None
     resume_audio_path = None
     trimmed_audio_path = None
+    success = False
     try:
         unfinished_srt = srt_file.replace(".srt", ".unfinished.srt")
         os.makedirs(os.path.dirname(unfinished_srt) or ".", exist_ok=True)
@@ -2118,6 +2145,7 @@ temperature = {temperature}
 merge_lines = {str(merge_lines).capitalize()}
 mpv_ipc_reload = {mpv_ipc_reload if mpv_ipc_reload else "None"}
 start_offset_seconds = {start_offset_seconds}
+keep_unfinished = {keep_unfinished}
 show_segments = {show_segments}
 segments_written = 0
 last_segment_end = 0.0
@@ -2315,9 +2343,14 @@ try:
     time.sleep(0.5)
 
     if os.path.exists(r"{unfinished_srt}") and os.path.getsize(r"{unfinished_srt}") > 10:
-        if os.path.islink(r"{srt_file}"): os.remove(r"{srt_file}")
-        elif os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
-        os.rename(r"{unfinished_srt}", r"{srt_file}")
+        if keep_unfinished:
+            # incremental/live: keep the srt_file -> unfinished symlink so
+            # the next pass resumes from here and players keep live subs
+            print("Transcription completed successfully (incremental)")
+        else:
+            if os.path.islink(r"{srt_file}"): os.remove(r"{srt_file}")
+            elif os.path.exists(r"{srt_file}"): os.remove(r"{srt_file}")
+            os.rename(r"{unfinished_srt}", r"{srt_file}")
 
         # Recreate helper files for the final SRT file
         import sys as _sys
@@ -2503,6 +2536,7 @@ finally:
                     show_segments=show_segments,
                     source_info=source_info,
                     _loop_retry_count=_loop_retry_count + 1,
+                    keep_unfinished=keep_unfinished,
                 )
             else:
                 write("Max loop retries reached, keeping partial SRT")
@@ -2510,6 +2544,8 @@ finally:
                     os.path.exists(unfinished_srt)
                     and os.path.getsize(unfinished_srt) > 10
                 ):
+                    if keep_unfinished:
+                        return True
                     if os.path.islink(srt_file):
                         os.remove(srt_file)
                     if os.path.exists(srt_file):
@@ -2524,10 +2560,20 @@ finally:
             and os.path.exists(srt_file)
             and os.path.getsize(srt_file) > 10
         ):
+            success = True
             write(f"Successfully created {srt_file}")
             make_files(srt_file)
             return True
 
+        if exit_code < 0:
+            # Negative returncode = worker died by signal (OOM killer,
+            # external kill). Progress in .unfinished.srt is kept for resume.
+            reason = "OOM killer" if exit_code == -9 else f"signal {-exit_code}"
+            write(
+                f"Worker killed by {reason} — keeping "
+                f"{os.path.basename(unfinished_srt)} for resume"
+            )
+            return False
         write(f"Process exited with code {exit_code}")
         return False
 
@@ -2546,9 +2592,12 @@ finally:
                 os.unlink(trimmed_audio_path)
                 write("Removed temporary trimmed audio file.")
             if os.path.islink(srt_file):
-                os.remove(srt_file)
-                if os.path.exists(unfinished_srt):
-                    os.rename(unfinished_srt, srt_file)
+                if success and not keep_unfinished:
+                    os.remove(srt_file)
+                    if os.path.exists(unfinished_srt):
+                        os.rename(unfinished_srt, srt_file)
+                # else: keep the symlink + .unfinished.srt — progress stays
+                # visible to players and a rerun resumes from it
         except Exception as e:
             write(f"Warning: Could not remove temporary file: {e}")
 

@@ -128,6 +128,7 @@ class LiveStreamTranscriber:
                 mpv_socket=self.mpv_socket,
                 media_source=audio_file,
                 show_segments=self.show_segments,
+                keep_unfinished=True,
             )
 
             if not success:
@@ -171,6 +172,7 @@ class LiveStreamTranscriber:
                         mpv_socket=self.mpv_socket,
                         media_source=audio_file,
                         show_segments=self.show_segments,
+                        keep_unfinished=True,
                     )
 
                     if success:
@@ -250,23 +252,44 @@ class LiveStreamTranscriber:
             time.sleep(10)
             self.is_running = False
 
-            # Move final files to output directory
-            final_srt = os.path.join(self.output_dir, os.path.basename(srt_file))
-            final_audio = os.path.join(self.output_dir, os.path.basename(audio_file))
+            # Let the worker finish its current pass so progress is complete
+            if self.transcription_process and self.transcription_process.is_alive():
+                self.log("Waiting for final transcription pass to finish...")
+                self.transcription_process.join(timeout=120)
 
-            if os.path.exists(srt_file):
-                shutil.move(srt_file, final_srt)
-                self.log(f"Final subtitles saved to: {final_srt}")
-
-            if os.path.exists(audio_file):
-                shutil.move(audio_file, final_audio)
-                self.log(f"Final audio saved to: {final_audio}")
+            self._finalize_live_files(srt_file, audio_file)
 
         except Exception as e:
             self.log(f"Error during live transcription: {e}")
         finally:
             # Cleanup
             self.stop()
+
+    def _finalize_live_files(self, srt_file, audio_file):
+        """Finalize in-progress subtitles and move outputs to output_dir.
+
+        While running, srt_file is a symlink to the in-progress file (kept
+        between passes so transcription is incremental). Moving a symlink
+        would leave a dangling link once the temp dir is cleaned up, so the
+        real file is renamed over it first.
+        """
+        import transcribe  # lazy: avoid circular import at module load
+
+        if not os.path.exists(srt_file) or os.path.islink(srt_file):
+            transcribe.finalize_unfinished(srt_file)
+
+        final_srt = os.path.join(self.output_dir, os.path.basename(srt_file))
+        final_audio = os.path.join(self.output_dir, os.path.basename(audio_file))
+
+        if os.path.exists(srt_file) and not os.path.islink(srt_file):
+            shutil.move(srt_file, final_srt)
+            self.log(f"Final subtitles saved to: {final_srt}")
+        else:
+            self.log(f"No subtitles to save (missing {srt_file})")
+
+        if os.path.exists(audio_file):
+            shutil.move(audio_file, final_audio)
+            self.log(f"Final audio saved to: {final_audio}")
 
     def stop(self):
         """Stop live transcription."""

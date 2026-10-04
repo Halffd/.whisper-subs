@@ -1240,7 +1240,7 @@ def _two_pass_transcribe(
     file: str,
     current_model: str,
     srt_file: str,
-    language: str,
+    language: Optional[str],
     device: str,
     compute_type: str,
     force_device: bool,
@@ -1254,7 +1254,6 @@ def _two_pass_transcribe(
     merge_lines: bool = False,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
-    start_offset_seconds: float = 0.0,
     mpv_ipc_reload: Optional[Callable] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
@@ -1262,24 +1261,25 @@ def _two_pass_transcribe(
     """
     Two-pass transcription for --start without --start-force:
     1. First pass: transcribe from start_time to end_time (or end of file)
-    2. Second pass: transcribe from 0 to start_time
-    3. Merge both SRTs with proper timestamp offsets
+       directly into srt_file. This reuses the standard flow — srt_file is a
+       symlink to <name>.unfinished.srt while transcribing — so the mpv lua
+       plugin sees live subtitles under the usual filename.
+    2. Second pass: transcribe from 0 to start_time into a temporary
+       <name>.second_pass.srt.
+    3. Merge both into srt_file. Both passes already write absolute
+       timestamps (the writer thread adds the start offset), so merging only
+       sorts blocks by time and renumbers them sequentially.
+
+    If either pass fails, its standard-flow partial files are kept so a
+    rerun resumes where it stopped.
     """
     write(f"Two-pass transcription: first pass from {start_time} to end")
 
-    # Parse end time if provided
-    end_seconds = parse_time_to_seconds(end_time) if end_time else None
-
-    # === FIRST PASS: from start_time to end_time (or end) ===
-    # Create a temporary SRT file for the first pass
-    first_pass_srt = srt_file.replace(".srt", ".first_pass.srt")
-    first_pass_unfinished = first_pass_srt.replace(".srt", ".unfinished.srt")
-
-    # Transcribe from start_time to end
+    # === FIRST PASS: from start_time to end_time (or end), into srt_file ===
     success = _transcribe_single_pass(
         file=file,
         current_model=current_model,
-        srt_file=first_pass_srt,
+        srt_file=srt_file,
         language=language,
         device=device,
         compute_type=compute_type,
@@ -1294,7 +1294,6 @@ def _two_pass_transcribe(
         merge_lines=merge_lines,
         start_time=start_time,
         end_time=end_time,
-        start_offset_seconds=start_offset_seconds,
         mpv_ipc_reload=mpv_ipc_reload,
         show_segments=show_segments,
         source_info=source_info,
@@ -1306,7 +1305,7 @@ def _two_pass_transcribe(
 
     write(f"Two-pass transcription: second pass from 0 to {start_time}")
 
-    # === SECOND PASS: from 0 to start_time ===
+    # === SECOND PASS: from 0 to start_time, into a temporary file ===
     second_pass_srt = srt_file.replace(".srt", ".second_pass.srt")
 
     success = _transcribe_single_pass(
@@ -1327,7 +1326,6 @@ def _two_pass_transcribe(
         merge_lines=merge_lines,
         start_time=None,  # Start from beginning
         end_time=start_time,  # End at start_time
-        start_offset_seconds=0.0,
         mpv_ipc_reload=mpv_ipc_reload,
         show_segments=show_segments,
         source_info=source_info,
@@ -1340,11 +1338,11 @@ def _two_pass_transcribe(
     # === MERGE BOTH PASSES ===
     write("Merging two-pass transcription results")
     return _merge_srt_files(
-        first_pass_srt=first_pass_srt,
         second_pass_srt=second_pass_srt,
+        first_pass_srt=srt_file,
         final_srt=srt_file,
-        start_offset_seconds=start_offset_seconds,
         write=write,
+        mpv_ipc_reload=mpv_ipc_reload,
     )
 
 
@@ -1366,7 +1364,6 @@ def _transcribe_single_pass(
     merge_lines: bool = False,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
-    start_offset_seconds: float = 0.0,
     mpv_ipc_reload: Optional[Callable] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
@@ -1401,72 +1398,135 @@ def _transcribe_single_pass(
     )
 
 
+def _parse_srt_blocks(content: str) -> List[Dict[str, Any]]:
+    """Parse SRT text into blocks: {"start": float, "end": float, "text": str}.
+
+    Tolerates missing or duplicate index lines; blocks without a timestamp
+    line are skipped. The adapter metadata pseudo-block (00:00:00,000 -->
+    00:00:00,000 / "TRANSCRIPTION METADATA...") parses like any other block
+    and is filtered out by callers.
+    """
+    timestamp_re = re.compile(
+        r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})"
+    )
+    blocks: List[Dict[str, Any]] = []
+    for raw_block in re.split(r"\n\s*\n", content.strip()):
+        lines = [line for line in raw_block.splitlines() if line.strip()]
+        ts_match = None
+        ts_index = -1
+        for idx, line in enumerate(lines):
+            match = timestamp_re.search(line)
+            if match:
+                ts_match = match
+                ts_index = idx
+                break
+        if ts_match is None:
+            continue
+        text = "\n".join(line.strip() for line in lines[ts_index + 1 :])
+        blocks.append(
+            {
+                "start": srt_time_to_seconds(ts_match.group(1)),
+                "end": srt_time_to_seconds(ts_match.group(2)),
+                "text": text,
+            }
+        )
+    return blocks
+
+
+def _is_real_subtitle_block(block: Dict[str, Any]) -> bool:
+    """Filter out metadata pseudo-blocks and blocks with no text."""
+    text = block.get("text", "").strip()
+    if not text:
+        return False
+    return not text.startswith("TRANSCRIPTION METADATA")
+
+
+def _cleanup_second_pass_files(second_pass_srt: str, write: Callable) -> None:
+    """Remove all temporary files produced by the second pass.
+
+    Covers both naming conventions: the local flow uses
+    <base>.unfinished.srt, the adapter flow uses <srt>.unfinished. Also
+    removes the pass-2 helper files, whisper log, metadata and loop-detect
+    files.
+    """
+    base = (
+        second_pass_srt[: -len(".srt")]
+        if second_pass_srt.endswith(".srt")
+        else second_pass_srt
+    )
+    candidates = [
+        second_pass_srt,  # finalized pass-2 SRT
+        f"{second_pass_srt}.unfinished",  # adapter in-progress file
+        f"{base}.unfinished.srt",  # local in-progress file
+        f"{base}.whisper.log",
+        f"{base}.metadata.json",
+        f"{base}.loop_detect",
+        f"{base}.unfinished.loop_detect",
+    ]
+    for ext in (".sh", ".bat", ".htm", ".ps1", ".m3u"):
+        candidates.append(f"{base}.unfinished{ext}")
+        candidates.append(f"{base}{ext}")
+    for path in candidates:
+        try:
+            if os.path.lexists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def _merge_srt_files(
-    first_pass_srt: str,
     second_pass_srt: str,
+    first_pass_srt: str,
     final_srt: str,
-    start_offset_seconds: float,
     write: Callable,
+    mpv_ipc_reload: Optional[Callable] = None,
 ) -> bool:
     """
-    Merge two SRT files:
-    - second_pass_srt: 0 to start_time (timestamps already 0-based)
-    - first_pass_srt: start_time to end (timestamps need offset added)
+    Merge the two passes into one final SRT file.
+
+    - first_pass_srt: start_time to end, absolute timestamps (the writer
+      thread already added the start offset — local and adapter alike)
+    - second_pass_srt: 0 to start_time, absolute timestamps
+
+    The old version added start_offset_seconds to the first pass here,
+    double-shifting subtitles that were already absolute: they landed past
+    the end of the video, leaving minutes-long gaps with no lines. Now the
+    blocks are only sorted by start time and renumbered sequentially, so
+    the final file has no duplicate indices either. Metadata pseudo-blocks
+    and empty blocks are dropped.
     """
     try:
-        # Read second pass (0 to start_time) - timestamps are already correct
-        with open(second_pass_srt, "r", encoding="utf-8") as f:
-            second_content = f.read().strip()
-
-        # Read first pass (start_time to end) - need to add offset to timestamps
         with open(first_pass_srt, "r", encoding="utf-8") as f:
-            first_content = f.read().strip()
+            first_blocks = _parse_srt_blocks(f.read())
+        with open(second_pass_srt, "r", encoding="utf-8") as f:
+            second_blocks = _parse_srt_blocks(f.read())
 
-        # Parse and offset first pass timestamps
-        offset_td = datetime.timedelta(seconds=start_offset_seconds)
-        first_lines = first_content.split("\n")
-        offset_first_lines = []
-        for line in first_lines:
-            # Check if this is a timestamp line (HH:MM:SS,mmm --> HH:MM:SS,mmm)
-            match = re.match(
-                r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})", line
-            )
-            if match:
-                start_ts = match.group(1)
-                end_ts = match.group(2)
-                # Add offset
-                start_seconds = srt_time_to_seconds(start_ts)
-                end_seconds = srt_time_to_seconds(end_ts)
-                start_seconds += start_offset_seconds
-                end_seconds += start_offset_seconds
-                new_start = format_timestamp_srt(start_seconds)
-                new_end = format_timestamp_srt(end_seconds)
-                line = f"{new_start} --> {new_end}"
-            offset_first_lines.append(line)
+        blocks = [
+            b for b in second_blocks + first_blocks if _is_real_subtitle_block(b)
+        ]
+        blocks.sort(key=lambda b: b["start"])
 
-        offset_first_content = "\n".join(offset_first_lines)
-
-        # Merge: second pass first (0 to start_time), then first pass (start_time to end)
-        merged_content = second_content + "\n\n" + offset_first_content
-
-        # Write final SRT
         with open(final_srt, "w", encoding="utf-8") as f:
-            f.write(merged_content)
+            for i, block in enumerate(blocks, start=1):
+                f.write(f"{i}\n")
+                f.write(
+                    f"{format_timestamp_srt(block['start'])} --> "
+                    f"{format_timestamp_srt(block['end'])}\n"
+                )
+                f.write(f"{block['text']}\n\n")
 
-        write(f"Merged two-pass transcription saved to {final_srt}")
+        write(
+            f"Merged two-pass transcription saved to {final_srt} "
+            f"({len(blocks)} segments)"
+        )
 
-        # Clean up temporary files
-        for temp_file in [
-            first_pass_srt,
-            second_pass_srt,
-            first_pass_srt.replace(".srt", ".unfinished.srt"),
-            second_pass_srt.replace(".srt", ".unfinished.srt"),
-        ]:
+        _cleanup_second_pass_files(second_pass_srt, write)
+
+        if mpv_ipc_reload is not None:
             try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except:
-                pass
+                mpv_ipc_reload()
+            except Exception as e:
+                write(f"MPV IPC reload failed: {e}")
 
         return True
     except Exception as e:
@@ -1506,23 +1566,24 @@ def _two_pass_transcribe_adapter(
     **kwargs,
 ) -> bool:
     """
-    Two-pass transcription for adapter models with --start without --start-force:
-    1. First pass: transcribe from start_time to end_time (or end of file)
-    2. Second pass: transcribe from 0 to start_time
-    3. Merge both SRTs with proper timestamp offsets
+    Two-pass transcription for adapter models with --start without --start-force.
+
+    1. First pass: transcribe from start_time to end_time (or end) directly
+       into srt_file via the standard adapter flow (srt_file is a symlink to
+       the in-progress file), so the mpv lua plugin sees live subtitles.
+       The start offset is applied to the segments before writing, so the
+       file already holds absolute timestamps.
+    2. Second pass: transcribe from 0 to start_time into a temporary
+       .second_pass.srt.
+    3. Merge both into srt_file: blocks are sorted by time and renumbered.
     """
     write(f"Two-pass transcription (adapter): first pass from {start_time} to end")
 
-    # Parse end time if provided
-    end_seconds = parse_time_to_seconds(end_time) if end_time else None
-
-    # === FIRST PASS: from start_time to end_time (or end) ===
-    first_pass_srt = srt_file.replace(".srt", ".first_pass.srt")
-
+    # === FIRST PASS: from start_time to end_time (or end), into srt_file ===
     success = _transcribe_single_pass_adapter(
         audio_file=audio_file,
         model_name=model_name,
-        srt_file=first_pass_srt,
+        srt_file=srt_file,
         language=language,
         device=device,
         compute_type=compute_type,
@@ -1548,7 +1609,7 @@ def _two_pass_transcribe_adapter(
 
     write(f"Two-pass transcription (adapter): second pass from 0 to {start_time}")
 
-    # === SECOND PASS: from 0 to start_time ===
+    # === SECOND PASS: from 0 to start_time, into a temporary file ===
     second_pass_srt = srt_file.replace(".srt", ".second_pass.srt")
 
     success = _transcribe_single_pass_adapter(
@@ -1581,11 +1642,11 @@ def _two_pass_transcribe_adapter(
     # === MERGE BOTH PASSES ===
     write("Merging two-pass transcription results")
     return _merge_srt_files(
-        first_pass_srt=first_pass_srt,
         second_pass_srt=second_pass_srt,
+        first_pass_srt=srt_file,
         final_srt=srt_file,
-        start_offset_seconds=start_offset_seconds,
         write=write,
+        mpv_ipc_reload=mpv_ipc_reload,
     )
 
 
@@ -1686,25 +1747,34 @@ def _transcribe_single_pass_adapter(
             )
 
     # Call the adapter transcription
-    return _transcribe_with_adapter(
-        audio_file=temp_audio,
-        model_name=model_name,
-        srt_file=srt_file,
-        language=language,
-        start_offset_seconds=start_offset_seconds,
-        temperature=temperature,
-        write=write,
-        device=device,
-        compute_type=compute_type,
-        cpu_threads=cpu_threads,
-        vad_filter=vad_filter,
-        vad_params=vad_params,
-        mpv_ipc_reload=mpv_ipc_reload,
-        on_srt_created=on_srt_created,
-        show_segments=show_segments,
-        source_info=source_info,
-        **kwargs,
-    )
+    try:
+        return _transcribe_with_adapter(
+            audio_file=temp_audio,
+            model_name=model_name,
+            srt_file=srt_file,
+            language=language,
+            start_offset_seconds=start_offset_seconds,
+            temperature=temperature,
+            write=write,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=cpu_threads,
+            vad_filter=vad_filter,
+            vad_params=vad_params,
+            mpv_ipc_reload=mpv_ipc_reload,
+            on_srt_created=on_srt_created,
+            show_segments=show_segments,
+            source_info=source_info,
+            **kwargs,
+        )
+    finally:
+        # Remove the trimmed audio created for this pass
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+                write(f"Removed temporary trimmed audio: {temp_audio_path}")
+            except OSError:
+                pass
 
 
 def try_transcribe(
@@ -1769,7 +1839,6 @@ def try_transcribe(
                     merge_lines=merge_lines,
                     start_time=start_time,
                     end_time=end_time,
-                    start_offset_seconds=start_seconds,
                     mpv_ipc_reload=mpv_ipc_reload,
                     show_segments=show_segments,
                     source_info=source_info,

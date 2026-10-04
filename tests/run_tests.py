@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -400,6 +401,174 @@ class TestRunner:
         except Exception as e:
             self._record("Source info fetched once", "FAIL", str(e))
 
+        # --- Two-pass merge: no double offset, renumbered, temp files cleaned ---
+        try:
+            import transcribe as tr
+
+            with tempfile.TemporaryDirectory() as tmp:
+                final = os.path.join(tmp, "video.srt")
+                second = os.path.join(tmp, "video.second_pass.srt")
+                # pass 1 (start_time=10:00 -> end): absolute timestamps,
+                # adapter metadata pseudo-block, one empty-text block
+                with open(final, "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:00,000 --> 00:00:00,000\n"
+                        "TRANSCRIPTION METADATA\nModel: m\n\n"
+                        "1\n00:10:00,000 --> 00:10:05,000\nsecond half\n\n"
+                        "2\n00:11:00,000 --> 00:11:02,000\n\n"
+                    )
+                # pass 2 (0 -> 10:00)
+                with open(second, "w", encoding="utf-8") as f:
+                    f.write("1\n00:01:00,000 --> 00:01:04,000\nfirst part\n\n")
+                # stale pass-2 temp artifacts that must be cleaned up
+                for name in (
+                    "video.second_pass.srt.unfinished",
+                    "video.second_pass.unfinished.srt",
+                    "video.second_pass.whisper.log",
+                ):
+                    with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                        f.write("x")
+
+                ok = tr._merge_srt_files(
+                    second_pass_srt=second,
+                    first_pass_srt=final,
+                    final_srt=final,
+                    write=lambda m: None,
+                )
+                assert ok
+                with open(final, encoding="utf-8") as f:
+                    content = f.read()
+                # sorted: pass-2 block first, renumbered from 1
+                assert "1\n00:01:00,000 --> 00:01:04,000\nfirst part" in content, content
+                # pass-1 block keeps its absolute timestamp (no double offset)
+                assert "2\n00:10:00,000 --> 00:10:05,000\nsecond half" in content, content
+                assert "TRANSCRIPTION METADATA" not in content, content
+                assert content.count("-->") == 2, content
+                # temp artifacts removed
+                for name in (
+                    "video.second_pass.srt",
+                    "video.second_pass.srt.unfinished",
+                    "video.second_pass.unfinished.srt",
+                    "video.second_pass.whisper.log",
+                ):
+                    assert not os.path.exists(os.path.join(tmp, name)), name
+            self._record(
+                "Two-pass merge", "PASS", "no double offset, renumbered, cleaned"
+            )
+        except Exception as e:
+            self._record("Two-pass merge", "FAIL", str(e))
+
+        # --- Two-pass local flow: pass 1 uses the standard srt filename ---
+        try:
+            import transcribe as tr
+
+            calls = []
+
+            def fake_single_pass(**kwargs):
+                calls.append(
+                    (kwargs["srt_file"], kwargs["start_time"], kwargs["end_time"])
+                )
+                # emulate the standard unfinished/symlink flow
+                unfinished = kwargs["srt_file"].replace(".srt", ".unfinished.srt")
+                with open(unfinished, "w", encoding="utf-8") as f:
+                    if kwargs["start_time"]:
+                        f.write("1\n00:10:00,000 --> 00:10:04,000\nfrom ten min\n\n")
+                    else:
+                        f.write("1\n00:01:00,000 --> 00:01:03,000\nfrom the start\n\n")
+                os.symlink(os.path.basename(unfinished), kwargs["srt_file"])
+                os.rename(unfinished, kwargs["srt_file"])
+                return True
+
+            real = tr._transcribe_single_pass
+            tr._transcribe_single_pass = fake_single_pass
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    final = os.path.join(tmp, "video.srt")
+                    ok = tr._two_pass_transcribe(
+                        file="video.m4a",
+                        current_model="tiny",
+                        srt_file=final,
+                        language=None,
+                        device="cpu",
+                        compute_type="int8",
+                        force_device=False,
+                        write=lambda m: None,
+                        start_time="00:10:00",
+                    )
+                    assert ok
+                    # pass 1 targets the final file directly — no .first_pass file
+                    assert calls[0][0] == final, calls
+                    assert not os.path.exists(os.path.join(tmp, "video.first_pass.srt"))
+                    # pass 2 targets the .second_pass temp and ends at start_time
+                    assert calls[1][0].endswith(".second_pass.srt"), calls
+                    assert calls[1][1] is None and calls[1][2] == "00:10:00", calls
+                    with open(final, encoding="utf-8") as f:
+                        content = f.read()
+                    assert "1\n00:01:00,000 --> 00:01:03,000\nfrom the start" in content
+                    assert "2\n00:10:00,000 --> 00:10:04,000\nfrom ten min" in content
+                    assert not os.path.exists(calls[1][0])
+            finally:
+                tr._transcribe_single_pass = real
+            self._record(
+                "Two-pass filenames", "PASS", "pass 1 -> srt_file, no .first_pass"
+            )
+        except Exception as e:
+            self._record("Two-pass filenames", "FAIL", str(e))
+
+        # --- Adapter two-pass: offset on pass 1 only, standard filename ---
+        try:
+            import transcribe as tr
+
+            calls = []
+
+            def fake_adapter_pass(**kwargs):
+                calls.append(
+                    (
+                        kwargs["srt_file"],
+                        kwargs["start_time"],
+                        kwargs["start_offset_seconds"],
+                    )
+                )
+                with open(kwargs["srt_file"], "w", encoding="utf-8") as f:
+                    if kwargs["start_time"]:
+                        f.write("1\n00:10:00,000 --> 00:10:03,000\noffset half\n\n")
+                    else:
+                        f.write("1\n00:00:30,000 --> 00:00:33,000\nearly half\n\n")
+                return True
+
+            real = tr._transcribe_single_pass_adapter
+            tr._transcribe_single_pass_adapter = fake_adapter_pass
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    final = os.path.join(tmp, "video.srt")
+                    ok = tr._two_pass_transcribe_adapter(
+                        audio_file="video.m4a",
+                        model_name="groq:whisper-large-v3",
+                        srt_file=final,
+                        language=None,
+                        device="cpu",
+                        compute_type="int8",
+                        write=lambda m: None,
+                        start_time="00:10:00",
+                        start_offset_seconds=600.0,
+                    )
+                    assert ok
+                    assert calls[0][0] == final, calls
+                    assert calls[0][2] == 600.0, calls
+                    assert calls[1][0].endswith(".second_pass.srt"), calls
+                    assert calls[1][2] == 0.0, calls
+                    with open(final, encoding="utf-8") as f:
+                        content = f.read()
+                    assert "1\n00:00:30,000 --> 00:00:33,000\nearly half" in content
+                    assert "2\n00:10:00,000 --> 00:10:03,000\noffset half" in content
+            finally:
+                tr._transcribe_single_pass_adapter = real
+            self._record(
+                "Adapter two-pass", "PASS", "offset on pass 1 only, no .first_pass"
+            )
+        except Exception as e:
+            self._record("Adapter two-pass", "FAIL", str(e))
+
         # --- All Python files compile ---
         try:
             import py_compile
@@ -408,7 +577,11 @@ class TestRunner:
             for root, dirs, files in os.walk(
                 os.path.join(os.path.dirname(__file__), "..")
             ):
-                if "__pycache__" in root or ".git" in root:
+                # Skip hidden dirs (.git, .venv, .opencode with its huge
+                # node_modules) — they are not project source and walking
+                # them over network filesystems takes minutes.
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                if "__pycache__" in root:
                     continue
                 for f in files:
                     if f.endswith(".py"):

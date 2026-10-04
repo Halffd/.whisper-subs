@@ -825,7 +825,7 @@ class WhisperSubs:
         as cutting video files requires video encoding which may fail.
         """
         if not os.path.exists(video_path):
-            return None, ""
+            return None
 
         video_exts = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm"}
         if os.path.splitext(video_path)[1].lower() not in video_exts:
@@ -991,35 +991,22 @@ class WhisperSubs:
         # Clean the URL first
         clean_url = self.clean_youtube_url(url) if self.is_youtube(url) else url
 
-        # Special handling for Twitch VODs (individual videos) using twitch_vod module
-        # ... (twitch logic assumed kept) ...
-        # [I am modifying only lines 840-841 and then the return points]
-
-        # === (skipping rest of code which will remain unchanged) ===
-
-        # ... (inside the logic) ...
-
-        # When returning:
-        # return output_file, "", "", timeday
-        # return existing_file, timeday, timeday
-        # return full_path, timeday, timeday
-        # return None, "", ""
-
         # === STEP 1.5: Check audio cache ===
         if not self.force:
             try:
                 import audio_cache
 
-                cached = audio_cache.get(clean_url)
-                if cached and os.path.exists(cached):
+                entry = audio_cache.get_meta(clean_url)
+                if entry and os.path.exists(entry["path"]):
+                    cached = entry["path"]
                     self.log(f"Using cached audio: {cached}")
                     dest = os.path.join(output_path, os.path.basename(cached))
                     if dest != cached and not os.path.exists(dest):
                         import shutil
 
                         shutil.copy2(cached, dest)
-                        return dest
-                    return cached
+                        return dest, entry.get("timeday", "")
+                    return cached, entry.get("timeday", "")
             except Exception as e:
                 self.log(f"Cache lookup failed: {e}")
 
@@ -1069,7 +1056,7 @@ class WhisperSubs:
 
                     if info is None:
                         self.log(f"Failed to get video info for {clean_url}")
-                        return None, ""
+                        return None
 
                     # Build filename
                     timestamp = info.get("timestamp", "")
@@ -1146,7 +1133,7 @@ class WhisperSubs:
                     self.log(
                         f"Download completed but expected file not found: {expected_base}"
                     )
-                    return None, ""
+                    return None
 
                 except Exception as e:
                     error_str = str(e).lower()
@@ -1178,7 +1165,7 @@ class WhisperSubs:
                         continue
                     else:
                         self.log(f"Download failed: {e}")
-                        return None, ""
+                        return None
 
         finally:
             os.chdir(original_cwd)
@@ -1399,7 +1386,8 @@ class WhisperSubs:
 
             task_id = f"{job_id}_{hashlib.md5(task_source.encode()).hexdigest()[:8]}"
 
-        audio_file, is_local = None, self.is_local_file(task_source)
+        audio_file, timeday = None, ""
+        is_local = self.is_local_file(task_source)
         try:
             title, self.channel_name = self.get_video_info(task_source)
             if is_local:
@@ -1449,12 +1437,6 @@ class WhisperSubs:
                 register_media_path(task_id, "audio", audio_file)
             except ImportError:
                 pass  # API server not available (e.g., CLI mode)
-
-            # Update base_name construction
-            if not is_local and timeday:
-                # Re-construct base_name to include timeday
-                # This logic was in line 1371 (now moved), I'll need to locate it
-                pass
 
             update_task_status(job_id, task_source, "transcribing")
             safe_model = self._safe_model_filename()
@@ -1635,7 +1617,7 @@ class WhisperSubs:
                     try:
                         import audio_cache
 
-                        cached_path = audio_cache.put(task_source, audio_file)
+                        cached_path = audio_cache.put(task_source, audio_file, timeday)
                         if cached_path:
                             self.log(f"Cached audio: {cached_path}")
                     except Exception:

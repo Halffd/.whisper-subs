@@ -73,10 +73,12 @@ def _evict(index: Dict[str, Any]):
         _save_index(index)
 
 
-def put(source: str, audio_path: str) -> Optional[str]:
+def put(source: str, audio_path: str, timeday: str = "") -> Optional[str]:
     """Cache an audio file, returning the cached path (or None on failure).
 
     Copies the file into the cache directory and records it in the index.
+    ``timeday`` is the source upload timestamp ("%Y-%m-%d_%H-%M"), stored so
+    cache hits can rebuild the same output filename as a fresh download.
     The original file is NOT removed — the caller decides when to delete it.
     """
     if not audio_path or not os.path.exists(audio_path):
@@ -91,6 +93,15 @@ def put(source: str, audio_path: str) -> Optional[str]:
     cached_path = os.path.join(CACHE_DIR, cached_name)
 
     if os.path.exists(cached_path) and os.path.getsize(cached_path) == os.path.getsize(audio_path):
+        # Already cached with identical content — refresh metadata, skip the copy.
+        index["entries"][key] = {
+            "path": cached_path,
+            "source": source[:200],
+            "mtime": time.time(),
+            "size": os.path.getsize(cached_path),
+            "timeday": timeday,
+        }
+        _save_index(index)
         return cached_path
 
     old_entry = index["entries"].get(key)
@@ -113,16 +124,17 @@ def put(source: str, audio_path: str) -> Optional[str]:
         "source": source[:200],
         "mtime": time.time(),
         "size": os.path.getsize(cached_path) if os.path.exists(cached_path) else 0,
+        "timeday": timeday,
     }
     _save_index(index)
     return cached_path
 
 
-def get(source: str) -> Optional[str]:
-    """Look up a cached audio file by source URL/path.
+def get_meta(source: str) -> Optional[Dict[str, Any]]:
+    """Look up a cached audio entry by source URL/path.
 
-    Returns the cached file path if it exists and is not expired, else None.
-    Also updates mtime (LRU touch).
+    Returns the index entry (including "path" and "timeday") if the file exists
+    and is not expired, else None. Also updates mtime (LRU touch).
     """
     index = _load_index()
     key = _cache_key(source)
@@ -148,7 +160,13 @@ def get(source: str) -> Optional[str]:
 
     entry["mtime"] = now
     _save_index(index)
-    return path
+    return entry
+
+
+def get(source: str) -> Optional[str]:
+    """Return the cached audio file path for a source, or None."""
+    entry = get_meta(source)
+    return entry["path"] if entry else None
 
 
 def stats() -> Dict[str, Any]:

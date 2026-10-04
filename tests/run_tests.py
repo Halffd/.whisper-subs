@@ -570,6 +570,90 @@ class TestRunner:
         except Exception as e:
             self._record("Adapter two-pass", "FAIL", str(e))
 
+        # --- Within-segment phrase repeat counter ---
+        try:
+            import transcribe as tr
+
+            c = tr.count_phrase_repeats
+            assert c("sim, sim, sim, sim") == 4
+            assert c("a tua sociedade quer saber, a tua sociedade quer saber, "
+                     "a tua sociedade quer saber") == 3
+            assert c("é um jogo de luta de luta de luta de luta de luta "
+                     "de luta de luta de luta de luta de luta") == 10
+            assert c("Eu não sei, mas eu não sei" * 25) >= 8
+            assert c("eles terão que pagar um preço por isso, tá bom") == 0
+            assert c("palavra, palavra, palavra") == 3  # legit triple: streak only
+            assert c("") == 0
+            self._record("Phrase repeat counter", "PASS", "comma + space joined")
+        except Exception as e:
+            self._record("Phrase repeat counter", "FAIL", str(e))
+
+        # --- Hallucination loop detector ---
+        try:
+            import transcribe as tr
+
+            d = tr.detect_segment_loop
+
+            # 10 exact consecutive duplicates -> fires at the first one
+            window = [("same text", float(i + 1)) for i in range(10)]
+            assert d(window) == 1.0
+
+            # 9 exact duplicates -> not enough
+            assert d([("same text", float(i + 1)) for i in range(9)]) is None
+
+            # varied real speech -> never fires
+            real = [
+                ("mas na hora de ir lá no estado", 1.0),
+                ("a tua primeira corte é a coisa mais importante", 3.0),
+                ("eles terão que pagar um preço por isso", 5.0),
+                ("o papel dele na sociedade brasileira", 7.0),
+                ("sim tá bom encerramos por hoje", 9.0),
+                ("muito obrigado a todos os convidados", 11.0),
+                ("até a próxima semana pessoal", 13.0),
+            ]
+            assert d(real) is None
+
+            # the reported hallucination pattern: near-duplicate variants
+            # ("a tua história do X é verdadeira" tails) interleaved with
+            # short "sim" fills — exact-match detection misses this
+            halluc = [
+                ("mas na hora de ir lá no estado do corrente", 44 * 60 + 14),
+                ("a tua sociedade quer saber", 44 * 60 + 19),
+                ("a tua sociedade quer saber a tua história do toffle é verdadeira", 44 * 60 + 21),
+                ("a sociedade quer saber a tua história do caso não é verdadeira", 44 * 60 + 24),
+                ("todo mundo quer saber a tua história da urgia é tão verdadeira", 44 * 60 + 27),
+                ("todo mundo quer saber", 44 * 60 + 31),
+                ("a tua sociedade quer saber a história é verdadeira sim", 44 * 60 + 34),
+            ]
+            assert d(halluc) == 44 * 60 + 19, d(halluc)
+
+            # 5 near-dupes crammed under 10s -> needs the time span
+            tight = [
+                ("a tua sociedade quer saber", 1.0),
+                ("a tua sociedade quer saber a história é verdadeira", 2.0),
+                ("a sociedade quer saber sempre", 3.0),
+                ("a tua sociedade quer saber de novo", 4.0),
+                ("sociedade quer saber a tua história", 5.0),
+            ]
+            assert d(tight) is None
+            # same cluster stretched over 10s -> fires
+            stretched = [(t, ts * 3.0) for t, ts in tight]
+            assert d(stretched) == 3.0
+
+            # 10 near-dupes in a short span -> fires regardless of span
+            burst = [("a tua sociedade quer saber variação", float(i)) for i in range(10)]
+            burst = [(t + f" {i}", float(i)) for i, (t, _) in enumerate(burst)]
+            assert d(burst) == 0.0
+
+            # empty / short window
+            assert d([]) is None
+            assert d([("so one", 1.0)]) is None
+            self._record(
+                "Hallucination loop detector", "PASS", "exact + fuzzy variants"
+            )
+        except Exception as e:
+            self._record("Hallucination loop detector", "FAIL", str(e))
+
         # --- Resume info returns the LAST complete block ---
         try:
             import transcribe as tr

@@ -8,6 +8,7 @@ Routes prefixed models (e.g., 'groq:whisper-large-v3') through TranscriptionCont
 which dispatches to the appropriate adapter. Bare model names use the subprocess-based
 local faster-whisper pipeline for backward compatibility.
 """
+import inspect
 import model as _model_module
 from model import Segment, TranscriptionContext, get_context
 import app_meta
@@ -47,6 +48,86 @@ class LoopDetectedError(Exception):
     def __init__(self, timestamp: float, message: str = ""):
         self.timestamp = timestamp
         super().__init__(message or f"Transcription loop detected at {timestamp:.1f}s")
+
+
+def detect_segment_loop(
+    window,
+    exact_required: int = 10,
+    fuzzy_required: int = 5,
+    fuzzy_similarity: float = 0.75,
+    span_seconds: float = 10.0,
+):
+    """Find the start timestamp of a whisper hallucination loop.
+
+    window is a chronological list of (normalized_text, end_timestamp)
+    tuples. Returns the timestamp of the earliest loop segment, or None.
+
+    Two patterns are recognized:
+    - exact: the last `exact_required` texts are identical
+    - fuzzy: at least `fuzzy_required` near-duplicates of one text in the
+      window. Near-duplicate = token-set containment
+      len(A & B) / min(len(A), len(B)) >= fuzzy_similarity. This catches
+      loops with slight rewording, e.g. the same clause repeated with a
+      different tail ("a tua história do X é verdadeira" variants) that
+      the exact-match detector misses. Fires when the cluster spans at
+      least `span_seconds` or reaches 2 * fuzzy_required members.
+    """
+    if len(window) >= exact_required:
+        recent = window[-exact_required:]
+        if all(t == recent[0][0] for t, _ in recent):
+            return recent[0][1]
+
+    tokens = [set(text.split()) for text, _ in window]
+    best_count = 0
+    best_first_ts = None
+    best_last_ts = 0.0
+    for i, base in enumerate(tokens):
+        if len(base) < 2:
+            continue
+        count = 0
+        first_ts = None
+        last_ts = 0.0
+        for j in range(i, len(window)):
+            other = tokens[j]
+            if not other:
+                continue
+            common = len(base & other)
+            if common and common / min(len(base), len(other)) >= fuzzy_similarity:
+                count += 1
+                if first_ts is None:
+                    first_ts = window[j][1]
+                last_ts = window[j][1]
+        if count > best_count:
+            best_count = count
+            best_first_ts = first_ts
+            best_last_ts = last_ts
+    if (
+        best_count >= fuzzy_required
+        and (best_last_ts - best_first_ts >= span_seconds
+             or best_count >= 2 * fuzzy_required)
+    ):
+        return best_first_ts
+    return None
+
+
+def count_phrase_repeats(text: str) -> int:
+    """Count the most repeated phrase inside one segment's text.
+
+    Catches whisper hallucinations where a phrase is echoed inside a
+    single segment, comma-joined ("x, x, x, ...") or space-joined
+    ("de luta de luta de luta ..."). Returns the highest occurrence
+    count of any repeated phrase, 0 when there is none.
+    """
+    import re
+
+    best = 0
+    m = re.search(r"(.+?)(,\s*\1){2,}", text)
+    if m:
+        best = m.group(0).count(m.group(1))
+    m2 = re.search(r"(\b\S+\s+\S+\b)(?:\s*\1){7,}", text)
+    if m2:
+        best = max(best, m2.group(0).count(m2.group(1)))
+    return best
 
 
 # ============ ADAPTER-BASED TRANSCRIPTION (for prefixed models) ============
@@ -848,25 +929,27 @@ def transcribe_audio(
 
                 # Real-time loop detection
                 text_normalized = segment.text.strip().lower()
+                repeats = count_phrase_repeats(segment.text)
+                if repeats >= 8:
+                    loop_detected = True
+                    loop_timestamp = segment.start
+                    write(
+                        f"Segment hallucination: phrase repeated {repeats}x "
+                        f"at {segment.start:.1f}s"
+                    )
+                    break
                 if text_normalized:
                     loop_window.append((text_normalized, segment.end))
                     while len(loop_window) > loop_consecutive_required * 2:
                         loop_window.pop(0)
-                    if len(loop_window) >= loop_consecutive_required:
-                        recent = loop_window[-loop_consecutive_required:]
-                        if all(t == recent[0][0] for t, _ in recent):
-                            first_ts = recent[0][1]
-                            last_ts = recent[-1][1]
-                            if (
-                                last_ts - first_ts >= loop_threshold_seconds
-                                or len(loop_window) >= loop_consecutive_required * 2
-                            ):
-                                loop_detected = True
-                                loop_timestamp = first_ts
-                                write(
-                                    f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s"
-                                )
-                                break
+                    loop_timestamp = detect_segment_loop(loop_window)
+                    if loop_timestamp is not None:
+                        loop_detected = True
+                        write(
+                            f"Loop detected: '{text_normalized[:40]}' "
+                            f"from {loop_timestamp:.1f}s"
+                        )
+                        break
 
                 # Also detect via compression ratio streak
                 if compression_fail_streak >= compression_fail_max:
@@ -2047,6 +2130,47 @@ def try_transcribe(
 
                     audio_to_transcribe = resume_audio_path
                     write(f"✓ Resume audio created successfully")
+
+                    # If less than half a second of audio remains, there is
+                    # nothing transcribable left — the existing .unfinished.srt
+                    # already covers the file. Finalize instead of running the
+                    # worker on a near-empty clip (its decoder crashes on
+                    # frameless output).
+                    probe = subprocess.run(
+                        [
+                            "ffprobe",
+                            "-v",
+                            "error",
+                            "-show_entries",
+                            "format=duration",
+                            "-of",
+                            "default=noprint_wrappers=1:nokey=1",
+                            resume_audio_path,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    remaining = None
+                    if probe.returncode == 0:
+                        try:
+                            remaining = float(probe.stdout.strip())
+                        except ValueError:
+                            # "N/A" — an empty container with no audio stream
+                            remaining = None
+                    if remaining is None or remaining < 0.5:
+                        write(
+                            "✓ No transcribable audio remains — "
+                            "transcription already complete"
+                        )
+                        success = True
+                        if not keep_unfinished:
+                            if os.path.islink(srt_file):
+                                os.remove(srt_file)
+                            if os.path.exists(unfinished_srt):
+                                os.rename(unfinished_srt, srt_file)
+                            make_files(srt_file)
+                        return True
                 except Exception as e:
                     write(f"⚠️  Could not create resume audio: {e}")
                     write(f"→ Starting from beginning (clearing unfinished file)")
@@ -2094,6 +2218,7 @@ def try_transcribe(
         audio_duration = 0
 
         script = f'''
+from __future__ import annotations
 import sys
 sys.path.insert(0, r"{os.path.dirname(os.path.abspath(__file__))}")
 
@@ -2158,6 +2283,10 @@ compression_fail_streak = 0
 compression_fail_first_ts = 0.0
 compression_fail_max = 20
 
+{inspect.getsource(detect_segment_loop)}
+
+{inspect.getsource(count_phrase_repeats)}
+
 def write_segments():
     global segments_written
     global last_segment_end
@@ -2199,17 +2328,13 @@ def write_segments():
                     loop_window.append((text_normalized, adjusted_end))
                     while len(loop_window) > loop_consecutive_required * 2:
                         loop_window.pop(0)
-                    if len(loop_window) >= loop_consecutive_required:
-                        recent = loop_window[-loop_consecutive_required:]
-                        if all(t == recent[0][0] for t, _ in recent):
-                            first_ts = recent[0][1]
-                            last_ts = recent[-1][1]
-                            if last_ts - first_ts >= loop_threshold_seconds or len(loop_window) >= loop_consecutive_required * 2:
-                                print(f"Loop detected: '{{recent[0][0][:40]}}' repeated {{loop_consecutive_required}}+ times from {{first_ts:.1f}}s")
-                                with open(loop_detect_file, "w") as lf:
-                                    lf.write(str(first_ts))
-                                stop_event.set()
-                                os._exit(42)
+                    loop_start = detect_segment_loop(loop_window)
+                    if loop_start is not None:
+                        print("Loop detected: '" + text_normalized[:40] + "' from " + format(loop_start, ".1f") + "s")
+                        with open(loop_detect_file, "w") as lf:
+                            lf.write(str(loop_start))
+                        stop_event.set()
+                        os._exit(42)
 
                     # Reload subtitles in MPV via IPC every 10 segments
                     if segments_written % 10 == 0 and mpv_ipc_reload is not None:
@@ -2282,9 +2407,10 @@ try:
         # Track compression ratio failures for hallucination detection
         seg_cr = getattr(segment, 'compression_ratio', 0.0) or 0.0
         
-        # Check for repetitive content like "0000, 0000, 0000"
-        import re
-        is_repetitive = bool(re.search(r"(.+?)(,\s*\1){(3,)}", segment.text))
+        # Check for repetitive content like "0000, 0000, 0000" or the same
+        # phrase echoed many times inside a single segment
+        rep_count = count_phrase_repeats(segment.text)
+        is_repetitive = rep_count > 0
 
         if seg_cr > 2.4 or is_repetitive:
             if compression_fail_streak == 0:
@@ -2293,10 +2419,11 @@ try:
         else:
             compression_fail_streak = 0
 
-        if compression_fail_streak >= compression_fail_max:
-            print(f"Hallucination detected (ratio={{seg_cr}}, repetitive={{is_repetitive}}): {{compression_fail_streak}} failures starting from {{compression_fail_first_ts:.1f}}s")
+        if rep_count >= 8 or compression_fail_streak >= compression_fail_max:
+            hallu_ts = segment.start if rep_count >= 8 else compression_fail_first_ts
+            print("Hallucination detected (repeats=%d, ratio=%s, streak=%d) at %.1fs" % (rep_count, seg_cr, compression_fail_streak, hallu_ts))
             with open(loop_detect_file, "w") as lf:
-                lf.write(str(compression_fail_first_ts + resume_offset))
+                lf.write(str(hallu_ts + resume_offset))
             stop_event.set()
             os._exit(42)
 

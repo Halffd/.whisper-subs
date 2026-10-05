@@ -570,6 +570,113 @@ class TestRunner:
         except Exception as e:
             self._record("Adapter two-pass", "FAIL", str(e))
 
+        # --- Final verification gate ---
+        try:
+            import transcribe as tr
+
+            with tempfile.TemporaryDirectory() as tmp:
+                v = lambda name: os.path.join(tmp, name)
+
+                # valid file
+                with open(v("ok.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:01,000 --> 00:00:04,000\nhello world\n\n"
+                        "2\n00:00:05,000 --> 00:00:08,000\nsecond line here\n\n"
+                    )
+                r = tr.verify_srt_file(v("ok.srt"), write=lambda m: None)
+                assert r["ok"] and r["segments"] == 2 and r["last_end"] == 8.0, r
+
+                # missing / empty / placeholder
+                assert not tr.verify_srt_file(v("nope.srt"), write=lambda m: None)["ok"]
+                with open(v("empty.srt"), "w", encoding="utf-8") as f:
+                    f.write("")
+                assert not tr.verify_srt_file(v("empty.srt"), write=lambda m: None)["ok"]
+                with open(v("ph.srt"), "w", encoding="utf-8") as f:
+                    f.write("Transcription in progress...")
+                assert not tr.verify_srt_file(v("ph.srt"), write=lambda m: None)["ok"]
+
+                # corruption: incomplete trailing timestamp
+                with open(v("corrupt.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:01,000 --> 00:00:04,000\nhello\n\n"
+                        "2\n00:00:05,000 --> "
+                    )
+                r = tr.verify_srt_file(v("corrupt.srt"), write=lambda m: None)
+                assert not r["ok"] and any("corrupt tail" in p for p in r["problems"]), r
+
+                # hallucination: phrase repeated 8x inside one segment
+                with open(v("rep.srt"), "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:04,000\n"
+                            + "de luta de luta " * 10 + "\n\n")
+                r = tr.verify_srt_file(v("rep.srt"), write=lambda m: None)
+                assert not r["ok"] and any("hallucination" in p for p in r["problems"]), r
+
+                # hallucination: 5 consecutive identical segments
+                with open(v("run.srt"), "w", encoding="utf-8") as f:
+                    f.write("".join(
+                        f"{i}\n00:00:0{i},000 --> 00:00:0{i+1},000\nsame text\n\n"
+                        for i in range(1, 6)
+                    ))
+                r = tr.verify_srt_file(v("run.srt"), write=lambda m: None)
+                assert not r["ok"] and any("consecutive" in p for p in r["problems"]), r
+
+                # hallucination: over half duplicates (>=10 segments)
+                with open(v("dup.srt"), "w", encoding="utf-8") as f:
+                    f.write("".join(
+                        f"{i}\n00:{i:02d}:00,000 --> 00:{i:02d}:05,000\n"
+                        + ("same text" if i % 3 else f"unique line {i}") + "\n\n"
+                        for i in range(1, 13)
+                    ))
+                r = tr.verify_srt_file(v("dup.srt"), write=lambda m: None)
+                assert not r["ok"] and any("unique" in p for p in r["problems"]), r
+
+                # hallucination: near-duplicate variant loop (the reported pattern)
+                with open(v("fuzzy.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:01:00,000 --> 00:01:02,000\na tua sociedade quer saber\n\n"
+                        "2\n00:02:00,000 --> 00:02:03,000\na tua sociedade quer saber a história é verdadeira\n\n"
+                        "3\n00:03:00,000 --> 00:03:04,000\na sociedade quer saber sempre\n\n"
+                        "4\n00:04:00,000 --> 00:04:05,000\na tua sociedade quer saber de novo\n\n"
+                        "5\n00:05:00,000 --> 00:05:06,000\nsociedade quer saber a tua história\n\n"
+                        "6\n00:06:00,000 --> 00:06:07,000\na tua sociedade quer saber outra vez\n\n"
+                    )
+                r = tr.verify_srt_file(v("fuzzy.srt"), write=lambda m: None)
+                assert not r["ok"], r
+
+                # adapter metadata pseudo-block is skipped, not counted
+                with open(v("meta.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:00,000 --> 00:00:00,000\n"
+                        "TRANSCRIPTION METADATA\nModel: m\n\n"
+                        "1\n00:00:01,000 --> 00:00:04,000\nreal cue\n\n"
+                    )
+                r = tr.verify_srt_file(v("meta.srt"), write=lambda m: None)
+                assert r["ok"] and r["segments"] == 1, r
+
+                # duration coverage: warning only, ok stays True
+                with open(v("cov.srt"), "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:04,000\nshort bit\n\n")
+                r = tr.verify_srt_file(
+                    v("cov.srt"), expected_duration=7200.0, write=lambda m: None
+                )
+                assert r["ok"], r
+                assert r["warnings"] and r["coverage"] is not None and r["coverage"] < 0.01, r
+
+                # non-sequential numbering: warning only
+                with open(v("num.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:01,000 --> 00:00:04,000\na\n\n"
+                        "3\n00:00:05,000 --> 00:00:08,000\nb\n\n"
+                    )
+                r = tr.verify_srt_file(v("num.srt"), write=lambda m: None)
+                assert r["ok"] and any("numbering" in w for w in r["warnings"]), r
+
+            self._record(
+                "Verification gate", "PASS", "contents/size/corrupt/hallucination/duration"
+            )
+        except Exception as e:
+            self._record("Verification gate", "FAIL", str(e))
+
         # --- Within-segment phrase repeat counter ---
         try:
             import transcribe as tr
@@ -692,6 +799,7 @@ class TestRunner:
                 segments then died (truncated tail block included)."""
 
                 def __init__(self, args, **kwargs):
+                    self.args = args
                     self.returncode = None
                     self._exit_code = kwargs.pop("fake_exit_code", -9)
                     unfinished = kwargs.pop("fake_unfinished")
@@ -714,6 +822,15 @@ class TestRunner:
 
                 def poll(self):
                     return None
+
+                def communicate(self, input=None, timeout=None):
+                    return ("", "")
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
 
             real_popen = tr.subprocess.Popen
             with tempfile.TemporaryDirectory() as tmp:
@@ -768,6 +885,7 @@ class TestRunner:
 
             class OkPopen:
                 def __init__(self, args, unfinished, **kwargs):
+                    self.args = args
                     self.returncode = None
                     with open(unfinished, "w", encoding="utf-8") as f:
                         f.write("1\n00:00:01,000 --> 00:00:04,000\nhello\n\n")
@@ -783,6 +901,15 @@ class TestRunner:
 
                 def poll(self):
                     return None
+
+                def communicate(self, input=None, timeout=None):
+                    return ("", "")
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
 
             real_popen = tr.subprocess.Popen
 

@@ -130,6 +130,236 @@ def count_phrase_repeats(text: str) -> int:
     return best
 
 
+def _audio_window_duration(
+    audio_file: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> Optional[float]:
+    """Duration in seconds of the audio window being transcribed.
+
+    Returns None when the duration cannot be determined (probe failure,
+    missing file, non-media input).
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_file,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if probe.returncode != 0:
+        return None
+    try:
+        total = float(probe.stdout.strip())
+    except ValueError:
+        return None
+    start = parse_time_to_seconds(start_time) or 0.0
+    end = parse_time_to_seconds(end_time)
+    if end is None or end > total:
+        end = total
+    return max(0.0, end - start)
+
+
+def verify_srt_file(
+    srt_path: str,
+    expected_duration: Optional[float] = None,
+    write: Callable = print,
+) -> Dict[str, Any]:
+    """Final verification before a transcription is marked complete.
+
+    Checks the finished SRT against this list:
+    - contents: parses as real SRT blocks, not an in-progress placeholder
+    - size: exists and is not empty
+    - corruption: incomplete trailing block (writer died mid-write),
+      unparseable timestamps
+    - hallucinations: a phrase repeated inside a segment, identical
+      segments repeated in a row, over half the file duplicated, or a
+      near-duplicate variant loop anywhere in the file
+    - duration: how much of the audio the subtitles cover (warning only —
+      quiet media legitimately produces few segments)
+
+    Returns a report dict:
+        {"ok", "problems", "warnings", "segments", "last_end", "coverage"}
+    ok is True only when problems is empty. Warnings never block completion.
+    """
+    report = {
+        "ok": False,
+        "problems": [],
+        "warnings": [],
+        "segments": 0,
+        "last_end": 0.0,
+        "coverage": None,
+    }
+    problems = report["problems"]
+    warnings = report["warnings"]
+
+    if not os.path.exists(srt_path):
+        problems.append(f"file missing: {srt_path}")
+        return report
+
+    size = os.path.getsize(srt_path)
+    if size == 0:
+        problems.append("file is empty")
+        return report
+
+    with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    if content.strip() == "Transcription in progress...":
+        problems.append("only contains the in-progress placeholder")
+        return report
+
+    full_ts_re = re.compile(
+        r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})"
+    )
+    raw_blocks = [b for b in content.strip().split("\n\n") if b.strip()]
+
+    # --- corruption: incomplete trailing block (killed mid-write)
+    if raw_blocks:
+        last_lines = [l for l in raw_blocks[-1].splitlines() if l.strip()]
+        has_full_ts = any(full_ts_re.search(l) for l in last_lines)
+        has_partial_ts = any("-->" in l for l in last_lines)
+        if has_partial_ts and not has_full_ts:
+            problems.append("corrupt tail block: incomplete timestamp line")
+
+    segments = []
+    numbers = []
+    empty_blocks = 0
+    for block in raw_blocks:
+        lines = [l for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+        ts_match = None
+        ts_index = -1
+        for i, line in enumerate(lines):
+            m = full_ts_re.search(line)
+            if m:
+                ts_match = m
+                ts_index = i
+                break
+        if ts_match is None:
+            continue
+        text = "\n".join(l.strip() for l in lines[ts_index + 1 :])
+        if text.startswith("TRANSCRIPTION METADATA"):
+            continue  # adapter pseudo-block, not a cue
+        if not text:
+            empty_blocks += 1
+            continue
+        if lines[0].strip().isdigit():
+            numbers.append(int(lines[0].strip()))
+        segments.append(
+            {
+                "start": srt_time_to_seconds(ts_match.group(1)),
+                "end": srt_time_to_seconds(ts_match.group(2)),
+                "text": text,
+            }
+        )
+
+    if not segments:
+        problems.append(f"no valid subtitle blocks ({size} bytes)")
+        return report
+
+    # --- structure (warn only — players key on timestamps, not numbers)
+    if len(numbers) >= 2 and numbers == sorted(numbers):
+        expected_numbers = list(range(numbers[0], numbers[0] + len(numbers)))
+        if numbers != expected_numbers:
+            warnings.append("non-sequential block numbering")
+    starts = [s["start"] for s in segments]
+    if starts != sorted(starts):
+        warnings.append("segments not sorted by start time")
+    if empty_blocks:
+        warnings.append(f"{empty_blocks} empty-text block(s) skipped")
+
+    # --- hallucinations
+    max_repeats = 0
+    worst_segment = 0
+    for i, seg in enumerate(segments, 1):
+        r = count_phrase_repeats(seg["text"])
+        if r > max_repeats:
+            max_repeats = r
+            worst_segment = i
+    if max_repeats >= 8:
+        problems.append(
+            f"hallucination: phrase repeated {max_repeats}x in segment {worst_segment}"
+        )
+    elif max_repeats >= 4:
+        warnings.append(f"phrase repeated {max_repeats}x in segment {worst_segment}")
+
+    norm = [seg["text"].strip().lower() for seg in segments]
+    best_run = 1
+    run_text = ""
+    run = 1
+    for i in range(1, len(norm)):
+        run = run + 1 if norm[i] == norm[i - 1] else 1
+        if run > best_run:
+            best_run = run
+            run_text = norm[i]
+    if best_run >= 5:
+        problems.append(
+            f"hallucination: '{run_text[:40]}' in {best_run} consecutive segments"
+        )
+    elif best_run >= 3:
+        warnings.append(f"'{run_text[:40]}' in {best_run} consecutive segments")
+
+    if len(segments) >= 10 and len(set(norm)) * 2 < len(segments):
+        problems.append(
+            f"hallucination: only {len(set(norm))} unique of {len(segments)} segments"
+        )
+
+    # near-duplicate variant loop anywhere in the file (sliding 20-block
+    # window keeps the O(n^2) cluster scan bounded)
+    window = [(t, seg["end"]) for t, seg in zip(norm, segments)]
+    loop_start = None
+    for chunk in range(0, len(window), 10):
+        loop_start = detect_segment_loop(window[chunk : chunk + 20])
+        if loop_start is not None:
+            problems.append(
+                f"hallucination: near-duplicate loop from {loop_start:.1f}s"
+            )
+            break
+
+    # --- duration coverage (warning only)
+    report["segments"] = len(segments)
+    report["last_end"] = max(s["end"] for s in segments)
+    if expected_duration and expected_duration > 0:
+        report["coverage"] = min(1.0, report["last_end"] / expected_duration)
+        if report["coverage"] < 0.2:
+            warnings.append(
+                f"covers only {report['coverage']:.0%} of "
+                f"{expected_duration:.0f}s audio"
+            )
+
+    report["ok"] = not problems
+
+    if report["ok"]:
+        coverage = (
+            f" ({report['coverage']:.0%} coverage)"
+            if report["coverage"] is not None
+            else ""
+        )
+        write(
+            f"Verified {os.path.basename(srt_path)}: {len(segments)} segments, "
+            f"ends at {report['last_end']:.1f}s{coverage}"
+        )
+    else:
+        for p in problems:
+            write(f"Verification problem: {p}")
+    for w in warnings:
+        write(f"Verification warning: {w}")
+    return report
+
+
 # ============ ADAPTER-BASED TRANSCRIPTION (for prefixed models) ============
 
 
@@ -284,6 +514,11 @@ def _transcribe_with_adapter(
                 mpv_ipc_reload()
             except Exception as e:
                 write(f"MPV IPC reload failed: {e}")
+
+        report = verify_srt_file(real_srt, write=write)
+        if not report["ok"] and not keep_unfinished:
+            write("Verification failed — not marking transcription as complete")
+            return False
 
         if keep_unfinished:
             # incremental/live: keep srt_file -> in-progress symlink so the
@@ -1443,6 +1678,7 @@ def _two_pass_transcribe(
         final_srt=srt_file,
         write=write,
         mpv_ipc_reload=mpv_ipc_reload,
+        expected_duration=_audio_window_duration(file, None, end_time),
     )
 
 
@@ -1580,6 +1816,7 @@ def _merge_srt_files(
     final_srt: str,
     write: Callable,
     mpv_ipc_reload: Optional[Callable] = None,
+    expected_duration: Optional[float] = None,
 ) -> bool:
     """
     Merge the two passes into one final SRT file.
@@ -1619,6 +1856,13 @@ def _merge_srt_files(
             f"Merged two-pass transcription saved to {final_srt} "
             f"({len(blocks)} segments)"
         )
+
+        report = verify_srt_file(
+            final_srt, expected_duration=expected_duration, write=write
+        )
+        if not report["ok"]:
+            write("Verification failed — not marking transcription as complete")
+            return False
 
         _cleanup_second_pass_files(second_pass_srt, write)
 
@@ -1747,6 +1991,7 @@ def _two_pass_transcribe_adapter(
         final_srt=srt_file,
         write=write,
         mpv_ipc_reload=mpv_ipc_reload,
+        expected_duration=_audio_window_duration(audio_file, None, end_time),
     )
 
 
@@ -2163,6 +2408,16 @@ def try_transcribe(
                             "✓ No transcribable audio remains — "
                             "transcription already complete"
                         )
+                        expected = _audio_window_duration(file, start_time, end_time)
+                        report = verify_srt_file(
+                            unfinished_srt, expected_duration=expected, write=write
+                        )
+                        if not report["ok"]:
+                            write(
+                                "Verification failed — not marking "
+                                "transcription as complete"
+                            )
+                            return False
                         success = True
                         if not keep_unfinished:
                             if os.path.islink(srt_file):
@@ -2671,6 +2926,16 @@ finally:
                     os.path.exists(unfinished_srt)
                     and os.path.getsize(unfinished_srt) > 10
                 ):
+                    expected = _audio_window_duration(file, start_time, end_time)
+                    report = verify_srt_file(
+                        unfinished_srt, expected_duration=expected, write=write
+                    )
+                    if not report["ok"] and not keep_unfinished:
+                        write(
+                            "Verification failed — not marking "
+                            "transcription as complete"
+                        )
+                        return False
                     if keep_unfinished:
                         return True
                     if os.path.islink(srt_file):
@@ -2687,6 +2952,19 @@ finally:
             and os.path.exists(srt_file)
             and os.path.getsize(srt_file) > 10
         ):
+            expected = _audio_window_duration(file, start_time, end_time)
+            # The child finalizes on its own success (renames
+            # .unfinished.srt -> srt_file), so verify whichever file
+            # actually holds the content
+            content_path = (
+                unfinished_srt if os.path.exists(unfinished_srt) else srt_file
+            )
+            report = verify_srt_file(
+                content_path, expected_duration=expected, write=write
+            )
+            if not report["ok"]:
+                write("Verification failed — not marking transcription as complete")
+                return False
             success = True
             write(f"Successfully created {srt_file}")
             make_files(srt_file)

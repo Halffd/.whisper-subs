@@ -8,3 +8,5 @@ build/
 .externalNativeBuild/
 .cxx/
 app/src/main/cpp/whisper.cpp/
+.kotlin/
+local.properties

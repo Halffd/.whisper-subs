@@ -81,6 +81,7 @@ OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Youtube-Subs")
 JOBS_FILE = os.path.join(CONFIG_DIR, "jobs.json")
 HISTORY_FILE = os.path.join(OUTPUT_DIR, "history.txt")
 PROCESS_FILE = os.path.join(OUTPUT_DIR, "process.txt")
+EMPTY_SRT_FILE = os.path.join(OUTPUT_DIR, "empty_srts.txt")
 # Ensure config directories exist
 os.makedirs(CONFIG_DIR, exist_ok=True)
 # Ensure OUTPUT_DIR exists (handle case where parent might be a file)
@@ -1602,6 +1603,26 @@ class WhisperSubs:
                 if hasattr(self, "mpv_ipc") and self.mpv_ipc and mpv_process:
                     self.mpv_reload_subtitles(srt_file)
 
+                # Empty-subtitle check: an empty SRT must not be marked
+                # complete — clear its progress/completed indicators and
+                # record it so the next run re-transcribes it
+                import srt_checker
+
+                if srt_checker.check_empty_srt(
+                    srt_path=srt_file,
+                    ids=[unique_id, task_source],
+                    source=task_source,
+                    model_name=self.model_name,
+                    history_file=HISTORY_FILE,
+                    jobs_file=JOBS_FILE,
+                    job_id=job_id,
+                    list_file=EMPTY_SRT_FILE,
+                    write=self.log,
+                ):
+                    raise Exception(
+                        f"Empty subtitles for '{task_source}' — removed from "
+                        "progress/completed indicators, added to the empty list"
+                    )
                 update_task_status(job_id, task_source, "completed")
                 self.mark_as_processed(unique_id)
             else:

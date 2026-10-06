@@ -1120,6 +1120,243 @@ class TestRunner:
         except Exception as e:
             self._record("Two-pass merge extras", "FAIL", str(e))
 
+        # --- Empty .srt checker ---
+        try:
+            import srt_checker as sc
+
+            with tempfile.TemporaryDirectory() as tmp:
+                v = lambda name: os.path.join(tmp, name)
+
+                # is_empty_srt
+                with open(v("ok.srt"), "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:04,000\nhello\n\n")
+                assert not sc.is_empty_srt(v("ok.srt"))
+                assert sc.is_empty_srt(v("missing.srt"))
+                with open(v("zero.srt"), "w", encoding="utf-8") as f:
+                    f.write("")
+                assert sc.is_empty_srt(v("zero.srt"))
+                with open(v("ph.srt"), "w", encoding="utf-8") as f:
+                    f.write("Transcription in progress...")
+                assert sc.is_empty_srt(v("ph.srt"))
+                with open(v("noseg.srt"), "w", encoding="utf-8") as f:
+                    f.write("garbage line\nno timestamps here\n\n")
+                assert sc.is_empty_srt(v("noseg.srt"))
+                # content with problems is NOT empty (it has segments)
+                with open(v("hallu.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:01,000 --> 00:00:04,000\n"
+                        + "de luta " * 10 + "\n\n"
+                    )
+                assert not sc.is_empty_srt(v("hallu.srt"))
+
+                # remove_from_history
+                with open(v("history.txt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "vidA tiny\n"
+                        "https://youtu.be/x base\n"
+                        "vidB large-v3\n"
+                    )
+                assert sc.remove_from_history(v("history.txt"), ["vidA"]) == 1
+                with open(v("history.txt"), encoding="utf-8") as f:
+                    assert f.read() == "https://youtu.be/x base\nvidB large-v3\n"
+                assert sc.remove_from_history(v("history.txt"), ["nope"]) == 0
+                assert sc.remove_from_history(v("nohist.txt"), ["vidA"]) == 0
+
+                # remove_task_from_progress
+                jobs = [
+                    {"id": 1, "status": "initializing", "tasks": [
+                        {"source": "https://youtu.be/a", "status": "completed"},
+                        {"source": "https://youtu.be/b", "status": "transcribing"},
+                    ]},
+                    {"id": 2, "status": "initializing", "tasks": [
+                        {"source": "https://youtu.be/c", "status": "completed"},
+                    ]},
+                ]
+                with open(v("jobs.json"), "w", encoding="utf-8") as f:
+                    json.dump(jobs, f)
+                assert sc.remove_task_from_progress(
+                    v("jobs.json"), 1, "https://youtu.be/a"
+                ) is True
+                with open(v("jobs.json"), encoding="utf-8") as f:
+                    jobs_now = json.load(f)
+                assert [t["source"] for t in jobs_now[0]["tasks"]] == [
+                    "https://youtu.be/b"
+                ]
+                assert jobs_now[1]["tasks"][0]["source"] == "https://youtu.be/c"
+                assert sc.remove_task_from_progress(
+                    v("jobs.json"), 1, "https://youtu.be/zz"
+                ) is False
+                assert sc.remove_task_from_progress(
+                    v("jobs.json"), None, "https://youtu.be/b"
+                ) is False
+
+                # empty list round-trip
+                sc.add_to_empty_list(v("empty.txt"), "/p/e.srt", "src", "tiny")
+                sc.add_to_empty_list(v("empty.txt"), "/p/f.srt", None, None)
+                records = sc.read_empty_list(v("empty.txt"))
+                assert len(records) == 2, records
+                assert records[0]["srt"] == "/p/e.srt"
+                assert records[0]["source"] == "src"
+                assert records[0]["model"] == "tiny"
+                assert records[0]["date"]
+                assert records[1]["source"] == ""
+                assert sc.read_empty_list(v("noexist.txt")) == []
+
+                # check_empty_srt: valid file untouched, empty file cleaned up
+                history = v("history.txt")
+                with open(history, "w", encoding="utf-8") as f:
+                    f.write("vidX tiny\nvidY large-v3\n")
+                with open(v("jobs.json"), "w", encoding="utf-8") as f:
+                    json.dump(
+                        [
+                            {
+                                "id": 1,
+                                "status": "initializing",
+                                "tasks": [
+                                    {
+                                        "source": "https://youtu.be/x",
+                                        "status": "transcribing",
+                                    },
+                                    {
+                                        "source": "https://youtu.be/keep",
+                                        "status": "completed",
+                                    },
+                                ],
+                            }
+                        ],
+                        f,
+                    )
+                logs = []
+                assert sc.check_empty_srt(
+                    srt_path=v("ok.srt"),
+                    ids=["vidX"],
+                    source="https://youtu.be/x",
+                    model_name="tiny",
+                    history_file=history,
+                    jobs_file=v("jobs.json"),
+                    job_id=1,
+                    list_file=v("empty.txt"),
+                    write=logs.append,
+                ) is False
+                assert not logs
+                with open(history, encoding="utf-8") as f:
+                    assert "vidX tiny" in f.read()
+
+                with open(v("bad.srt"), "w", encoding="utf-8") as f:
+                    f.write("")
+                assert sc.check_empty_srt(
+                    srt_path=v("bad.srt"),
+                    ids=["vidX", "https://youtu.be/x"],
+                    source="https://youtu.be/x",
+                    model_name="tiny",
+                    history_file=history,
+                    jobs_file=v("jobs.json"),
+                    job_id=1,
+                    list_file=v("empty.txt"),
+                    write=logs.append,
+                ) is True
+                with open(history, encoding="utf-8") as f:
+                    assert f.read() == "vidY large-v3\n"
+                with open(v("jobs.json"), encoding="utf-8") as f:
+                    remaining_tasks = json.load(f)[0]["tasks"]
+                assert [
+                    t["source"] for t in remaining_tasks
+                ] == ["https://youtu.be/keep"], remaining_tasks
+                listed = sc.read_empty_list(v("empty.txt"))
+                assert any(r["srt"] == v("bad.srt") for r in listed)
+                assert any("Empty subtitles" in m for m in logs)
+
+            self._record(
+                "Empty srt checker",
+                "PASS",
+                "detect + clear progress/completed + list",
+            )
+        except Exception as e:
+            self._record("Empty srt checker", "FAIL", str(e))
+
+        # --- Empty srt scan over the output directory ---
+        try:
+            import srt_checker as sc
+
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, "subs")
+                os.makedirs(os.path.join(out, "chan"))
+                p = lambda *parts: os.path.join(out, *parts)
+
+                # a good subtitle
+                with open(p("chan", "good.srt"), "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:04,000\nreal text\n\n")
+                # an empty one with metadata describing its source
+                with open(p("chan", "empty.srt"), "w", encoding="utf-8") as f:
+                    f.write("")
+                with open(p("chan", "empty.metadata.json"), "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "source_url": "https://youtu.be/empty",
+                            "video_id": "emptyvid",
+                        },
+                        f,
+                    )
+                # in-progress artifacts must be skipped
+                with open(p("chan", "wip.unfinished.srt"), "w", encoding="utf-8") as f:
+                    f.write("")
+                os.symlink("wip.unfinished.srt", p("chan", "wip.srt"))
+
+                history = os.path.join(tmp, "history.txt")
+                with open(history, "w", encoding="utf-8") as f:
+                    f.write("emptyvid tiny\ngoodvid large-v3\n")
+                jobs_file = os.path.join(tmp, "jobs.json")
+                with open(jobs_file, "w", encoding="utf-8") as f:
+                    json.dump(
+                        [
+                            {
+                                "id": 7,
+                                "status": "initializing",
+                                "tasks": [
+                                    {
+                                        "source": "https://youtu.be/empty",
+                                        "status": "completed",
+                                    }
+                                ],
+                            }
+                        ],
+                        f,
+                    )
+                list_file = os.path.join(tmp, "empty_srts.txt")
+
+                found = sc.scan_empty_srts(
+                    directory=out,
+                    history_file=history,
+                    jobs_file=jobs_file,
+                    list_file=list_file,
+                    write=lambda m: None,
+                )
+                assert found == [p("chan", "empty.srt")], found
+                with open(history, encoding="utf-8") as f:
+                    assert f.read() == "goodvid large-v3\n"
+                with open(jobs_file, encoding="utf-8") as f:
+                    assert json.load(f)[0]["tasks"] == []
+                listed = sc.read_empty_list(list_file)
+                assert len(listed) == 1 and listed[0]["source"] == "https://youtu.be/empty"
+                # good subtitle untouched
+                with open(p("chan", "good.srt"), encoding="utf-8") as f:
+                    assert "real text" in f.read()
+                # second scan finds nothing new (already handled)
+                assert sc.scan_empty_srts(
+                    directory=out,
+                    history_file=history,
+                    jobs_file=jobs_file,
+                    list_file=list_file,
+                    write=lambda m: None,
+                ) == [p("chan", "empty.srt")]  # still empty on disk, re-listed
+                assert len(sc.read_empty_list(list_file)) == 2
+
+            self._record(
+                "Empty srt scan", "PASS", "metadata recovery, symlink skip"
+            )
+        except Exception as e:
+            self._record("Empty srt scan", "FAIL", str(e))
+
         # --- All Python files compile ---
         try:
             import py_compile

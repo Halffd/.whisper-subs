@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -36,9 +36,29 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
+      # Freshly pushed tags are not immediately visible to the releases
+      # API (transient 500s), so retry instead of failing the publish.
       - name: Publish APK release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: app/build/outputs/apk/debug/*.apk
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          apk=$(ls app/build/outputs/apk/debug/*.apk)
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release exists, uploading APK"
+              if gh release upload "$tag" $apk --clobber; then
+                exit 0
+              fi
+            else
+              echo "Attempt $attempt: creating release for $tag"
+              if gh release create "$tag" $apk --title "$tag" --generate-notes; then
+                exit 0
+              fi
+            fi
+            echo "Retrying in 30s..."
+            sleep 30
+          done
+          echo "Failed to publish the release after 5 attempts" >&2
+          exit 1

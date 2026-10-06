@@ -46,11 +46,6 @@
             android:foregroundServiceType="mediaPlayback"
             android:stopWithTask="false" />
 
-        <provider
-            android:name="androidx.camera.core.CameraXConfigProvider"
-            android:authorities="${applicationId}.camerax"
-            android:exported="false" />
-
     </application>
 
     <queries>

@@ -26,7 +26,7 @@ android {
         // debug.keystore per job, so APKs from different CI runs could not
         // install over each other (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
         // One repo-wide key keeps every published debug APK updatable.
-        debug {
+        create("stableDebug") {
             storeFile = file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
@@ -35,7 +35,7 @@ android {
     }
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("stableDebug")
         }
         release {
             isMinifyEnabled = false

@@ -14,20 +14,32 @@ android {
         applicationId = "com.halffd.whispersubs"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.2"
+        versionCode = 3
+        versionName = "1.0.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
     }
+    signingConfigs {
+        // Committed debug keystore: GitHub runners generate a fresh
+        // debug.keystore per job, so APKs from different CI runs could not
+        // install over each other (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+        // One repo-wide key keeps every published debug APK updatable.
+        debug {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-        }
-        debug {
-            isDebuggable = true
         }
     }
     compileOptions {

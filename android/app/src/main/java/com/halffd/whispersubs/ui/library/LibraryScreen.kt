@@ -49,11 +49,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.halffd.whispersubs.R
+import com.halffd.whispersubs.MainActivity
 import com.halffd.whispersubs.data.ApiClient
 import com.halffd.whispersubs.data.LibraryItem
 import com.halffd.whispersubs.data.LocalLibraryRepository
@@ -73,8 +73,12 @@ fun LibraryScreen(
 ) {
     val context = LocalContext.current
     val serverConfig = ServerConfig.getInstance(context)
-    val apiClient: ApiClient = hiltViewModel()
-    val localRepo: LocalLibraryRepository = hiltViewModel()
+    // ApiClient and LocalLibraryRepository are Hilt singletons, not
+    // ViewModels — hiltViewModel() crashed at composition. Take the
+    // activity-injected instances instead.
+    val activity = context as MainActivity
+    val apiClient: ApiClient = activity.apiClient
+    val localRepo: LocalLibraryRepository = activity.localLibraryRepository
     val offlineCache = remember { OfflineCache(context) }
 
     var serverItems by remember { mutableStateOf<List<LibraryItem>>(emptyList()) }

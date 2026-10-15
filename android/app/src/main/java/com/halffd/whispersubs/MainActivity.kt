@@ -15,6 +15,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.halffd.whispersubs.data.ApiClient
+import com.halffd.whispersubs.data.LocalLibraryRepository
 import com.halffd.whispersubs.data.ServerConfig
 import com.halffd.whispersubs.ui.channels.ChannelsScreen
 import com.halffd.whispersubs.ui.channels.ChannelVideosScreen
@@ -41,6 +42,9 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var apiClient: ApiClient
+
+    @Inject
+    lateinit var localLibraryRepository: LocalLibraryRepository
 
     private var isConnected by mutableStateOf(false)
 

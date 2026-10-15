@@ -34,7 +34,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.halffd.whispersubs.R
 import com.halffd.whispersubs.data.ServerConfig
@@ -52,7 +51,8 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun SettingsScreen(navController: NavController) {
     val context = LocalContext.current
-    val serverConfig: ServerConfig = hiltViewModel()
+    // ServerConfig is a plain singleton; hiltViewModel() crashed here
+    val serverConfig = ServerConfig.getInstance(context)
     
     var baseUrl by remember { mutableStateOf(serverConfig.baseUrl ?: "") }
     var apiKey by remember { mutableStateOf(serverConfig.apiKey ?: "") }

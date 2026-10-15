@@ -1113,15 +1113,6 @@ def cancel_task(task_id: str):
     return {"message": f"Task {task_id} cancelled"}
 
 
-@app.get("/subtitles/{filename}")
-def get_subtitle(filename: str):
-    """Download a subtitle file"""
-    file_path = os.path.join(OUTPUT_DIR, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Subtitle not found")
-    return FileResponse(file_path, media_type="text/plain", filename=filename)
-
-
 @app.get("/subtitles/list")
 def list_subtitles(source: Optional[str] = None):
     """List available subtitle files"""
@@ -1142,6 +1133,21 @@ def list_subtitles(source: Optional[str] = None):
                             }
                         )
     return sorted(subtitles, key=lambda x: x["created"], reverse=True)
+
+
+@app.get("/subtitles/{filename:path}")
+def get_subtitle(filename: str):
+    """Download a subtitle file.
+
+    :path matches channel-subdirectory names like "chan/Video.srt".
+    The realpath guard keeps the parameter inside OUTPUT_DIR — a plain
+    join would let "../" walk out of the subtitle tree.
+    """
+    root = os.path.realpath(OUTPUT_DIR)
+    file_path = os.path.realpath(os.path.join(root, filename))
+    if not file_path.startswith(root + os.sep) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+    return FileResponse(file_path, media_type="text/plain", filename=filename)
 
 
 # =============================================================================

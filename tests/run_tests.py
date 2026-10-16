@@ -1357,6 +1357,335 @@ class TestRunner:
         except Exception as e:
             self._record("Empty srt scan", "FAIL", str(e))
 
+        # --- Already-processed task still launches the player on --mpv ---
+        try:
+            import whisper_subs as ws
+
+            url = "https://www.youtube.com/watch?v=o3qvTORAduk"
+            vid = "o3qvTORAduk"
+
+            tmp = tempfile.mkdtemp()
+            try:
+                hist = os.path.join(tmp, "history.txt")
+                jobs = os.path.join(tmp, "jobs.json")
+                chan = os.path.join(tmp, "channel")
+                os.makedirs(chan)
+                good = os.path.join(chan, "vid.small.srt")
+                # Two cues: an existing subtitle is only trusted when it
+                # holds at least MIN_EXISTING_SRT_LINES entries.
+                with open(good, "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:00,000 --> 00:00:01,000\nfirst\n\n"
+                        "2\n00:00:01,000 --> 00:00:02,000\nsecond\n\n"
+                    )
+                with open(
+                    os.path.join(chan, "vid.small.metadata.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    json.dump({"source_url": url, "video_id": vid}, f)
+                # Artifacts the lookup must ignore.
+                os.symlink(good, os.path.join(chan, "vid.small.unfinished.srt"))
+                with open(
+                    os.path.join(chan, "vid.small.2.srt"), "w", encoding="utf-8"
+                ) as f:
+                    f.write("1\n00:00:00,000 --> 00:00:01,000\nold\n\n")
+
+                with open(hist, "w", encoding="utf-8") as f:
+                    f.write(f"{vid} small\n")
+                with open(jobs, "w", encoding="utf-8") as f:
+                    json.dump(
+                        [
+                            {
+                                "id": 1,
+                                "date": "d",
+                                "model": "small",
+                                "source": url,
+                                "status": "processing",
+                                "tasks": [
+                                    {
+                                        "source": url,
+                                        "status": "pending",
+                                        "title": "t",
+                                    }
+                                ],
+                            }
+                        ],
+                        f,
+                    )
+
+                saved = (ws.HISTORY_FILE, ws.JOBS_FILE, ws.OUTPUT_DIR)
+                ws.HISTORY_FILE, ws.JOBS_FILE, ws.OUTPUT_DIR = hist, jobs, tmp
+                try:
+
+                    class _Probe(ws.WhisperSubs):
+                        def __init__(self, *a, **kw):
+                            super().__init__(*a, **kw)
+                            self.launched = []
+
+                        def launch_mpv(self, audio_file, srt_file, task_source):
+                            self.launched.append(srt_file)
+                            return None
+
+                        def check_and_download_subs(self, *a, **kw):
+                            raise AssertionError("must not re-check subs on skip")
+
+                        def get_video_info(self, url):
+                            return "t", "c"
+
+                    task = {"source": url, "status": "pending", "title": "t"}
+
+                    # Without a player request the skip stays silent.
+                    quiet = _Probe(model_name="small")
+                    quiet.process_task(1, task, task_id="t1")
+                    assert quiet.launched == [], quiet.launched
+
+                    # --mpv on an already-processed source still plays.
+                    live = _Probe(model_name="small", run_mpv=True, mpv_auto=True)
+                    live.process_task(1, task, task_id="t2")
+                    assert live.launched == [good], live.launched
+
+                    # Lookup resolves the current subtitle only.
+                    assert quiet.find_existing_srt(url) == good
+                    assert (
+                        quiet.find_existing_srt("https://youtu.be/zzzzzzzzzzz") is None
+                    )
+
+                    with open(jobs, encoding="utf-8") as f:
+                        assert json.load(f)[0]["tasks"][0]["status"] == "skipped"
+
+                    # --- validation rejects unusable subtitles ---
+                    ok, reason = quiet.validate_existing_srt(good)
+                    assert ok, reason
+
+                    one = os.path.join(chan, "one.small.srt")
+                    with open(one, "w", encoding="utf-8") as f:
+                        f.write("1\n00:00:00,000 --> 00:00:01,000\nonly\n\n")
+                    bad, reason = quiet.validate_existing_srt(one)
+                    assert not bad and "1 subtitle" in reason, reason
+
+                    blank = os.path.join(chan, "blank.small.srt")
+                    open(blank, "w").close()
+                    bad, reason = quiet.validate_existing_srt(blank)
+                    assert not bad and reason == "empty file", reason
+
+                    bad, reason = quiet.validate_existing_srt(
+                        os.path.join(chan, "nope.srt")
+                    )
+                    assert not bad and reason == "missing", reason
+
+                    # A rejected subtitle clears the marker so it retries.
+                    # Point the video id at a single-cue subtitle so it is
+                    # the one the lookup resolves.
+                    os.remove(good)
+                    os.remove(os.path.join(chan, "vid.small.metadata.json"))
+                    with open(os.path.join(chan, "vid.small.srt"), "w") as f:
+                        f.write("1\n00:00:00,000 --> 00:00:01,000\nonly\n\n")
+                    with open(os.path.join(chan, "vid.small.metadata.json"), "w") as f:
+                        json.dump({"source_url": url, "video_id": vid}, f)
+                    with open(hist, "w", encoding="utf-8") as f:
+                        f.write(f"{vid} small\n")
+                    retry_probe = _Probe(model_name="small")
+                    assert (
+                        retry_probe._handle_existing_subtitle(1, url, vid) is False
+                    ), "single-cue subtitle must trigger a retry"
+                    with open(hist, encoding="utf-8") as f:
+                        assert f.read() == "", "history must be cleared for retry"
+                finally:
+                    ws.HISTORY_FILE, ws.JOBS_FILE, ws.OUTPUT_DIR = saved
+
+                self._record(
+                    "--mpv on processed task", "PASS", "plays existing subtitle"
+                )
+                self._record(
+                    "Existing sub validation",
+                    "PASS",
+                    "empty/<2 cues rejected, history cleared, paths reported",
+                )
+            finally:
+                import shutil
+
+                shutil.rmtree(tmp, ignore_errors=True)
+        except Exception as e:
+            self._record("--mpv on processed task", "FAIL", str(e))
+            self._record("Existing sub validation", "FAIL", str(e))
+
+        # --- mpv single-instance lock ---
+        try:
+            import tempfile as _tf
+
+            import mpv_lock
+
+            media_a = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            media_b = "https://www.youtube.com/watch?v=bbbbbbbbbbb"
+
+            lockdir = _tf.mkdtemp()
+            real_tmp = tempfile.tempdir
+            try:
+                # Point the lock files at a scratch dir.
+                tempfile.tempdir = lockdir
+                for name in os.listdir(real_tmp):
+                    if name.startswith(".whispersubs-mpv-"):
+                        os.remove(os.path.join(real_tmp, name))
+                mpv_lock._claims.clear()
+
+                # One window per media, no matter how often the launch
+                # path runs (model fallback, loop retry, two-pass).
+                results = [mpv_lock.claim(media_a) for _ in range(5)]
+                assert results[0] is True, "first launch must win"
+                assert not any(results[1:]), f"re-openings not blocked: {results}"
+
+                # Switching video opens a fresh window.
+                assert mpv_lock.claim(media_b) is True
+                assert not mpv_lock.claim(media_b), "second window for same video"
+                assert mpv_lock.claim(media_a) is False, "media_a already open"
+            finally:
+                tempfile.tempdir = real_tmp
+                mpv_lock._claims.clear()
+                shutil.rmtree(lockdir, ignore_errors=True)
+
+            self._record("MPV launch lock", "PASS", "one window per media")
+        except Exception as e:
+            self._record("MPV launch lock", "FAIL", str(e))
+
+        # --- --playlist / --playlist-channel / --playlist-file ---
+        try:
+            import shutil as _sh
+            import tempfile as _tf
+
+            import playlist as pl
+
+            tmp = _tf.mkdtemp()
+            try:
+                m3u = os.path.join(tmp, "queue.m3u")
+                p = pl.Playlist(m3u)
+                assert p.append("https://youtu.be/aaaaaaaaaaa", "/s/a.srt") is True
+                assert p.append("https://youtu.be/aaaaaaaaaaa", "/s/a.srt") is False, (
+                    "duplicate must be rejected"
+                )
+                assert p.append("https://youtu.be/bbbbbbbbbbb", "/s/b.srt") is True
+                assert len(p) == 2, len(p)
+
+                # extend() must dedupe too, and report the added count.
+                added = p.extend(
+                    [
+                        ("https://youtu.be/aaaaaaaaaaa", "/s/a.srt"),  # dup
+                        ("https://youtu.be/ccccccccccc", "/s/c.srt"),
+                    ]
+                )
+                assert added == 1, f"extend added {added}, expected 1"
+                assert len(p) == 3, len(p)
+                body = open(m3u, encoding="utf-8").read()
+                assert body.startswith("#EXTM3U"), body
+                assert "/s/a.srt" in body and "/s/b.srt" in body, body
+
+                # Channel playlist skips unfinished files and symlinks.
+                chan = os.path.join(tmp, "Channel")
+                os.makedirs(chan)
+                for vid, title in (("aaaaaaaaaaa", "One"), ("bbbbbbbbbbb", "Two")):
+                    with open(
+                        os.path.join(chan, f"{title}.small.srt"), "w", encoding="utf-8"
+                    ) as f:
+                        f.write(
+                            "1\n00:00:00,000 --> 00:00:01,000\nx\n\n"
+                            "2\n00:00:01,000 --> 00:00:02,000\ny\n\n"
+                        )
+                    with open(
+                        os.path.join(chan, f"{title}.small.metadata.json"),
+                        "w",
+                        encoding="utf-8",
+                    ) as f:
+                        json.dump({"source_url": f"https://youtu.be/{vid}"}, f)
+                with open(
+                    os.path.join(chan, "Three.small.unfinished.srt"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    f.write("junk")
+                os.symlink(
+                    os.path.join(chan, "One.small.srt"),
+                    os.path.join(chan, "One.small.srt.link"),
+                )
+
+                chan_m3u = os.path.join(tmp, "chan.m3u")
+                cp = ws.WhisperSubs(
+                    model_name="small",
+                    playlist_mode="channel",
+                    playlist_path=chan_m3u,
+                )
+                cp._build_channel_playlist(chan)
+                entries = cp.playlist.entries()
+                assert len(entries) == 2, entries
+                assert all("unfinished" not in s for _, s in entries), entries
+                assert all("link" not in s for _, s in entries), entries
+
+                # --playlist-file controls the output path.
+                custom = os.path.join(tmp, "deep", "mine.m3u")
+                pp = ws.WhisperSubs(
+                    model_name="small", playlist_mode="pending", playlist_path=custom
+                )
+                assert pp.playlist_file == custom, pp.playlist_file
+                assert os.path.exists(custom), "custom playlist not created"
+
+                # No flags -> no playlist object, no stray file.
+                plain = ws.WhisperSubs(model_name="small")
+                assert plain.playlist is None and plain.playlist_file is None
+
+                # A skipped (already-finished) video is still queued.
+                t2 = _tf.mkdtemp()
+                try:
+                    hist2 = os.path.join(t2, "history.txt")
+                    chan2 = os.path.join(t2, "chan")
+                    os.makedirs(chan2)
+                    srt2 = os.path.join(chan2, "v.small.srt")
+                    with open(srt2, "w", encoding="utf-8") as f:
+                        f.write(
+                            "1\n00:00:00,000 --> 00:00:01,000\na\n\n"
+                            "2\n00:00:01,000 --> 00:00:02,000\nb\n\n"
+                        )
+                    with open(os.path.join(chan2, "v.small.metadata.json"), "w") as f:
+                        json.dump(
+                            {
+                                "source_url": "https://youtu.be/aaaaaaaaaaa",
+                                "video_id": "aaaaaaaaaaa",
+                            },
+                            f,
+                        )
+                    with open(hist2, "w", encoding="utf-8") as f:
+                        f.write("aaaaaaaaaaa small\n")
+
+                    saved2 = (ws.HISTORY_FILE, ws.OUTPUT_DIR)
+                    ws.HISTORY_FILE, ws.OUTPUT_DIR = hist2, t2
+                    try:
+                        m3u2 = os.path.join(t2, "q.m3u")
+                        proc2 = ws.WhisperSubs(
+                            model_name="small",
+                            run_mpv=True,
+                            mpv_auto=True,
+                            playlist_mode="pending",
+                            playlist_path=m3u2,
+                        )
+                        proc2._handle_existing_subtitle(
+                            1, "https://youtu.be/aaaaaaaaaaa", "aaaaaaaaaaa"
+                        )
+                        entries = proc2.playlist.entries()
+                        assert len(entries) == 1, entries
+                        assert entries[0][1] == srt2, entries
+                    finally:
+                        ws.HISTORY_FILE, ws.OUTPUT_DIR = saved2
+                finally:
+                    _sh.rmtree(t2, ignore_errors=True)
+
+                self._record(
+                    "Playlist flags",
+                    "PASS",
+                    "--playlist/--playlist-channel/--playlist-file",
+                )
+            finally:
+                _sh.rmtree(tmp, ignore_errors=True)
+        except Exception as e:
+            self._record("Playlist flags", "FAIL", str(e))
+
         # --- All Python files compile ---
         try:
             import py_compile

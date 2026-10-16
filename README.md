@@ -116,7 +116,36 @@ python whisper_subs.py base.en video.mp4 --show
 # Force re-transcription; the old subtitle is kept:
 #   name.srt -> name.2.srt (then .3.srt, ...), metadata moves with it
 python whisper_subs.py base.en video.mp4 -r
+
+# Play with the existing subtitle; one mpv window per video
+python whisper_subs.py 2 --mpv https://youtu.be/VIDEOID
+
+# Queue videos in an mpv playlist; each is appended as it finishes
+python whisper_subs.py 2 --mpv --playlist https://youtu.be/VIDEOID
+
+# Queue a channel's finished subtitles, writing the playlist where you want
+python whisper_subs.py 2 --mpv --playlist-channel --playlist-file ~/queue.m3u
 ```
+
+### Player and existing subtitles
+
+`--mpv` (also `--run`/`-m` and `--play`) opens one mpv window per video. The
+window is locked per media source, so model fallback, loop retry and two-pass
+runs do not reopen it.
+
+When a task is already processed, the subtitle on disk is found by video id and
+validated before it is trusted: it must parse as real SRT and hold at least two
+entries. A usable subtitle is reported with its path and wrapper scripts, and
+played when a player flag was passed. An empty or near-empty one is rejected —
+the completion marker is cleared and the video is re-transcribed.
+
+Playlist flags:
+
+| Flag | Effect |
+|---|---|
+| `--playlist` | Queue this job's videos, appending each as it finishes |
+| `--playlist-channel` | Queue the channel's finished subtitles |
+| `--playlist-file FILE` | Write the m3u to `FILE` (default `<output>/playlist.m3u`) |
 
 Note: `-f/--force` bypasses the audio cache and human-subtitle checks; the "already processed" history is only overridden by `-r/--force-retry`, and the backup runs for either flag.
 

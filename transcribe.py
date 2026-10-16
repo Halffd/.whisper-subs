@@ -2822,7 +2822,10 @@ finally:
                         log_segment_line(write, *segment)
                         continue
                     write(f"{prefix}: {line}")
-                    # Launch mpv when first segment is written (if --mpv flag is set)
+                    # Launch mpv when first segment is written (if --mpv flag
+                    # is set). try_transcribe() runs more than once (model
+                    # fallback, loop retry, two-pass), so the guard lives in
+                    # mpv_lock: one window per media source, not per pass.
                     if (
                         not mpv_launched["flag"]
                         and mpv_auto
@@ -2830,22 +2833,30 @@ finally:
                         and media_source
                     ):
                         mpv_launched["flag"] = True
-                        try:
-                            mpv_cmd = [
-                                "mpv",
-                                media_source,
-                                "--pause",
-                                f"--input-ipc-server={mpv_socket}",
-                                f"--sub-file={unfinished_srt}",
-                            ]
-                            subprocess.Popen(
-                                mpv_cmd,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                            write(f"Launched mpv for live preview: {' '.join(mpv_cmd)}")
-                        except Exception as e:
-                            write(f"Warning: Failed to launch mpv: {e}")
+                        import mpv_lock
+
+                        if not mpv_lock.claim(media_source):
+                            write(f"mpv already open for {media_source}, not reopening")
+                        else:
+                            try:
+                                mpv_cmd = [
+                                    "mpv",
+                                    media_source,
+                                    "--pause",
+                                    f"--input-ipc-server={mpv_socket}",
+                                    f"--sub-file={unfinished_srt}",
+                                ]
+                                subprocess.Popen(
+                                    mpv_cmd,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                                write(
+                                    f"Launched mpv for live preview: {' '.join(mpv_cmd)}"
+                                )
+                            except Exception as e:
+                                mpv_lock.release(media_source)
+                                write(f"Warning: Failed to launch mpv: {e}")
 
         stdout_thread = threading.Thread(
             target=log_output, args=(process.stdout, "Out"), daemon=True

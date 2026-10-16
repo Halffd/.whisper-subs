@@ -82,6 +82,9 @@ JOBS_FILE = os.path.join(CONFIG_DIR, "jobs.json")
 HISTORY_FILE = os.path.join(OUTPUT_DIR, "history.txt")
 PROCESS_FILE = os.path.join(OUTPUT_DIR, "process.txt")
 EMPTY_SRT_FILE = os.path.join(OUTPUT_DIR, "empty_srts.txt")
+# An existing subtitle with fewer entries than this is treated as
+# unfinished, so a truncated or placeholder file gets re-transcribed.
+MIN_EXISTING_SRT_LINES = 2
 # Ensure config directories exist
 os.makedirs(CONFIG_DIR, exist_ok=True)
 # Ensure OUTPUT_DIR exists (handle case where parent might be a file)
@@ -222,6 +225,8 @@ class WhisperSubs:
         mpv_socket: Optional[str] = None,
         mpv_auto: bool = False,
         cpu_threads: Optional[int] = None,
+        playlist_mode: Optional[str] = None,
+        playlist_path: Optional[str] = None,
         save_video: bool = False,
         save_thumbnail: bool = True,
         show: bool = False,
@@ -283,6 +288,70 @@ class WhisperSubs:
         # Optional callback when SRT file is created (for streaming)
         # Called with (srt_path, unfinished_srt_path) when the unfinished SRT is created
         self.on_srt_created: Optional[Callable[[str, str], None]] = None
+
+        # mpv playlist support. `playlist_mode` is None, "pending" or
+        # "channel"; `playlist_path` is the m3u handed to mpv.
+        self.playlist_mode = playlist_mode
+        self.playlist_path = playlist_path
+        self.playlist: Optional[Any] = None
+        # launch_mpv reads this unconditionally; empty means "no playlist".
+        self.playlist_file: Optional[str] = None
+        if self.playlist_mode:
+            self._init_playlist()
+
+    def _init_playlist(self) -> None:
+        """Create the m3u that mpv will follow."""
+        import playlist as playlist_mod
+
+        path = self.playlist_path or os.path.join(OUTPUT_DIR, "playlist.m3u")
+        self.playlist = playlist_mod.Playlist(path)
+        self.playlist_file = self.playlist.path
+        self.log(f"Playlist: {self.playlist.path}")
+
+    def _append_to_playlist(self, source: str, srt_file: Optional[str]) -> None:
+        """Queue a finished video for the running player.
+
+        Called once a subtitle exists so playback continues into the
+        next item without restarting mpv.
+        """
+        if self.playlist is None:
+            return
+        try:
+            added = self.playlist.append(source, srt_file)
+            if added:
+                self.log(f"Added to playlist: {source}")
+        except Exception as e:
+            self.log(f"Warning: could not update playlist: {e}")
+
+    def _build_channel_playlist(self, channel_dir: str) -> None:
+        """Queue every finished subtitle in a channel directory."""
+        # `is None`, not truthiness: an empty Playlist is falsy via __len__.
+        if self.playlist is None or not os.path.isdir(channel_dir):
+            return
+        try:
+            items = []
+            for name in sorted(os.listdir(channel_dir)):
+                if not name.endswith(".srt") or name.endswith(".unfinished.srt"):
+                    continue
+                full = os.path.join(channel_dir, name)
+                if os.path.islink(full):
+                    continue
+                meta = os.path.join(
+                    channel_dir, name[: -len(".srt")] + ".metadata.json"
+                )
+                url = ""
+                if os.path.exists(meta):
+                    try:
+                        with open(meta, "r", encoding="utf-8") as f:
+                            url = json.load(f).get("source_url") or ""
+                    except (OSError, json.JSONDecodeError):
+                        url = ""
+                if url:
+                    items.append((url, full))
+            added = self.playlist.extend(items)
+            self.log(f"Queued {added} channel videos for playback")
+        except Exception as e:
+            self.log(f"Warning: could not build channel playlist: {e}")
 
     def _get_ytdlp_base_opts(self, **extra_opts) -> Dict[str, Any]:
         """Get base yt-dlp options with cookies from browser (required for YouTube)."""
@@ -894,9 +963,13 @@ class WhisperSubs:
             return video_path
 
     def check_and_download_subs(self, url, output_dir, title):
-        """Check for subs with minimal overhead."""
+        """Check for subs with minimal overhead.
+
+        Returns the path of the downloaded subtitle when human-made subs
+        were found, otherwise None.
+        """
         if self.ignore_subs:
-            return False
+            return None
 
         self.log("Checking for existing subtitles...")
 
@@ -975,12 +1048,12 @@ class WhisperSubs:
                 os.rename(expected_file, final_file)
                 self.log(f"Subtitle saved to {final_file}")
                 _get_helper_files().make_files(final_file, url=url)
-                return True
+                return final_file
 
         except Exception as e:
             self.log(f"Subtitle check failed: {e}")
 
-        return False
+        return None
 
     def download_audio(self, url: str, output_path: str) -> Optional[Tuple[str, str]]:
         """Download audio and return the actual file path and the upload timestamp."""
@@ -1373,13 +1446,162 @@ class WhisperSubs:
         except Exception:
             return False
 
+    def find_existing_srt(self, source: str) -> Optional[str]:
+        """Locate an existing finished subtitle for `source`.
+
+        Matches on the video id or source URL recorded in the sibling
+        `<name>.metadata.json`. In-progress artifacts (`.unfinished.srt`
+        and the symlink that points at them) are ignored, and numbered
+        backups (`name.2.srt`) are skipped in favour of the current file.
+
+        Returns the subtitle path, or None when the source has no
+        finished subtitle on disk.
+        """
+        if not source:
+            return None
+
+        unique_id = self.get_unique_id(source)
+        if not unique_id or not os.path.isdir(OUTPUT_DIR):
+            return None
+
+        matches: List[str] = []
+        for root, dirs, files in os.walk(OUTPUT_DIR):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for name in files:
+                if not name.endswith(".metadata.json"):
+                    continue
+
+                srt_path = os.path.join(root, name[: -len(".metadata.json")] + ".srt")
+                if (
+                    not os.path.exists(srt_path)
+                    or os.path.islink(srt_path)
+                    or srt_path.endswith(".unfinished.srt")
+                ):
+                    continue
+                # Numbered backups (name.2.srt) are not the current subtitle.
+                if re.search(r"\.\d+\.srt$", srt_path):
+                    continue
+
+                try:
+                    with open(os.path.join(root, name), "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    continue
+
+                recorded_url = meta.get("source_url") or meta.get("url") or ""
+                recorded_id = meta.get("video_id") or ""
+                if recorded_id == unique_id or (
+                    recorded_url and self.get_unique_id(recorded_url) == unique_id
+                ):
+                    matches.append(srt_path)
+
+        if not matches:
+            return None
+
+        # Newest subtitle wins when several models produced one.
+        return max(matches, key=os.path.getmtime)
+
+    def validate_existing_srt(self, srt_path: str) -> Tuple[bool, str]:
+        """Check an existing subtitle is usable before trusting the skip.
+
+        A subtitle counts as usable when it parses as real SRT blocks and
+        carries at least MIN_EXISTING_SRT_LINES entries. Anything less
+        (placeholder text, zero bytes, a lone stray cue) is treated as
+        unfinished so the task is re-transcribed.
+
+        Returns (ok, reason). `reason` is empty when ok.
+        """
+        import transcribe as _tr
+
+        if not srt_path or not os.path.exists(srt_path):
+            return False, "missing"
+        if os.path.getsize(srt_path) == 0:
+            return False, "empty file"
+
+        report = _tr.verify_srt_file(srt_path, write=lambda m: None)
+        if not report["ok"]:
+            problems = "; ".join(report["problems"][:3])
+            return False, f"invalid ({problems})"
+        if report["segments"] < MIN_EXISTING_SRT_LINES:
+            return (
+                False,
+                f"only {report['segments']} subtitle (needs {MIN_EXISTING_SRT_LINES})",
+            )
+        return True, ""
+
+    def _report_existing(self, task_source: str, srt_path: str) -> None:
+        """Print the subtitle and its wrapper (player script) paths."""
+        self.log(f"Subtitle: {srt_path}")
+
+        base = srt_path[: -len(".srt")] if srt_path.endswith(".srt") else srt_path
+        wrappers = [
+            path
+            for ext in (".sh", ".bat", ".ps1", ".htm")
+            if (path := f"{base}{ext}") and os.path.exists(path)
+        ]
+        if wrappers:
+            self.log("Wrappers: " + ", ".join(wrappers))
+        else:
+            # Regenerate so a finished video is always runnable.
+            try:
+                created = _get_helper_files().make_files(srt_path, url=task_source)
+                made = [str(p) for p in (created or {}).values() if p]
+                if made:
+                    self.log("Wrappers: " + ", ".join(made))
+            except Exception as e:
+                self.log(f"Warning: could not create wrappers: {e}")
+
+    def _handle_existing_subtitle(
+        self, job_id: int, task_source: str, unique_id: str
+    ) -> bool:
+        """Validate an already-processed subtitle and report its paths.
+
+        Returns True when the task may be skipped, False when the
+        subtitle is unusable and the task must run again.
+        """
+        existing_srt = self.find_existing_srt(task_source)
+
+        if existing_srt:
+            ok, reason = self.validate_existing_srt(existing_srt)
+            if ok:
+                self.log(f"Reusing existing subtitle: {existing_srt}")
+                self._report_existing(task_source, existing_srt)
+                if self.run_mpv or self.mpv_auto:
+                    self.log(f"Playing existing subtitle: {existing_srt}")
+                    self.launch_mpv(task_source, existing_srt, task_source)
+                # Queue it so --playlist replays finished videos too.
+                self._append_to_playlist(task_source, existing_srt)
+                return True
+
+            self.log(
+                f"Existing subtitle unusable ({reason}): {existing_srt}. "
+                "Re-transcribing."
+            )
+            # Drop the completion marker so the retry is not skipped again.
+            import srt_checker
+
+            srt_checker.remove_from_history(
+                HISTORY_FILE, [unique_id, task_source, existing_srt]
+            )
+            return False
+
+        self.log(f"No existing subtitle found for '{task_source}'. Re-transcribing.")
+        import srt_checker
+
+        srt_checker.remove_from_history(HISTORY_FILE, [unique_id, task_source])
+        return False
+
     def process_task(self, job_id, task, task_id: Optional[str] = None):
         task_source = task["source"]
         unique_id = self.get_unique_id(task_source)
         if not self.force_retry and self.is_processed(unique_id):
+            # Validate what is on disk before trusting the skip: an empty
+            # or near-empty subtitle is re-transcribed instead.
+            if self._handle_existing_subtitle(job_id, task_source, unique_id):
+                update_task_status(job_id, task_source, "skipped", task["title"])
+                return
             self.log(f"Skipping task '{task_source}' - already processed.")
-            update_task_status(job_id, task_source, "skipped", task["title"])
-            return
+            self.log("Retrying transcription because the subtitle is unusable.")
 
         # Generate task_id if not provided (for API media path registration)
         if task_id is None:
@@ -1399,17 +1621,26 @@ class WhisperSubs:
                 OUTPUT_DIR, self.clean_filename(self.channel_name)
             )
             os.makedirs(channel_dir, exist_ok=True)
+            if self.playlist_mode == "channel":
+                self._build_channel_playlist(channel_dir)
 
             if (
                 not is_local
                 and not self.force_retry
-                and self.check_and_download_subs(task_source, channel_dir, title)
+                and (
+                    downloaded_sub := self.check_and_download_subs(
+                        task_source, channel_dir, title
+                    )
+                )
                 and not self.force
             ):
                 self.log(
                     f"Found existing human-made subtitle for '{title}', skipping transcription. Use -r to force re-transcription."
                 )
                 self.mark_as_processed(unique_id)
+                # No transcription follows, so honour a player request now.
+                if self.run_mpv or self.mpv_auto:
+                    self.launch_mpv(task_source, downloaded_sub, task_source)
                 update_task_status(job_id, task_source, "skipped")
                 return
 
@@ -1651,8 +1882,12 @@ class WhisperSubs:
                     self.log(f"Keeping media file: {audio_file}")
 
     def launch_mpv(self, audio_file, srt_file, task_source):
-        """Launch mpv with the audio file, subtitles, and --pause flag."""
-        import subprocess
+        """Launch mpv with the audio file, subtitles, and --pause flag.
+
+        Guarded by mpv_lock so one media source opens one window even
+        though both this path and the first-segment hook can fire.
+        """
+        import mpv_lock
 
         try:
             # Determine the media source to use - prefer the original source if it's a URL
@@ -1660,29 +1895,24 @@ class WhisperSubs:
             is_local = self.is_local_file(task_source)
             media_source = audio_file if is_local else task_source
 
-            # Create the mpv command with --pause and input-ipc-server
             mpv_socket = self.mpv_socket if self.mpv_socket else "/tmp/mpvsocket"
-            cmd = [
-                "mpv",
+
+            process = mpv_lock.launch(
                 media_source,
-                "--pause",
-                f"--input-ipc-server={mpv_socket}",
-                f"--sub-file={srt_file}",
-            ]
-
-            self.log(f"Launching mpv: {' '.join(cmd)}")
-
-            # Run mpv in the background
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                srt_file=srt_file,
+                socket_path=mpv_socket,
+                playlist=self.playlist_file,
             )
-            self.log("mpv launched in background with --pause and mpvsocket")
+            if process is None:
+                self.log(f"mpv already open for {media_source}, not reopening")
+                return None
 
+            self.log(f"Launched mpv: {media_source}")
             return process
 
         except Exception as e:
             self.log(f"Error launching mpv: {e}")
-            return None, ""
+            return None
 
     def start_mpv_auto_reload(self, srt_file, stop_event):
         """Start background thread to auto-reload subtitles every minute."""
@@ -1772,6 +2002,11 @@ class WhisperSubs:
                 # Skip if already processed
                 if task["source"] in processed_sources:
                     self.log(f"Skipping already processed: {task['title']}")
+                    # Keep it queued so --playlist-channel stays complete.
+                    if self.playlist_mode:
+                        existing = self.find_existing_srt(task["source"])
+                        if existing:
+                            self._append_to_playlist(task["source"], existing)
                     continue
 
                 # Add task to job
@@ -1788,6 +2023,14 @@ class WhisperSubs:
                     f"Processing [{total_processed + 1}/{total_discovered}]: {task['title']}"
                 )
                 self.process_task(job["id"], task, task_id)
+
+                # Queue the video for the player once its subtitle exists.
+                if self.playlist_mode:
+                    ready = self.find_existing_srt(task["source"])
+                    if ready:
+                        self._append_to_playlist(task["source"], ready)
+                    else:
+                        self._append_to_playlist(task["source"], None)
 
                 # Update progress
                 total_processed += 1
@@ -2052,6 +2295,23 @@ Examples:
         help="Print each new subtitle line as it is transcribed.",
     )
     process_group.add_argument(
+        "--playlist",
+        action="store_true",
+        help="Queue this job's videos in an mpv playlist, appending each as it finishes.",
+    )
+    process_group.add_argument(
+        "--playlist-channel",
+        action="store_true",
+        help="Queue the channel's finished subtitles in an mpv playlist.",
+    )
+    process_group.add_argument(
+        "--playlist-file",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Write the mpv playlist to FILE (default: <output>/playlist.m3u).",
+    )
+    process_group.add_argument(
         "--live",
         action="store_true",
         help="Transcribe live streams in real-time (for Twitch/YouTube live streams).",
@@ -2244,6 +2504,12 @@ Examples:
                     save_video=args.video,
                     save_thumbnail=args.save_thumbnail,
                     show=args.show,
+                    playlist_mode=(
+                        "channel"
+                        if args.playlist_channel
+                        else ("pending" if args.playlist else None)
+                    ),
+                    playlist_path=args.playlist_file,
                 )
                 processor.process(source_info["url"])
 
@@ -2446,6 +2712,12 @@ Examples:
             save_video=args.video,
             save_thumbnail=args.save_thumbnail,
             show=args.show,
+            playlist_mode=(
+                "channel"
+                if args.playlist_channel
+                else ("pending" if args.playlist else None)
+            ),
+            playlist_path=args.playlist_file,
         )
         processor.process(job_or_source)
 

@@ -746,9 +746,29 @@ async def start_transcription(
                 mpv_socket=request.mpv_socket,
             )
 
+            # Register the subtitle paths as soon as the unfinished SRT
+            # exists so /api/v1/tasks/{id}/subtitles can stream it while
+            # the task is still running.
+            def _on_srt_created(srt_path, unfinished_path):
+                register_srt_path(task_id, "srt", srt_path)
+                register_srt_path(task_id, "unfinished", unfinished_path)
+
+            processor.on_srt_created = _on_srt_created
+
             # Process the source
             job = add_job(request.source, request.model_name)
             processor.process(request.source)
+
+            # The callback fires when the unfinished SRT is created; if the
+            # run finished too fast for that (short clips, cached results),
+            # register the final path here so the endpoint still resolves.
+            if task_id not in srt_paths:
+                final_srt = getattr(processor, "last_srt_file", None)
+                unfinished = getattr(processor, "last_unfinished_srt", None)
+                if final_srt and os.path.exists(final_srt):
+                    register_srt_path(task_id, "srt", final_srt)
+                if unfinished and os.path.exists(unfinished):
+                    register_srt_path(task_id, "unfinished", unfinished)
 
             # Update task status on completion
             with task_lock:

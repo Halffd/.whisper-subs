@@ -288,6 +288,10 @@ class WhisperSubs:
         # Optional callback when SRT file is created (for streaming)
         # Called with (srt_path, unfinished_srt_path) when the unfinished SRT is created
         self.on_srt_created: Optional[Callable[[str, str], None]] = None
+        # Final and in-progress SRT paths of the most recent run; None
+        # until a transcription produces them.
+        self.last_srt_file: Optional[str] = None
+        self.last_unfinished_srt: Optional[str] = None
 
         # mpv playlist support. `playlist_mode` is None, "pending" or
         # "channel"; `playlist_path` is the m3u handed to mpv.
@@ -1741,6 +1745,12 @@ class WhisperSubs:
                 os.symlink(os.path.basename(unfinished_srt), srt_file)
             except OSError:
                 pass
+
+            # Remember what this run produced so callers (API server)
+            # can register the paths even when the callback fired before
+            # they were attached.
+            self.last_srt_file = srt_file
+            self.last_unfinished_srt = unfinished_srt
 
             # Callback for real-time subtitle streaming
             if self.on_srt_created:

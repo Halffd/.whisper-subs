@@ -5,6 +5,7 @@ Centralized model name management, validation, and transcription adapter registr
 Uses the Adapter + Strategy patterns to support multiple transcription backends
 through a unified interface.
 """
+
 import sys
 import os
 import argparse
@@ -17,13 +18,16 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # ============ Segment Data Class ============
 
+
 @dataclass
 class Segment:
     start: float
     end: float
     text: str
 
+
 # ============ Transcription Adapter (Strategy Interface) ============
+
 
 class TranscriptionAdapter(ABC):
     """Abstract base class for transcription backends (Strategy pattern)."""
@@ -38,7 +42,12 @@ class TranscriptionAdapter(ABC):
         temperature: float = 0.0,
         **kwargs,
     ) -> Tuple[List[Segment], Any]:
-        """Transcribe audio and return (segments, info)."""
+        """Transcribe audio and return (segments, info).
+
+        The segments may be a list or an iterator. An iterator lets the
+        caller write the cues into the in-progress subtitle file while
+        the model is still working (see the parakeet adapter).
+        """
         ...
 
     @abstractmethod
@@ -61,14 +70,21 @@ class TranscriptionAdapter(ABC):
         """Human-readable name for logging."""
         return self.__class__.__name__
 
+    def install_hint(self) -> str:
+        """Command that makes this adapter usable, shown when it is missing."""
+        return ""
+
+
 # ============ Adapter Registry ============
 
 _ADAPTER_CLASSES: List[Type[TranscriptionAdapter]] = []
+
 
 def register_adapter(cls: Type[TranscriptionAdapter]) -> Type[TranscriptionAdapter]:
     """Class decorator to register an adapter."""
     _ADAPTER_CLASSES.append(cls)
     return cls
+
 
 def get_adapter_instances() -> List[TranscriptionAdapter]:
     """Instantiate all registered adapters (filters only those that crash on init)."""
@@ -81,6 +97,7 @@ def get_adapter_instances() -> List[TranscriptionAdapter]:
             pass
     return instances
 
+
 def build_adapter_map() -> Dict[str, TranscriptionAdapter]:
     """Build prefix -> adapter instance map for routing (includes unavailable adapters)."""
     adapter_map: Dict[str, TranscriptionAdapter] = {}
@@ -90,7 +107,9 @@ def build_adapter_map() -> Dict[str, TranscriptionAdapter]:
             adapter_map[p] = adapter
     return adapter_map
 
+
 # ============ Transcription Context (Adapter Dispatcher) ============
+
 
 class TranscriptionContext:
     """Resolves a model identifier to the correct adapter and dispatches transcription."""
@@ -103,6 +122,7 @@ class TranscriptionContext:
         if self._adapter_map is None:
             self._adapter_map = build_adapter_map()
             from adapters.faster_whisper_adapter import FasterWhisperAdapter
+
             try:
                 self._default_adapter = FasterWhisperAdapter()
             except Exception:
@@ -116,8 +136,8 @@ class TranscriptionContext:
         For bare names like 'large-v3', returns (FasterWhisperAdapter, 'large-v3').
         """
         self._ensure_initialized()
-        if ':' in model_name:
-            prefix, rest = model_name.split(':', 1)
+        if ":" in model_name:
+            prefix, rest = model_name.split(":", 1)
             adapter = self._adapter_map.get(prefix)
             if adapter is None:
                 all_prefixes = list(self._adapter_map.keys())
@@ -125,14 +145,18 @@ class TranscriptionContext:
                     f"Unknown adapter prefix '{prefix}'. Available: {all_prefixes}"
                 )
             if not adapter.is_available():
+                hint = adapter.install_hint()
+                install = f" Install with: {hint}" if hint else ""
                 raise ValueError(
-                    f"Adapter '{prefix}' ({adapter.display_name}) is not available. "
-                    f"Install its dependencies to enable it."
+                    f"Adapter '{prefix}' ({adapter.display_name}) is not available."
+                    f"{install}"
                 )
             return adapter, rest
         if self._default_adapter and self._default_adapter.is_available():
             return self._default_adapter, model_name
-        raise ValueError(f"No default transcription adapter available for model '{model_name}'")
+        raise ValueError(
+            f"No default transcription adapter available for model '{model_name}'"
+        )
 
     def transcribe(
         self,
@@ -143,10 +167,17 @@ class TranscriptionContext:
         temperature: float = 0.0,
         **kwargs,
     ) -> Tuple[List[Segment], Any]:
-        """Dispatch transcription to the correct adapter."""
+        """Dispatch transcription to the correct adapter.
+
+        An adapter returns ``(segments, info)``. For a streaming adapter
+        the segments may be an iterator that produces cues while the
+        model is still running - the caller consumes it once. A streaming
+        adapter written as a generator function returns the iterator
+        itself; that is accepted too.
+        """
         adapter, resolved_model = self.resolve(model_name)
         write(f"Using {adapter.display_name} with model {resolved_model}")
-        return adapter.transcribe(
+        result = adapter.transcribe(
             audio_file=audio_file,
             model=resolved_model,
             language=language,
@@ -154,6 +185,10 @@ class TranscriptionContext:
             temperature=temperature,
             **kwargs,
         )
+        if isinstance(result, tuple) and len(result) == 2:
+            return result
+        # Generator-function adapter: the segments are the result.
+        return result, None
 
     def is_api_model(self, model_name: str) -> Tuple[bool, str, str]:
         """Check if model_name refers to a non-local (API/subprocess) backend.
@@ -161,33 +196,39 @@ class TranscriptionContext:
         Returns (is_remote, provider_prefix, actual_model_name).
         """
         self._ensure_initialized()
-        if ':' in model_name:
-            prefix, rest = model_name.split(':', 1)
+        if ":" in model_name:
+            prefix, rest = model_name.split(":", 1)
             return True, prefix, rest
-        return False, '', model_name
+        return False, "", model_name
 
     def list_available_adapters(self) -> List[Dict[str, Any]]:
         """List all registered adapters and their models (including unavailable)."""
         self._ensure_initialized()
         result = []
         if self._default_adapter:
-            result.insert(0, {
-                'prefix': '(local/faster-whisper)',
-                'name': self._default_adapter.display_name,
-                'models': self._default_adapter.get_model_names(),
-                'available': self._default_adapter.is_available(),
-            })
+            result.insert(
+                0,
+                {
+                    "prefix": "(local/faster-whisper)",
+                    "name": self._default_adapter.display_name,
+                    "models": self._default_adapter.get_model_names(),
+                    "available": self._default_adapter.is_available(),
+                },
+            )
         for prefix, adapter in self._adapter_map.items():
-            result.append({
-                'prefix': prefix,
-                'name': adapter.display_name,
-                'models': adapter.get_model_names(),
-                'available': adapter.is_available(),
-            })
+            result.append(
+                {
+                    "prefix": prefix,
+                    "name": adapter.display_name,
+                    "models": adapter.get_model_names(),
+                    "available": adapter.is_available(),
+                }
+            )
         return result
 
 
 _context: Optional[TranscriptionContext] = None
+
 
 def get_context() -> TranscriptionContext:
     """Get or create the singleton TranscriptionContext."""
@@ -195,6 +236,7 @@ def get_context() -> TranscriptionContext:
     if _context is None:
         _context = TranscriptionContext()
     return _context
+
 
 # ============ Model Configuration ============
 
@@ -254,6 +296,9 @@ ADAPTER_MODEL_NAMES: List[str] = [
     "parakeet:parakeet-rnnt-1.1b",
     "parakeet:parakeet-ctc-0.6b",
     "parakeet:parakeet-rnnt-0.6b",
+    "sherpa:parakeet-tdt-0.6b-v2",
+    "sherpa:parakeet-tdt-0.6b-v3",
+    "sherpa:nemotron-streaming-en-0.6b",
     "canary:canary-1b-flash",
     "canary:canary-1b",
     "vibevoice:vibevoice-1b",
@@ -262,11 +307,13 @@ ADAPTER_MODEL_NAMES: List[str] = [
 
 ALL_MODEL_NAMES: List[str] = MODEL_NAMES + ADAPTER_MODEL_NAMES
 
+
 def getIndex(model_name: str) -> int:
     try:
         return ALL_MODEL_NAMES.index(model_name)
     except ValueError:
         return -1
+
 
 def list_available_models() -> None:
     print("Available models:")
@@ -277,22 +324,26 @@ def list_available_models() -> None:
     print("\n  -- Adapter Backends --")
     for i, model in enumerate(ADAPTER_MODEL_NAMES):
         print(f"  {offset + i:2d}: {model}")
-    print("\n  Use 'provider:model' syntax for adapter models (e.g., groq:whisper-large-v3)")
+    print(
+        "\n  Use 'provider:model' syntax for adapter models (e.g., groq:whisper-large-v3)"
+    )
     try:
         ctx = get_context()
         adapters = ctx.list_available_adapters()
         if adapters:
             print("\n  -- Available Adapters --")
             for a in adapters:
-                status = "OK" if a.get('models') else "no models"
+                status = "OK" if a.get("models") else "no models"
                 print(f"  {a['prefix']}: {a['name']} [{status}]")
     except Exception:
         pass
 
+
 # ============ Argument Parsing ============
 
+
 def getName(value: str) -> Optional[str]:
-    if ':' in value:
+    if ":" in value:
         return value
     try:
         if value in ALL_MODEL_NAMES:
@@ -304,53 +355,63 @@ def getName(value: str) -> Optional[str]:
             return ALL_MODEL_NAMES[model_index]
         else:
             raise argparse.ArgumentTypeError(
-                f"Model index {model_index} is out of range (0-{len(ALL_MODEL_NAMES)-1})."
+                f"Model index {model_index} is out of range (0-{len(ALL_MODEL_NAMES) - 1})."
             )
     except ValueError:
         if value in ALL_MODEL_NAMES:
             return value
         import difflib
+
         matches = difflib.get_close_matches(value, ALL_MODEL_NAMES)
         error_msg = f"Invalid model name: '{value}'. Not found in available models."
         if matches:
             error_msg += f" Did you mean: '{', '.join(matches)}'?"
         raise argparse.ArgumentTypeError(error_msg)
 
+
 def parse_arguments(description: str = "Whisper Model CLI"):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "model",
-        nargs='?',
+        nargs="?",
         type=getName,
         help="The primary model to use (name, index, or provider:model).",
         default=None,
     )
     parser.add_argument(
         "realtime_model",
-        nargs='?',
+        nargs="?",
         type=getName,
         help="[Captioner Mode] The faster, real-time model to use.",
         default=None,
     )
     parser.add_argument(
-        "--lang", type=str, default=None,
+        "--lang",
+        type=str,
+        default=None,
         help="Language code (e.g., 'en', 'ja'). 'none' for auto-detect.",
     )
     parser.add_argument(
-        "--list-models", action="store_true",
+        "--list-models",
+        action="store_true",
         help="List all available models and their indices, then exit.",
     )
-    captioner_group = parser.add_argument_group('Captioner Mode Options')
-    captioner_group.add_argument("-w", "--web", action="store_true",
-                                 help="Enable the web UI for the captioner.")
-    captioner_group.add_argument("-g", "--gui", action="store_true",
-                                 help="Enable the GUI for the captioner.")
-    captioner_group.add_argument("--debug", dest="debug_mode", action="store_true",
-                                 help="Enable debug mode.")
-    captioner_group.add_argument("--test", dest="test_mode", action="store_true",
-                                 help="Enable test mode.")
-    parser.add_argument("-m", "--model-flag", dest="model", type=getName,
-                        help=argparse.SUPPRESS)
+    captioner_group = parser.add_argument_group("Captioner Mode Options")
+    captioner_group.add_argument(
+        "-w", "--web", action="store_true", help="Enable the web UI for the captioner."
+    )
+    captioner_group.add_argument(
+        "-g", "--gui", action="store_true", help="Enable the GUI for the captioner."
+    )
+    captioner_group.add_argument(
+        "--debug", dest="debug_mode", action="store_true", help="Enable debug mode."
+    )
+    captioner_group.add_argument(
+        "--test", dest="test_mode", action="store_true", help="Enable test mode."
+    )
+    parser.add_argument(
+        "-m", "--model-flag", dest="model", type=getName, help=argparse.SUPPRESS
+    )
 
     args = parser.parse_args()
 
@@ -373,29 +434,32 @@ def parse_arguments(description: str = "Whisper Model CLI"):
     if args.realtime_model is None:
         args.realtime_model = args.model
 
-    if args.lang and args.lang.lower() == 'none':
+    if args.lang and args.lang.lower() == "none":
         args.lang = None
 
     return args
 
+
 # ============ Auto-discover and import adapters ============
+
 
 def _import_adapters():
     """Import all adapter modules from the adapters/ package."""
-    adapters_dir = os.path.join(os.path.dirname(__file__), 'adapters')
+    adapters_dir = os.path.join(os.path.dirname(__file__), "adapters")
     if not os.path.isdir(adapters_dir):
         return
     for fname in sorted(os.listdir(adapters_dir)):
-        if fname.endswith('_adapter.py') and not fname.startswith('_'):
-            module_name = f'adapters.{fname[:-3]}'
+        if fname.endswith("_adapter.py") and not fname.startswith("_"):
+            module_name = f"adapters.{fname[:-3]}"
             try:
                 importlib.import_module(module_name)
             except Exception as e:
                 print(f"Warning: could not import adapter {module_name}: {e}")
 
+
 _import_adapters()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("--- Running Argument Parser Example ---")
     try:
         config = parse_arguments()
@@ -410,4 +474,6 @@ if __name__ == '__main__':
         print("--------------------------")
     except SystemExit as e:
         if e.code != 0:
-            print(f"\nExited with code {e.code}. Likely due to --help, --list-models, or an error.")
+            print(
+                f"\nExited with code {e.code}. Likely due to --help, --list-models, or an error."
+            )

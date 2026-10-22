@@ -101,10 +101,8 @@ def detect_segment_loop(
             best_count = count
             best_first_ts = first_ts
             best_last_ts = last_ts
-    if (
-        best_count >= fuzzy_required
-        and (best_last_ts - best_first_ts >= span_seconds
-             or best_count >= 2 * fuzzy_required)
+    if best_count >= fuzzy_required and (
+        best_last_ts - best_first_ts >= span_seconds or best_count >= 2 * fuzzy_required
     ):
         return best_first_ts
     return None
@@ -397,32 +395,14 @@ def _transcribe_with_adapter(
         ctx = get_context()
         is_api, prefix, stripped_model = ctx.is_api_model(model_name)
 
-        segments, info = ctx.transcribe(
-            audio_file=audio_file,
-            model_name=model_name,
-            language=language,
-            write=write,
-            temperature=temperature,
-            device=device,
-            compute_type=compute_type,
-            cpu_threads=cpu_threads,
-            vad_filter=vad_filter,
-            vad_params=vad_params,
-            **kwargs,
-        )
-
-        if start_offset_seconds > 0:
-            for seg in segments:
-                seg.start += start_offset_seconds
-                seg.end += start_offset_seconds
-
-        loop_window = []
-        loop_consecutive_required = 10
-        loop_threshold_seconds = 10.0
-        loop_detected = False
-        loop_timestamp = 0.0
-
-        with open(real_srt, "w", encoding="utf-8") as srt:
+        # The unfinished file is created and published *before* the model
+        # runs, so clients (the api, the mpv plugin) can watch it grow
+        # while the transcription is still going. Adapters that stream
+        # (parakeet) produce their segments lazily - the loop below
+        # consumes them as they arrive.
+        os.makedirs(os.path.dirname(real_srt) or ".", exist_ok=True)
+        srt = open(real_srt, "w", encoding="utf-8")
+        try:
             srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write("TRANSCRIPTION METADATA\n")
             srt.write(f"Model: {stripped_model}\n")
@@ -430,43 +410,99 @@ def _transcribe_with_adapter(
             srt.write(f"Date: {datetime.datetime.now().isoformat()}\n")
             srt.write(f"Source: {os.path.basename(audio_file)}\n")
             srt.write("\n")
+            srt.flush()
 
-        for i, segment in enumerate(segments, start=1):
-            text_normalized = segment.text.strip().lower()
-            if text_normalized:
-                loop_window.append((text_normalized, segment.end))
-                while len(loop_window) > loop_consecutive_required * 2:
-                    loop_window.pop(0)
-                if len(loop_window) >= loop_consecutive_required:
-                    recent = loop_window[-loop_consecutive_required:]
-                    if all(t == recent[0][0] for t, _ in recent):
-                        first_ts = recent[0][1]
-                        last_ts = recent[-1][1]
-                        if (
-                            last_ts - first_ts >= loop_threshold_seconds
-                            or len(loop_window) >= loop_consecutive_required * 2
-                        ):
-                            loop_detected = True
-                            loop_timestamp = first_ts
-                            write(
-                                f"Loop detected: '{recent[0][0][:40]}' repeated {loop_consecutive_required}+ times from {first_ts:.1f}s"
-                            )
-                            break
+            if os.path.exists(srt_file) or os.path.islink(srt_file):
+                os.remove(srt_file)
+            try:
+                os.symlink(os.path.basename(real_srt), srt_file)
+                write(f"Created symlink: {srt_file} -> {os.path.basename(real_srt)}")
+            except OSError:
+                write(f"Could not create symlink, copying instead")
+                shutil.copy2(real_srt, srt_file)
 
+            write(f"Transcription in progress: {srt_file}")
+            make_files(srt_file)
+
+            # Register the in-progress subtitle with the api so the
+            # growing file is reachable while the model is still running.
+            if on_srt_created:
+                try:
+                    on_srt_created(srt_file, real_srt)
+                except Exception as e:
+                    write(f"Warning: on_srt_created callback failed: {e}")
+
+            segments, info = ctx.transcribe(
+                audio_file=audio_file,
+                model_name=model_name,
+                language=language,
+                write=write,
+                temperature=temperature,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=cpu_threads,
+                vad_filter=vad_filter,
+                vad_params=vad_params,
+                **kwargs,
+            )
+
+            loop_window = []
+            loop_consecutive_required = 10
+            loop_threshold_seconds = 10.0
+            loop_detected = False
+            loop_timestamp = 0.0
+            segment_count = 0
+            last_segment_end = 0.0
+
+            for segment in segments:
+                # The offset is applied here, not before the loop: a
+                # streaming adapter only produces segments while it runs.
+                if start_offset_seconds > 0:
+                    segment.start += start_offset_seconds
+                    segment.end += start_offset_seconds
+
+                text_normalized = segment.text.strip().lower()
+                if text_normalized:
+                    loop_window.append((text_normalized, segment.end))
+                    while len(loop_window) > loop_consecutive_required * 2:
+                        loop_window.pop(0)
+                    if len(loop_window) >= loop_consecutive_required:
+                        recent = loop_window[-loop_consecutive_required:]
+                        if all(t == recent[0][0] for t, _ in recent):
+                            first_ts = recent[0][1]
+                            last_ts = recent[-1][1]
+                            if (
+                                last_ts - first_ts >= loop_threshold_seconds
+                                or len(loop_window) >= loop_consecutive_required * 2
+                            ):
+                                loop_detected = True
+                                loop_timestamp = first_ts
+                                write(
+                                    f"Loop detected: '{recent[0][0][:40]}' repeated "
+                                    f"{loop_consecutive_required}+ times from {first_ts:.1f}s"
+                                )
+                                break
+
+                segment_count += 1
+                last_segment_end = segment.end
                 start_time = format_timestamp(segment.start if segment.start > 0 else 0)
                 end_time = format_timestamp(segment.end if segment.end > 0 else 0)
-                srt.write(f"{i}\n")
+                srt.write(f"{segment_count}\n")
                 srt.write(f"{start_time} --> {end_time}\n")
                 srt.write(f"{segment.text}\n\n")
+                # Flush per cue: a reader (player, api) has to see the
+                # file grow while the model is still running.
+                srt.flush()
                 if show_segments:
                     log_segment_line(write, start_time, segment.text)
+        finally:
+            srt.close()
 
         if loop_detected:
             write(
                 f"Loop detected at {loop_timestamp:.1f}s, stopping. SRT saved up to loop point."
             )
             _trim_srt_to_timestamp(real_srt, loop_timestamp)
-            segments = [s for s in segments if s.end <= loop_timestamp]
             raise LoopDetectedError(
                 loop_timestamp,
                 f"Loop detected at {loop_timestamp:.1f}s during adapter transcription",
@@ -480,8 +516,8 @@ def _transcribe_with_adapter(
                     "provider": prefix,
                     "source_file": os.path.basename(audio_file),
                     "language": language or "auto-detect",
-                    "segments_count": len(segments),
-                    "duration_seconds": segments[-1].end if segments else None,
+                    "segments_count": segment_count,
+                    "duration_seconds": last_segment_end if segment_count else None,
                     "start_offset_seconds": start_offset_seconds,
                 },
                 source_info=source_info,
@@ -489,25 +525,6 @@ def _transcribe_with_adapter(
             write(f"Metadata saved to: {metadata_file}")
         except Exception as e:
             write(f"Warning: Could not create metadata file: {e}")
-
-        if os.path.exists(srt_file) or os.path.islink(srt_file):
-            os.remove(srt_file)
-        try:
-            os.symlink(os.path.basename(real_srt), srt_file)
-            write(f"Created symlink: {srt_file} -> {os.path.basename(real_srt)}")
-        except OSError:
-            write(f"Could not create symlink, copying instead")
-            shutil.copy2(real_srt, srt_file)
-
-        write(f"Transcription in progress: {srt_file}")
-        make_files(srt_file)
-
-        # Callback for real-time subtitle streaming
-        if on_srt_created:
-            try:
-                on_srt_created(srt_file, real_srt)
-            except Exception as e:
-                write(f"Warning: on_srt_created callback failed: {e}")
 
         if mpv_ipc_reload is not None:
             try:
@@ -528,6 +545,9 @@ def _transcribe_with_adapter(
             if os.path.islink(srt_file):
                 os.remove(srt_file)
             if os.path.exists(real_srt):
+                # The placeholder block only means something while the file is
+                # unfinished; a finished subtitle must not open with it.
+                strip_leading_metadata(real_srt, write=write)
                 os.rename(real_srt, srt_file)
                 write(f"Successfully finalized: {srt_file}")
             make_files(srt_file)
@@ -669,6 +689,7 @@ def finalize_unfinished(srt_file: str) -> bool:
         if os.path.exists(unfinished) and os.path.getsize(unfinished) > 0:
             if os.path.islink(srt_file) or os.path.exists(srt_file):
                 os.remove(srt_file)
+            strip_leading_metadata(unfinished, write=print)
             os.rename(unfinished, srt_file)
             return True
     return False
@@ -1133,6 +1154,16 @@ def transcribe_audio(
             if cpu_threads:
                 srt.write(f"CPU Threads: {cpu_threads}\n")
             srt.write(f"\n")
+            srt.flush()
+
+            # Publish the in-progress subtitle before the first cue
+            # exists, so the api can serve the growing file while the
+            # model is still transcribing.
+            if on_srt_created:
+                try:
+                    on_srt_created(srt_file, temp_srt)
+                except Exception as e:
+                    write(f"Warning: on_srt_created callback failed: {e}")
 
             seg_idx = 0
             for segment in result_segments:
@@ -1243,6 +1274,9 @@ def transcribe_audio(
             # Remove the old file if it exists
             if os.path.exists(original):
                 os.remove(original)
+
+            # The in-progress placeholder is only useful while transcribing.
+            strip_leading_metadata(temp_srt, write=write)
 
             # Rename the temporary file to the final name
             os.rename(temp_srt, original)
@@ -1769,6 +1803,54 @@ def _parse_srt_blocks(content: str) -> List[Dict[str, Any]]:
     return blocks
 
 
+def strip_leading_metadata(srt_path: str, write: Callable = print) -> bool:
+    """Remove the in-progress metadata block from a finished subtitle.
+
+    Transcription writes a placeholder block first: number, a zero-length
+    timestamp, then lines beginning "TRANSCRIPTION METADATA". A player
+    watching the unfinished file can see it is incomplete.
+
+    Leaving it in the final file renders that placeholder as a subtitle and
+    makes the numbering restart, because both the block and the first real
+    cue are numbered "1". Nothing reads it back afterwards: resume state
+    lives in the sibling .metadata.json and every parser skips the block, so
+    it has no purpose once the file is final.
+
+    Returns True when a block was removed.
+    """
+    if not srt_path or not os.path.exists(srt_path):
+        return False
+
+    try:
+        with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError as exc:
+        write(f"Warning: could not read {srt_path}: {exc}")
+        return False
+
+    blocks = content.split("\n\n")
+    if not blocks:
+        return False
+
+    first = blocks[0].strip().split("\n")
+    # Shape: number, zero-length timestamp, "TRANSCRIPTION METADATA", details.
+    if len(first) < 3 or not first[0].strip().isdigit():
+        return False
+    if not first[1].strip().startswith("00:00:00,000 --> 00:00:00,000"):
+        return False
+    if not first[2].strip().startswith("TRANSCRIPTION METADATA"):
+        return False
+
+    remaining = "\n\n".join(blocks[1:]).lstrip("\n")
+    try:
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(remaining)
+    except OSError as exc:
+        write(f"Warning: could not rewrite {srt_path}: {exc}")
+        return False
+    return True
+
+
 def _is_real_subtitle_block(block: Dict[str, Any]) -> bool:
     """Filter out metadata pseudo-blocks and blocks with no text."""
     text = block.get("text", "").strip()
@@ -1838,9 +1920,7 @@ def _merge_srt_files(
         with open(second_pass_srt, "r", encoding="utf-8") as f:
             second_blocks = _parse_srt_blocks(f.read())
 
-        blocks = [
-            b for b in second_blocks + first_blocks if _is_real_subtitle_block(b)
-        ]
+        blocks = [b for b in second_blocks + first_blocks if _is_real_subtitle_block(b)]
         blocks.sort(key=lambda b: b["start"])
 
         with open(final_srt, "w", encoding="utf-8") as f:

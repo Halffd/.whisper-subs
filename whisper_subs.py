@@ -1534,10 +1534,42 @@ class WhisperSubs:
         return True, ""
 
     def _report_existing(self, task_source: str, srt_path: str) -> None:
-        """Print the subtitle and its wrapper (player script) paths."""
+        """Print what is known about a finished subtitle.
+
+        The metadata sits next to the subtitle as <name>.metadata.json, so the
+        video facts, the date it was transcribed and the model that produced
+        it are all available without another network round trip.
+        """
         self.log(f"Subtitle: {srt_path}")
 
         base = srt_path[: -len(".srt")] if srt_path.endswith(".srt") else srt_path
+        meta_path = f"{base}.metadata.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+
+            def _field(label: str, *keys: str) -> None:
+                for key in keys:
+                    value = meta.get(key)
+                    if value not in (None, ""):
+                        self.log(f"{label}: {value}")
+                        return
+
+            _field("Title", "title")
+            _field("Channel", "channel_name", "channel")
+            _field("Source", "source_url", "url", "webpage_url")
+            _field("Transcribed", "transcription_timestamp", "date")
+            _field("Published", "upload_timestamp")
+            _field("Model", "model")
+            _field("Duration", "duration_seconds")
+            _field("Views", "views")
+            _field("Cues", "segments_count")
+        else:
+            self.log(f"Metadata: {meta_path} not found")
+
         wrappers = [
             path
             for ext in (".sh", ".bat", ".ps1", ".htm")
@@ -1861,8 +1893,9 @@ class WhisperSubs:
                     write=self.log,
                 ):
                     raise Exception(
-                        f"Empty subtitles for '{task_source}' — removed from "
-                        "progress/completed indicators, added to the empty list"
+                        f"Unusable subtitles for '{task_source}' (empty or "
+                        "hallucinated) — removed from progress/completed "
+                        "indicators, added to the empty list"
                     )
                 update_task_status(job_id, task_source, "completed")
                 self.mark_as_processed(unique_id)
@@ -1895,7 +1928,9 @@ class WhisperSubs:
         """Launch mpv with the audio file, subtitles, and --pause flag.
 
         Guarded by mpv_lock so one media source opens one window even
-        though both this path and the first-segment hook can fire.
+        though both this path and the first-segment hook can fire. The
+        player's output goes to <subtitle>.mpv.log and a watcher reports
+        when it exits, so a player that dies on a dead URL is not silent.
         """
         import mpv_lock
 
@@ -1907,22 +1942,65 @@ class WhisperSubs:
 
             mpv_socket = self.mpv_socket if self.mpv_socket else "/tmp/mpvsocket"
 
+            log_path = None
+            if srt_file:
+                base = (
+                    srt_file[: -len(".srt")] if srt_file.endswith(".srt") else srt_file
+                )
+                log_path = f"{base}.mpv.log"
+
             process = mpv_lock.launch(
                 media_source,
                 srt_file=srt_file,
                 socket_path=mpv_socket,
                 playlist=self.playlist_file,
+                log_file=log_path,
             )
             if process is None:
                 self.log(f"mpv already open for {media_source}, not reopening")
                 return None
 
             self.log(f"Launched mpv: {media_source}")
+            if log_path:
+                self.log(f"mpv output: {log_path}")
+            self._watch_mpv(process, log_path)
             return process
 
         except Exception as e:
             self.log(f"Error launching mpv: {e}")
             return None
+
+    def _watch_mpv(self, process, log_path: Optional[str]) -> None:
+        """Report when the detached player exits, echoing its tail on error.
+
+        mpv runs detached, so without this a player that fails to open its
+        media exits with a nonzero status and nothing is ever printed.
+        """
+
+        def watcher() -> None:
+            try:
+                code = process.wait()
+            except Exception:
+                return
+            handle = getattr(process, "log_handle", None)
+            tail = ""
+            if log_path and os.path.exists(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        lines = [l.strip() for l in f if l.strip()]
+                    if handle:
+                        handle.close()
+                    tail = " | ".join(lines[-3:])
+                except OSError:
+                    tail = ""
+            if code == 0:
+                self.log("mpv exited normally.")
+            else:
+                self.log(f"mpv exited with code {code}.")
+                if tail:
+                    self.log(f"mpv output tail: {tail}")
+
+        threading.Thread(target=watcher, daemon=True).start()
 
     def start_mpv_auto_reload(self, srt_file, stop_event):
         """Start background thread to auto-reload subtitles every minute."""
@@ -2052,14 +2130,41 @@ class WhisperSubs:
                     (j for j in updated_jobs if j["id"] == job["id"]), None
                 )
                 if current_job:
+                    # Count only tasks that actually succeeded; a failed one
+                    # is processed but not completed.
+                    done = sum(
+                        1
+                        for t in current_job.get("tasks", [])
+                        if t.get("status") in ["completed", "skipped"]
+                    )
+                    failed_now = sum(
+                        1
+                        for t in current_job.get("tasks", [])
+                        if t.get("status") == "failed"
+                    )
+                    suffix = f", {failed_now} failed" if failed_now else ""
                     self.log(
-                        f"Progress: {total_processed}/{total_discovered} tasks completed"
+                        f"Progress: {done}/{total_discovered} tasks completed{suffix}"
                     )
 
-        # Mark job as completed
-        final_status = "completed"
+        # Mark the job from what actually happened to its tasks. Reporting
+        # "completed" after a failed transcription hides the failure.
+        refreshed = get_jobs()
+        current = next((j for j in refreshed if j["id"] == job["id"]), None)
+        task_statuses = [
+            t.get("status") for t in (current or {}).get("tasks", [])
+        ] or []
+        failed = sum(1 for s in task_statuses if s == "failed")
+        if task_statuses and failed == len(task_statuses):
+            final_status = "failed"
+        elif failed:
+            final_status = "completed_with_errors"
+        else:
+            final_status = "completed"
         update_job(job["id"], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
+        if failed:
+            self.log(f"{failed} task(s) failed — see the errors above.")
 
     def process(self, job_or_source: Union[Dict[str, Any], str]) -> None:
         """Main processing entry point."""
@@ -2141,16 +2246,12 @@ def read_sources_from_file(filename):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Transcribe audio from various sources.",
-        usage="""whisper_subs.py <model> [source] [options]
-           whisper_subs.py -p [file.txt]
-           whisper_subs.py -l | --list
-           whisper_subs.py -c | --continue
-           whisper_subs.py --file/-d [file_or_directory]
-        """,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+    # The catalog is rendered into --help so the model list is discoverable
+    # without a second command. Built lazily; a runtime failure must not stop
+    # the parser from working.
+    import model_catalog
+
+    examples = """
 Examples:
   # Process a single video
   whisper_subs.py large https://youtu.be/DfU6llvIMcM
@@ -2172,7 +2273,28 @@ Examples:
 
   # List all jobs
   whisper_subs.py --list
-""",
+
+  # List every adapter and model, with availability
+  whisper_subs.py --model-list
+
+  # Compare models on one file and pick the best
+  whisper_subs.py --rate audio.mp3 -m small,medium,sherpa:parakeet-tdt-0.6b-v2
+
+  # Remove empty/stubbed subtitles and wrappers pointing nowhere
+  whisper_subs.py --verify --clean
+"""
+
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio from various sources.",
+        usage="""whisper_subs.py <model> [source] [options]
+           whisper_subs.py -p [file.txt]
+           whisper_subs.py -l | --list
+           whisper_subs.py -c | --continue
+           whisper_subs.py --file/-d [file_or_directory]
+           whisper_subs.py --model-list
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=examples + "\n" + model_catalog.build_help_epilog(),
     )
 
     # Model and source arguments
@@ -2213,6 +2335,46 @@ Examples:
     action_group = parser.add_argument_group("Actions")
     action_group.add_argument(
         "-l", "--list", action="store_true", help="List all jobs and exit."
+    )
+    parser.add_argument(
+        "--model-list",
+        action="store_true",
+        help="List every adapter and model with availability, then exit.",
+    )
+    parser.add_argument(
+        "--rate",
+        action="store_true",
+        help="Transcribe one file with each candidate model and ask which is best.",
+    )
+    parser.add_argument(
+        "--rate-models",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help="Comma-separated models to compare with --rate (default: a spread of local models).",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Check finished subtitles for missing/empty/corrupt files.",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="With --verify, delete empty/stubbed subtitles and wrappers pointing nowhere.",
+    )
+    parser.add_argument(
+        "--compare",
+        nargs="+",
+        metavar="SRT",
+        help="Compare subtitle files for hallucinations and mid-word splits.",
+    )
+    parser.add_argument(
+        "--choose",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --compare, keep file N and move the others aside as .2.srt, .3.srt.",
     )
     action_group.add_argument(
         "-c",
@@ -2424,6 +2586,56 @@ Examples:
 
     if args.list:
         list_jobs()
+        return
+
+    if args.model_list:
+        import model_catalog
+
+        groups = _get_model().get_context().list_available_adapters()
+        print(model_catalog.format_catalog(groups))
+        return
+
+    if args.compare:
+        import srt_compare
+
+        srt_compare.report(args.compare)
+        if args.choose is not None:
+            print()
+            srt_compare.choose(args.compare, args.choose)
+        return
+
+    if args.verify:
+        import verify_subtitles
+
+        clean = bool(args.clean)
+        if not clean:
+            print("=== DRY RUN (pass --clean to delete broken files) ===")
+        stats = verify_subtitles.verify_and_fix(
+            min_size=verify_subtitles.DEFAULT_MIN_SRT_SIZE,
+            rerun_file=verify_subtitles.DEFAULT_RERUN_FILE,
+            apply_changes=clean,
+            clean=clean,
+        )
+        print("\nSummary:")
+        print(f"  Checked: {stats['checked']}")
+        print(f"  Missing: {stats['missing']}")
+        print(f"  Corrupted: {stats['corrupted']}")
+        print(f"  Fixed: {stats['fixed']}")
+        print(f"  Removed: {stats.get('removed', 0)}")
+        print(f"  Rerun URLs: {len(stats['rerun_list'])}")
+        return
+
+    if args.rate:
+        import model_rater
+
+        candidates = args.rate_models or model_rater.default_candidates()
+        model_rater.rate_file(
+            audio_file=args.file_source or args.source,
+            models=candidates,
+            device="cuda" if args.gpu else args.device,
+            compute_type=args.compute,
+            cpu_threads=args.cpu_threads,
+        )
         return
 
     # Handle continue case first

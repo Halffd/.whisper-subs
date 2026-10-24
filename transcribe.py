@@ -20,6 +20,8 @@ import subprocess
 import os
 import json
 import threading
+import fcntl
+import signal
 import re
 import datetime
 import shutil
@@ -31,6 +33,66 @@ from helper_files import make_files, cleanup_unfinished
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 audiofile, modelname, langcode = "", "base", None
+
+# Set by SIGINT/SIGTERM handlers. The segment-writing loop checks it
+# between cues so a partial (but valid) .unfinished.srt is left on disk
+# for resume.
+_STOP_REQUESTED = False
+
+
+def _handle_stop(signum, frame):
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+
+
+# Identical consecutive cues at or above this count are treated as a whisper
+# hallucination run (e.g. a whole OP of "次回予告") and dropped from the file.
+_DUPLICATE_RUN_THRESHOLD = 5
+
+
+class _DuplicateRunGuard:
+    """Streaming guard against whisper's identical-cue hallucination runs.
+
+    feed() is called once per incoming segment and returns the action for
+    the cue:
+
+    - "write"    - new text: write it (and remember where it starts)
+    - "skip"     - identical to the current run: never written
+    - "truncate" - the run reached the threshold: the caller truncates the
+      file back to the run's first cue, removing every cue of the run;
+      the text is banned until different speech arrives, so a hallucinated
+      OP/ED mid-file does not cost the real dialogue after it
+
+    start_cue() must be called with the file offset the next written cue
+    will occupy (srt.tell() before writing).
+    """
+
+    def __init__(self, threshold: int = _DUPLICATE_RUN_THRESHOLD):
+        self.threshold = threshold
+        self.text = None
+        self.count = 0
+        self.start_offset = 0
+        self.banned = set()
+        self._pending_offset = 0
+
+    def start_cue(self, offset: int) -> None:
+        self._pending_offset = offset
+
+    def feed(self, text):
+        text = (text or "").strip()
+        if text and text == self.text:
+            self.count += 1
+            if self.count >= self.threshold and text not in self.banned:
+                self.banned.add(text)
+                return "truncate"
+            return "skip"
+        # Different text: the run ends. The ban is lifted so a later,
+        # unrelated repetition of the same line is judged on its own run.
+        self.text = text
+        self.count = 1
+        self.banned.clear()
+        self.start_offset = self._pending_offset
+        return "write"
 try:
     import torch.cuda as cuda
     import torch.backends.cudnn as cudnn
@@ -279,6 +341,14 @@ def verify_srt_file(
     if empty_blocks:
         warnings.append(f"{empty_blocks} empty-text block(s) skipped")
 
+    # --- absurd cue durations (merged hallucination runs, stuck decoder)
+    for i, seg in enumerate(segments, 1):
+        dur = seg["end"] - seg["start"]
+        if dur > 600:
+            problems.append(f"cue {i} spans {dur / 60:.0f} minutes")
+        elif dur > 300:
+            warnings.append(f"cue {i} spans {dur / 60:.1f} minutes")
+
     # --- hallucinations
     max_repeats = 0
     worst_segment = 0
@@ -402,6 +472,20 @@ def _transcribe_with_adapter(
         # consumes them as they arrive.
         os.makedirs(os.path.dirname(real_srt) or ".", exist_ok=True)
         srt = open(real_srt, "w", encoding="utf-8")
+        lock_path = real_srt + ".lock"
+        lock_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError):
+            lock_fd.close()
+            srt.close()
+            raise RuntimeError(
+                f"another process is transcribing {srt_file}"
+            )
+        old_sigint = signal.getsignal(signal.SIGINT)
+        old_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGINT, _handle_stop)
+        signal.signal(signal.SIGTERM, _handle_stop)
         try:
             srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write("TRANSCRIPTION METADATA\n")
@@ -455,6 +539,8 @@ def _transcribe_with_adapter(
             last_segment_end = 0.0
 
             for segment in segments:
+                if _STOP_REQUESTED:
+                    break
                 # The offset is applied here, not before the loop: a
                 # streaming adapter only produces segments while it runs.
                 if start_offset_seconds > 0:
@@ -496,8 +582,32 @@ def _transcribe_with_adapter(
                 if show_segments:
                     log_segment_line(write, start_time, segment.text)
         finally:
+            try:
+                signal.signal(signal.SIGINT, old_sigint)
+                signal.signal(signal.SIGTERM, old_sigterm)
+            except (ValueError, OSError):
+                pass
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except OSError:
+                pass
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
             srt.close()
 
+        if _STOP_REQUESTED:
+            write(
+                "transcription interrupted — keeping .unfinished.srt for resume"
+            )
+            try:
+                if os.path.islink(srt_file):
+                    os.remove(srt_file)
+            except OSError:
+                pass
+            return False
         if loop_detected:
             write(
                 f"Loop detected at {loop_timestamp:.1f}s, stopping. SRT saved up to loop point."
@@ -562,15 +672,12 @@ def _transcribe_with_adapter(
 
     except Exception as e:
         write(f"Error during adapter transcription: {e}")
-        if os.path.exists(real_srt):
-            try:
-                os.remove(real_srt)
-            except:
-                pass
+        # Keep .unfinished.srt on disk so the next run can resume;
+        # only drop the symlink so players never open a partial file.
         if os.path.islink(srt_file):
             try:
                 os.remove(srt_file)
-            except:
+            except OSError:
                 pass
         return False
 
@@ -1135,6 +1242,7 @@ def transcribe_audio(
         compression_fail_first_ts = 0.0
         compression_fail_max = 20
 
+        dup_guard = _DuplicateRunGuard()
         with open(temp_srt, "w", encoding="utf-8") as srt:
             srt.write(f"1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write(f"TRANSCRIPTION METADATA\n")
@@ -1182,12 +1290,32 @@ def transcribe_audio(
                 if is_garbage(segment):
                     continue
 
-                # Merge with previous if identical text
+                # Consecutive-duplicate guard: whisper echoing one line
+                # over music/silence (a whole OP of 「次回予告」) must not
+                # reach the file. Repeats are never written; once a run
+                # hits the threshold its cues are truncated out and the
+                # text is banned until different speech arrives, so real
+                # dialogue after the hallucinated section is kept.
+                text_stripped = segment.text.strip()
                 if (
                     segments_list
-                    and segment.text.strip() == segments_list[-1].text.strip()
+                    and text_stripped == segments_list[-1].text.strip()
                 ):
                     segments_list[-1].end = segment.end
+
+                dup_guard.start_cue(srt.tell())
+                guard_action = dup_guard.feed(text_stripped)
+                if guard_action == "truncate":
+                    try:
+                        srt.seek(dup_guard.start_offset)
+                        srt.truncate()
+                        write(
+                            f"Hallucination guard: dropped {dup_guard.count} "
+                            f"identical '{text_stripped[:30]}' cues"
+                        )
+                    except (OSError, ValueError) as trim_err:
+                        write(f"Warning: duplicate-run trim failed: {trim_err}")
+                if guard_action != "write":
                     continue
 
                 segments_list.append(segment)

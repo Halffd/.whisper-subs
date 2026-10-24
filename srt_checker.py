@@ -18,9 +18,12 @@ defaults to ~/Documents/Youtube-Subs.
 from __future__ import annotations
 
 import datetime
+import fcntl
 import json
 import os
+import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from contextlib import contextmanager
 
 
 def is_empty_srt(srt_path: str) -> bool:
@@ -34,6 +37,26 @@ def is_empty_srt(srt_path: str) -> bool:
 
     report = transcribe.verify_srt_file(srt_path, write=lambda m: None)
     return report["segments"] == 0
+
+
+def is_unusable_srt(srt_path: str) -> Optional[str]:
+    """Reason a finished SRT must not be marked complete, or None.
+
+    A file is unusable when it is empty, or when verify_srt_file reports a
+    blocking problem: a hallucination run (identical cues repeated), a
+    near-duplicate loop, an absurdly long cue, or a corrupt tail. Such a
+    file has content, so the empty check alone lets a hallucinated
+    transcription be marked complete and never retried.
+    """
+    if is_empty_srt(srt_path):
+        return "empty"
+    import transcribe  # lazy: pulls the model registry
+
+    report = transcribe.verify_srt_file(srt_path, write=lambda m: None)
+    if report.get("ok"):
+        return None
+    problems = report.get("problems") or []
+    return problems[0] if problems else "invalid"
 
 
 def remove_from_history(history_file: str, ids: List[str]) -> int:
@@ -57,8 +80,7 @@ def remove_from_history(history_file: str, ids: List[str]) -> int:
             else:
                 kept.append(line)
     if removed:
-        with open(history_file, "w", encoding="utf-8") as f:
-            f.writelines(kept)
+        _atomic_write_lines(history_file, kept)
     return removed
 
 
@@ -83,8 +105,7 @@ def remove_task_from_progress(jobs_file: str, job_id: Any, task_source: str) -> 
             job["tasks"] = remaining
             break
     if removed:
-        with open(jobs_file, "w", encoding="utf-8") as f:
-            json.dump(jobs, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(jobs_file, jobs)
     return removed
 
 
@@ -93,13 +114,15 @@ def add_to_empty_list(
     srt_path: str,
     source: Optional[str],
     model_name: Optional[str],
+    reason: Optional[str] = None,
 ) -> None:
-    """Append the empty SRT to the list file (one JSON record per line)."""
+    """Append the unusable SRT to the list file (one JSON record per line)."""
     os.makedirs(os.path.dirname(list_file) or ".", exist_ok=True)
     record = {
         "srt": srt_path,
         "source": source or "",
         "model": model_name or "",
+        "reason": reason or "empty",
         "date": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     with open(list_file, "a", encoding="utf-8") as f:
@@ -123,6 +146,71 @@ def read_empty_list(list_file: str) -> List[Dict[str, Any]]:
     return records
 
 
+
+def _atomic_write_lines(path: str, lines: list) -> None:
+    """Write lines to `path` atomically (temp file + os.replace)."""
+    dir_path = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=dir_path, prefix=".whispersubs-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(path: str, obj) -> None:
+    """Write JSON to `path` atomically (temp file + os.replace)."""
+    dir_path = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=dir_path, prefix=".whispersubs-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def _locked(path: str):
+    """Exclusive flock on a sibling .lock file for read-modify-write safety."""
+    lock_path = path + ".lock"
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fd.close()
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
+
+def _locked_load_json(path: str, default):
+    """Load JSON from `path` under an exclusive lock."""
+    if not os.path.exists(path):
+        return default
+    with _locked(path):
+        with open(path, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return default
+
+
 def check_empty_srt(
     srt_path: str,
     ids: List[str],
@@ -142,10 +230,14 @@ def check_empty_srt(
     the file was empty and got cleaned up — the caller should treat the
     task as failed, not completed.
     """
-    if not is_empty_srt(srt_path):
+    reason = is_unusable_srt(srt_path)
+    if reason is None:
         return False
 
-    write(f"Empty subtitles: {srt_path}")
+    if reason == "empty":
+        write(f"Empty subtitles: {srt_path}")
+    else:
+        write(f"Unusable subtitles ({reason}): {srt_path}")
     removed = remove_from_history(history_file, ids)
     if removed:
         entry = "entry" if removed == 1 else "entries"
@@ -154,7 +246,7 @@ def check_empty_srt(
         )
     if remove_task_from_progress(jobs_file, job_id, source):
         write("Removed task from the progress indicator")
-    add_to_empty_list(list_file, srt_path, source, model_name)
+    add_to_empty_list(list_file, srt_path, source, model_name, reason=reason)
     write(f"Added to empty list: {os.path.basename(list_file)}")
     return True
 
@@ -166,12 +258,14 @@ def scan_empty_srts(
     list_file: str,
     write: Callable = print,
 ) -> List[str]:
-    """Scan a directory tree for empty .srt files and clean them up.
+    """Scan a directory tree for unusable .srt files and clean them up.
 
-    In-progress symlinked files and .unfinished.srt artifacts are
-    skipped. The source for indicator cleanup is recovered from the
-    sibling .metadata.json when present. Returns the paths of all empty
-    SRTs found (they are also added to the list file).
+    Unusable means empty or blocked by a verify problem (hallucination
+    run, near-duplicate loop, absurd cue, corrupt tail). In-progress
+    symlinked files and .unfinished.srt artifacts are skipped. The source
+    for indicator cleanup is recovered from the sibling .metadata.json
+    when present. Returns the paths of all unusable SRTs found (they are
+    also added to the list file) so the next run re-transcribes them.
     """
     empty: List[str] = []
     for root, dirs, files in os.walk(directory):
@@ -182,7 +276,7 @@ def scan_empty_srts(
             srt_path = os.path.join(root, name)
             if os.path.islink(srt_path):
                 continue  # in-progress symlink
-            if not is_empty_srt(srt_path):
+            if is_unusable_srt(srt_path) is None:
                 continue
             empty.append(srt_path)
             source, ids = _source_from_metadata(srt_path)

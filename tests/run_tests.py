@@ -3495,6 +3495,145 @@ class TestRunner:
                 "Parakeet chunks audio and streams segments", "FAIL", str(e)
             )
 
+        # --- Duplicate-run guard (whisper music/silence hallucination) ---
+        try:
+            from transcribe import _DuplicateRunGuard
+
+            guard = _DuplicateRunGuard()
+            actions = []
+            offsets = {}
+            truncated_at = None
+            pos = 100  # simulated file offset; each written cue is 10 bytes
+            for text in ["op", "b1", "b1", "b1", "b1", "b1", "b1", "b1", "real"]:
+                guard.start_cue(pos)
+                action = guard.feed(text)
+                actions.append(action)
+                offsets.setdefault(text, guard.start_offset)
+                if action == "write":
+                    pos += 10
+                if action == "truncate":
+                    truncated_at = guard.start_offset
+            # first occurrence written, repeats skipped, run truncated once
+            assert actions == [
+                "write", "write", "skip", "skip", "skip",
+                "truncate", "skip", "skip", "write",
+            ], actions
+            # the truncate points at the run's FIRST cue offset
+            assert truncated_at == offsets["b1"], (truncated_at, offsets["b1"])
+            # during the run the truncated text stays banned (skipped,
+            # never re-truncated): actions[5:8] == truncate, skip, skip
+            # after different speech arrives the ban is lifted
+            assert "b1" not in guard.banned
+            # a real repeated interjection below the threshold is kept
+            guard2 = _DuplicateRunGuard()
+            seq = [guard2.feed(t) for t in ["a", "a", "a"]]
+            assert seq == ["write", "skip", "skip"], seq
+            assert all(a != "truncate" for a in seq)
+            self._record("Duplicate-run guard", "PASS")
+        except Exception as e:
+            self._record("Duplicate-run guard", "FAIL", str(e))
+
+        # --- verify: absurd cue durations are blocking problems ---
+        try:
+            import transcribe as transcribe_mod
+
+            with tempfile.TemporaryDirectory() as tmp:
+                long_srt = os.path.join(tmp, "long.srt")
+                with open(long_srt, "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:00,000 --> 00:20:00,000\n次回予告\n\n"
+                        "2\n00:20:00,000 --> 00:20:04,000\nhello\n\n"
+                    )
+                report = transcribe_mod.verify_srt_file(long_srt, write=lambda m: None)
+                assert not report["ok"], report
+                assert any("spans 20 minutes" in p for p in report["problems"]), report
+
+                warn_srt = os.path.join(tmp, "warn.srt")
+                with open(warn_srt, "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:00,000 --> 00:06:00,000\nlecture pause\n\n"
+                    )
+                report = transcribe_mod.verify_srt_file(warn_srt, write=lambda m: None)
+                assert report["ok"], report
+                assert any("spans 6.0 minutes" in w for w in report["warnings"]), report
+                self._record("Verify long-cue check", "PASS")
+        except Exception as e:
+            self._record("Verify long-cue check", "FAIL", str(e))
+
+        # --- check_empty_srt: hallucinated file is unusable, not complete ---
+        try:
+            # Reproduces the Yuyushiki S01E11 failure: an OP hallucinated as
+            # mechanical 30s cues of one repeated phrase.
+            def ts(total_seconds):
+                ms = int(round(total_seconds * 1000))
+                h, rem = divmod(ms, 3600_000)
+                m, rem = divmod(rem, 60_000)
+                sec, ms = divmod(rem, 1000)
+                return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+
+            blocks = []
+            for i in range(34):
+                start = i * 30
+                end = start + 29.98
+                text = "ご視聴ありがとうございました" if i == 0 else "次回予告"
+                blocks.append(f"{i + 1}\n{ts(start)} --> {ts(end)}\n{text}\n")
+            hallucinated = "\n".join(blocks)
+            for i in range(3):
+                hallucinated += (
+                    f"\n{35 + i}\n00:{22 + i}:00,000 --> 00:{22 + i}:30,000\n"
+                    "ご視聴ありがとうございました\n"
+                )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                v = lambda name: os.path.join(tmp, name)
+                with open(v("e11.srt"), "w", encoding="utf-8") as f:
+                    f.write(hallucinated)
+                reason = sc.is_unusable_srt(v("e11.srt"))
+                assert reason is not None, "hallucinated file passed as usable"
+                assert "hallucination" in reason or "consecutive" in reason, reason
+
+                history = v("history.txt")
+                with open(history, "w", encoding="utf-8") as f:
+                    f.write("ep11 large-v3\n")
+                with open(v("jobs.json"), "w", encoding="utf-8") as f:
+                    json.dump(
+                        [
+                            {
+                                "id": 7,
+                                "tasks": [
+                                    {
+                                        "source": "S01E11",
+                                        "status": "transcribing",
+                                    }
+                                ],
+                            }
+                        ],
+                        f,
+                    )
+                logs = []
+                assert sc.check_empty_srt(
+                    srt_path=v("e11.srt"),
+                    ids=["ep11", "S01E11"],
+                    source="S01E11",
+                    model_name="large-v3",
+                    history_file=history,
+                    jobs_file=v("jobs.json"),
+                    job_id=7,
+                    list_file=v("empty.txt"),
+                    write=logs.append,
+                )
+                with open(history, encoding="utf-8") as f:
+                    assert f.read() == "", "hallucinated file left in history"
+                records = sc.read_empty_list(v("empty.txt"))
+                assert records and records[0]["reason"] != "empty", records
+                # a clean file still passes
+                with open(v("good.srt"), "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:04,000\nhello\n\n")
+                assert sc.is_unusable_srt(v("good.srt")) is None
+                self._record("Hallucinated SRT unusable (batch retry)", "PASS")
+        except Exception as e:
+            self._record("Hallucinated SRT unusable (batch retry)", "FAIL", str(e))
+
         # --- All Python files compile ---
         try:
             import py_compile

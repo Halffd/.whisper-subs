@@ -59,6 +59,7 @@ All adapters implement the `TranscriptionAdapter` ABC and return `List[Segment]`
 | **HuggingFace** | `hf:` | `openai/whisper-large-v3`, `openai/whisper-large-v3-turbo`, `nvidia/parakeet-ctc-1.1b-asr`, `nvidia/canary-1b-flash` | Cloud | `HF_API_KEY` |
 | **NVIDIA Canary** | `canary:` | `canary-1b-flash`, `canary-1b` | Local | `nemo` pip package |
 | **NVIDIA Parakeet** | `parakeet:` | `parakeet-ctc-1.1b`, `parakeet-rnnt-1.1b`, `parakeet-ctc-0.6b`, `parakeet-rnnt-0.6b` | Local | `nemo` pip package |
+| **sherpa-onnx** | `sherpa:` | `parakeet-tdt-0.6b-v2`, `parakeet-tdt-0.6b-v3`, `nemotron-streaming-en-0.6b` | Local | `sherpa-onnx` pip package |
 
 ### Usage Examples
 
@@ -89,6 +90,12 @@ python whisper_subs.py vibevoice:vibevoice-1b audio.wav   # needs torch+transfor
 python whisper_subs.py whisperx:large-v3 audio.wav        # needs whisperx package
 python whisper_subs.py canary:canary-1b-flash audio.wav   # needs nemo package
 python whisper_subs.py parakeet:parakeet-ctc-1.1b audio.wav # needs nemo package
+
+# Parakeet TDT via ONNX Runtime — same encoder, far lighter install
+python whisper_subs.py sherpa:parakeet-tdt-0.6b-v3 audio.wav
+
+# Cache-aware streaming encoder, segment decoded at each endpoint
+python whisper_subs.py sherpa:nemotron-streaming-en-0.6b audio.wav --gpu
 ```
 
 ### Output files
@@ -126,6 +133,67 @@ python whisper_subs.py 2 --mpv --playlist https://youtu.be/VIDEOID
 # Queue a channel's finished subtitles, writing the playlist where you want
 python whisper_subs.py 2 --mpv --playlist-channel --playlist-file ~/queue.m3u
 ```
+
+### sherpa-onnx models
+
+`sherpa:` runs NVIDIA Parakeet and Nemotron encoders on ONNX Runtime instead of
+NeMo. Same weights, much smaller install (`pip install sherpa-onnx`, prebuilt
+wheels — no `nemo-toolkit`/`hydra`/`fiddle`, no gated HuggingFace login).
+
+Models are downloaded on first use into
+`$WHISPERSUBS_SHERPA_DIR`, else `~/.cache/whispersubs/sherpa-onnx`. Every
+artifact has a pinned SHA-256 and exact byte count; downloads are staged,
+verified, then promoted by an atomic rename, so an interrupted or corrupt
+fetch can never look like an installed model.
+
+The loaded recognizer stays resident for the whole run, so a 650 MB encoder is
+loaded once instead of per file:
+
+| Model | Languages | Path |
+|---|---|---|
+| `sherpa:parakeet-tdt-0.6b-v2` | en | offline, per-token timestamps |
+| `sherpa:parakeet-tdt-0.6b-v3` | 25 European | offline, per-token timestamps |
+| `sherpa:nemotron-streaming-en-0.6b` | en | streaming, cue per endpoint |
+
+`--gpu` selects the CUDA execution provider; thread count follows
+`--cpu-threads`.
+
+Long media is decoded in **overlapping windows**. sherpa's offline encoder
+cannot take unbounded input — past a few minutes ONNX Runtime aborts with
+`Attempting to broadcast an axis by a dimension other than 1`. Audio is
+therefore cut into 30 s windows with 2 s of shared context.
+
+A token is kept unless an *earlier* window already transcribed audio reaching
+its start time. Dropping each window's whole leading overlap instead would
+duplicate most words at a cut, and would silently lose any word the encoder
+failed to emit because it straddled the previous window's end.
+
+Audio is held in a packed `array('f')` rather than a list of Python floats: a
+13-minute video is ~12M samples, which costs ~392 MB as a list against 49 MB
+packed. The window slice is converted to a list only for the native call.
+
+Tune with:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `WHISPERSUBS_SHERPA_WINDOW` | `30` | seconds per decode window |
+| `WHISPERSUBS_SHERPA_OVERLAP` | `2` | seconds of shared context between windows |
+| `WHISPERSUBS_SHERPA_DIR` | `~/.cache/whispersubs/sherpa-onnx` | model cache |
+
+### Comparing finished subtitles
+
+`--compare` scores the subtitle files you already have — hallucination and
+corruption checks, mid-word split heuristic, zero-length and overlapping cues,
+leftover in-progress metadata blocks — and suggests a winner:
+
+```bash
+python whisper_subs.py --compare a.srt b.srt
+python whisper_subs.py --compare a.srt b.srt --choose 1   # keep b.srt
+```
+
+`--choose N` moves the losing files aside as `<name>.2.srt`, `<name>.3.srt`,
+the same numbering `--force-retry` uses, leaving the winner under its original
+name.
 
 ### Player and existing subtitles
 

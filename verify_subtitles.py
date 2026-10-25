@@ -195,25 +195,52 @@ def get_expected_srt_path(job: Dict, task: Dict) -> Optional[str]:
     return srt_path
 
 
-def is_valid_srt(srt_path: str, min_size: int = DEFAULT_MIN_SRT_SIZE) -> bool:
-    """Check if SRT file exists and has valid content."""
+def assess_srt(srt_path: str, min_size: int = DEFAULT_MIN_SRT_SIZE) -> Dict[str, Any]:
+    """The single verdict on whether a subtitle file is usable.
+
+    Both this module and srt_checker used to decide this independently: this
+    file with a size floor plus one regex hit, srt_checker by asking
+    transcribe.verify_srt_file. There is now one rule, in
+    transcribe.verify_srt_file, which actually parses the cues and separates
+    fatal problems from warnings. The size floor stays because a file below
+    it cannot hold a plausible cue even when the parser is lenient.
+
+    Returns {"ok", "reason", "kind", "segments"} where kind is "missing",
+    "empty", "stubbed", "corrupt", or "" when the file is usable.
+    """
+    import transcribe
+
     if not os.path.exists(srt_path):
-        return False
+        return {"ok": False, "reason": "missing", "kind": "missing", "segments": 0}
 
-    if os.path.getsize(srt_path) < min_size:
-        return False
+    size = os.path.getsize(srt_path)
+    if size < min_size:
+        # Separate the in-progress placeholder from genuinely empty output.
+        try:
+            with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(200)
+        except OSError:
+            head = ""
+        kind = "stubbed" if "Transcription in progress" in head else "empty"
+        return {
+            "ok": False,
+            "reason": f"{kind} ({size} bytes)",
+            "kind": kind,
+            "segments": 0,
+        }
 
-    try:
-        with open(srt_path, "r", encoding="utf-8") as f:
-            content = f.read()
+    report = transcribe.verify_srt_file(srt_path, write=lambda m: None)
+    if not report["ok"]:
+        problems = "; ".join(report["problems"][:3])
+        kind = "stubbed" if "placeholder" in problems else "corrupt"
+        return {"ok": False, "reason": problems, "kind": kind, "segments": 0}
 
-        # Check for at least one valid subtitle entry
-        if not SRT_ENTRY_PATTERN.search(content):
-            return False
+    return {"ok": True, "reason": "", "kind": "", "segments": report["segments"]}
 
-        return True
-    except (IOError, UnicodeDecodeError):
-        return False
+
+def is_valid_srt(srt_path: str, min_size: int = DEFAULT_MIN_SRT_SIZE) -> bool:
+    """Backwards-compatible wrapper around assess_srt()."""
+    return assess_srt(srt_path, min_size=min_size)["ok"]
 
 
 def scan_jobs() -> List[Dict]:
@@ -233,22 +260,41 @@ def save_jobs(jobs: List[Dict]) -> None:
 
 
 def verify_and_fix(
-    min_size: int = DEFAULT_MIN_SRT_SIZE, rerun_file: str = DEFAULT_RERUN_FILE
+    min_size: int = DEFAULT_MIN_SRT_SIZE,
+    rerun_file: str = DEFAULT_RERUN_FILE,
+    apply_changes: bool = True,
+    clean: bool = False,
 ) -> Dict[str, Any]:
-    """Main verification and fix routine."""
+    """Check finished subtitles, reset broken tasks, and optionally clean up.
+
+    apply_changes=False is a true dry run: jobs.json is left untouched.
+    clean=True additionally deletes empty/stubbed subtitles and wrapper
+    scripts pointing nowhere (see cleanup_outputs).
+    """
+    stats = {
+        "checked": 0,
+        "fixed": 0,
+        "missing": 0,
+        "corrupted": 0,
+        "removed": 0,
+        "rerun_list": [],
+    }
+
+    if not apply_changes:
+        print("=== DRY RUN: jobs.json will not be modified ===")
+
     jobs = scan_jobs()
     if not jobs:
         print("No jobs found.")
-        return {
-            "checked": 0,
-            "fixed": 0,
-            "missing": 0,
-            "corrupted": 0,
-            "rerun_list": [],
-        }
+        if clean:
+            import cleanup_outputs
 
-    rerun_urls = []
-    stats = {"checked": 0, "fixed": 0, "missing": 0, "corrupted": 0}
+            stats.update(
+                cleanup_outputs.clean_outputs(OUTPUT_DIR, apply=True, min_size=min_size)
+            )
+        return stats
+
+    rerun_urls: List[str] = []
 
     for job in jobs:
         if job.get("status") != "completed":
@@ -265,21 +311,24 @@ def verify_and_fix(
             if not srt_path:
                 continue
 
-            valid = is_valid_srt(srt_path, min_size=min_size)
+            verdict = assess_srt(srt_path, min_size=min_size)
 
-            if not valid:
-                reason = (
-                    "missing" if not os.path.exists(srt_path) else "corrupted/empty"
-                )
+            if not verdict["ok"]:
+                # Map onto the two reported buckets; empty/stubbed are counted
+                # as corrupted since both mean "needs redoing".
+                reason = "missing" if verdict["kind"] == "missing" else "corrupted"
                 stats[reason] += 1
                 stats["fixed"] += 1
 
-                print(f"[{reason.upper()}] {srt_path}")
+                print(f"[{verdict['kind'].upper()}] {srt_path}")
+                if verdict["reason"]:
+                    print(f"  {verdict['reason']}")
                 print(f"  Job: {job['id']}, Task: {task['source'][:60]}...")
 
-                # Update task status
-                task["status"] = "pending"
-                task["subtitle_issue"] = reason
+                # Update task status (skipped in a dry run)
+                if apply_changes:
+                    task["status"] = "pending"
+                    task["subtitle_issue"] = verdict["kind"]
 
                 # Add to rerun list
                 if task["source"].startswith(("http://", "https://")):
@@ -337,14 +386,16 @@ def verify_and_fix(
 
             sub_path = os.path.normpath(sub_path)
 
-            valid = is_valid_srt(sub_path, min_size=min_size)
+            wrapper_verdict = assess_srt(sub_path, min_size=min_size)
 
-            if not valid:
-                reason_key = "missing" if not os.path.exists(sub_path) else "corrupted"
+            if not wrapper_verdict["ok"]:
+                reason_key = (
+                    "missing" if wrapper_verdict["kind"] == "missing" else "corrupted"
+                )
                 wrapper_stats[reason_key] += 1
                 stats["fixed"] += 1
 
-                print(f"[{reason_key.upper()}] {sub_path}")
+                print(f"[{wrapper_verdict['kind'].upper()}] {sub_path}")
                 print(f"  Referenced by: {wrapper_path}")
 
                 # Try to find associated URL from HTML file
@@ -374,8 +425,30 @@ def verify_and_fix(
 
     # Save updated jobs
     if stats["fixed"] > 0:
-        save_jobs(jobs)
-        print(f"\nUpdated {stats['fixed']} task(s) to pending status.")
+        if apply_changes:
+            save_jobs(jobs)
+            print(f"\nUpdated {stats['fixed']} task(s) to pending status.")
+        else:
+            print(f"\nDry run: {stats['fixed']} task(s) would be reset to pending.")
+
+    # Remove files that serve no purpose
+    if clean:
+        import cleanup_outputs
+
+        print("\n=== Cleaning empty/stubbed subtitles and dangling wrappers ===")
+        outcome = cleanup_outputs.clean_outputs(
+            OUTPUT_DIR,
+            apply=True,
+            min_size=min_size,
+            write=lambda m: print(m),
+        )
+        stats["removed"] = outcome["removed"]
+        stats["cleaned"] = {
+            "empty_srts": outcome["empty_srts"],
+            "stubbed_srts": outcome["stubbed_srts"],
+            "orphan_wrappers": outcome["orphan_wrappers"],
+        }
+        print(f"Removed {outcome['removed']} file(s).")
 
     # Write rerun list
     if rerun_urls:
@@ -415,23 +488,35 @@ def main():
     parser.add_argument(
         "--fix", action="store_true", help="Actually fix issues (default: dry-run)"
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete empty/stubbed subtitles and wrapper scripts pointing nowhere.",
+    )
 
     args = parser.parse_args()
 
     # Use local variables instead of modifying globals
     min_size = args.min_size
     rerun_file = args.rerun_file
+    apply_changes = bool(args.fix) and not args.dry_run
 
-    if args.dry_run or not args.fix:
+    if not apply_changes:
         print("=== DRY RUN MODE (use --fix to apply changes) ===")
 
-    stats = verify_and_fix(min_size=min_size, rerun_file=rerun_file)
+    stats = verify_and_fix(
+        min_size=min_size,
+        rerun_file=rerun_file,
+        apply_changes=apply_changes,
+        clean=bool(args.clean),
+    )
 
     print(f"\nSummary:")
     print(f"  Checked: {stats['checked']}")
     print(f"  Missing: {stats['missing']}")
     print(f"  Corrupted: {stats['corrupted']}")
     print(f"  Fixed: {stats['fixed']}")
+    print(f"  Removed: {stats.get('removed', 0)}")
     print(f"  Rerun URLs: {len(stats['rerun_list'])}")
 
 

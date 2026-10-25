@@ -1,4 +1,5 @@
 """FasterWhisperAdapter - Local faster-whisper transcription (default backend)."""
+
 import os
 import sys
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -18,15 +19,20 @@ class FasterWhisperAdapter(TranscriptionAdapter):
     def display_name(self) -> str:
         return "faster-whisper (local)"
 
+    def install_hint(self) -> str:
+        return "pip install faster-whisper"
+
     def is_available(self) -> bool:
         try:
             import faster_whisper
+
             return True
         except ImportError:
             return False
 
     def get_model_names(self) -> List[str]:
         from model import MODEL_NAMES
+
         return list(MODEL_NAMES)
 
     def transcribe(
@@ -36,8 +42,8 @@ class FasterWhisperAdapter(TranscriptionAdapter):
         language: Optional[str] = None,
         write: Callable = print,
         temperature: float = 0.0,
-        device: str = 'cpu',
-        compute_type: str = 'int8',
+        device: str = "cpu",
+        compute_type: str = "int8",
         cpu_threads: Optional[int] = None,
         vad_filter: bool = False,
         vad_params: Optional[Dict[str, Any]] = None,
@@ -45,16 +51,17 @@ class FasterWhisperAdapter(TranscriptionAdapter):
     ) -> Tuple[List[Segment], Any]:
         import faster_whisper
 
-        if device == 'cuda':
+        if device == "cuda":
             try:
                 import torch
+
                 if not torch.cuda.is_available():
-                    device = 'cpu'
-                    compute_type = 'int8'
+                    device = "cpu"
+                    compute_type = "int8"
                     write("CUDA not available, falling back to CPU")
             except ImportError:
-                device = 'cpu'
-                compute_type = 'int8'
+                device = "cpu"
+                compute_type = "int8"
 
         whisper_model = faster_whisper.WhisperModel(
             model,
@@ -64,26 +71,32 @@ class FasterWhisperAdapter(TranscriptionAdapter):
             cpu_threads=cpu_threads if cpu_threads else os.cpu_count(),
         )
 
-        is_distil = 'distil' in model.lower()
+        is_distil = "distil" in model.lower()
+        # faster-whisper names the first parameter `audio`; passing
+        # `audio_file=` raises TypeError. Bare models never reach this code
+        # through the normal CLI (transcribe.py has its own local path), which
+        # is why the wrong name went unnoticed.
         transcribe_params: Dict[str, Any] = {
-            'audio_file': audio_file,
-            'language': language,
-            'vad_filter': vad_filter,
+            "audio": audio_file,
+            "language": language,
+            "vad_filter": vad_filter,
         }
 
         if is_distil:
-            transcribe_params.update({
-                'condition_on_previous_text': False,
-                'max_new_tokens': 128,
-                'beam_size': 5,
-            })
+            transcribe_params.update(
+                {
+                    "condition_on_previous_text": False,
+                    "max_new_tokens": 128,
+                    "beam_size": 5,
+                }
+            )
             write("Using distil-whisper optimized parameters")
 
         if vad_params:
-            transcribe_params['vad_parameters'] = vad_params
+            transcribe_params["vad_parameters"] = vad_params
 
         if temperature and temperature != 0.0:
-            transcribe_params['temperature'] = temperature
+            transcribe_params["temperature"] = temperature
 
         result_segments, info = whisper_model.transcribe(**transcribe_params)
 

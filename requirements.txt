@@ -20,6 +20,7 @@ tqdm
 scikit-learn
 # Adapter backends (install what you need)
 nemo_toolkit
+sherpa-onnx
 moonshine
 whisperx
 deepgram-sdk

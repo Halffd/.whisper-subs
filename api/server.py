@@ -548,8 +548,51 @@ def read_root():
     return {
         "message": "WhisperSubs API",
         "status": "running",
+        "pages": {
+            "guide": "/guide",
+            "status": "/status",
+            "library": "/library",
+            "stats": "/stats",
+        },
+        "docs": "/docs",
         **app_meta.get_build_info(),
     }
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_page():
+    """Human-readable server status: health, load and recent work."""
+    from api.pages import status_page as build
+
+    return HTMLResponse(build(app))
+
+
+@app.get("/library", response_class=HTMLResponse)
+def library_page():
+    """Human-readable subtitle library browser."""
+    from api.pages import library_page as build
+
+    return HTMLResponse(build())
+
+
+@app.get("/stats", response_class=HTMLResponse)
+def stats_page():
+    """Human-readable statistics across the whole library."""
+    from api.pages import stats_page as build
+
+    return HTMLResponse(build())
+
+
+@app.get("/guide", response_class=HTMLResponse)
+def api_guide():
+    """Human-readable reference page for every endpoint.
+
+    Generated from the running route table, so it lists exactly what this
+    build serves. Self-contained: no CDN, works offline.
+    """
+    from api.guide import build_guide_page
+
+    return HTMLResponse(build_guide_page(app))
 
 
 # Authentication Endpoints

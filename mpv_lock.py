@@ -98,8 +98,14 @@ def launch(
     socket_path: str = "/tmp/mpvsocket",
     playlist: Optional[str] = None,
     extra_args: Optional[Sequence[str]] = None,
+    log_file: Optional[str] = None,
 ) -> Optional[subprocess.Popen]:
     """Launch mpv once per media source.
+
+    When `log_file` is given the player's stdout and stderr are written
+    there instead of being discarded, so a player that fails to open its
+    media (a dead URL, a missing ytdl extractor) leaves evidence behind
+    instead of exiting silently.
 
     Returns the Popen handle, or None when the player was already open
     for this media or the launch failed.
@@ -113,6 +119,7 @@ def launch(
         media_source,
         "--pause",
         f"--input-ipc-server={socket_path}",
+        "--really-quiet",
     ]
     if srt_file:
         cmd.append(f"--sub-file={srt_file}")
@@ -122,8 +129,24 @@ def launch(
         cmd.extend(extra_args)
 
     try:
+        if log_file:
+            os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
+            # The handle has to stay open for the player's lifetime; it is
+            # closed by the watcher when mpv exits.
+            handle = open(log_file, "w", encoding="utf-8")
+            process = subprocess.Popen(
+                cmd,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+            )
+            process.log_handle = handle  # type: ignore[attr-defined]
+            return process
         return subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, ValueError):
         release(key)

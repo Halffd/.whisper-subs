@@ -442,6 +442,18 @@ class TranscriptionRequest(BaseModel):
     mpv_ipc: bool = Field(False, description="Enable MPV IPC subtitle reload")
     mpv_socket: Optional[str] = Field("/tmp/mpvsocket", description="MPV socket path")
 
+    # WhisperX-specific (whisperx:* models)
+    whisperx_vad: Optional[bool] = Field(None, description="WhisperX VAD pre-filter")
+    min_word_confidence: Optional[float] = Field(
+        None, ge=0.0, le=1.0, description="Drop aligned words below this score"
+    )
+    furigana: Optional[bool] = Field(
+        None, description="Annotate Japanese cues with furigana readings"
+    )
+    diarize: Optional[bool] = Field(
+        None, description="pyannote speaker labels (needs HF_TOKEN)"
+    )
+
 
 class DownloadRequest(BaseModel):
     """Request for a server-side yt-dlp video download (in-app playback)."""
@@ -771,6 +783,7 @@ async def start_transcription(
                 force=request.force,
                 ignore_subs=request.ignore_subs,
                 sub_lang=request.sub_lang,
+                language=request.language,
                 run_mpv=request.run_mpv,
                 force_retry=request.retry,
                 # VAD settings
@@ -787,6 +800,13 @@ async def start_transcription(
                 # MPV IPC
                 mpv_ipc=request.mpv_ipc,
                 mpv_socket=request.mpv_socket,
+                # WhisperX-specific (whisperx:* models)
+                whisperx_vad=True if request.whisperx_vad is None else request.whisperx_vad,
+                min_word_confidence=(
+                    0.4 if request.min_word_confidence is None
+                    else request.min_word_confidence
+                ),
+                furigana=bool(request.furigana),
             )
 
             # Register the subtitle paths as soon as the unfinished SRT
@@ -1174,6 +1194,67 @@ def cancel_task(task_id: str):
         task_status[task_id]["completed_at"] = datetime.now().isoformat()
 
     return {"message": f"Task {task_id} cancelled"}
+
+@app.get("/api/v1/subtitles")
+async def get_subtitles_by_url(
+    url: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Get subtitle content for a video URL.
+    
+    Returns SRT content if found, null otherwise.
+    Expected by the whisper-subs userscript.
+    """
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing url parameter")
+    
+    # Extract video ID from URL
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return {"subtitles": None, "message": "Could not extract video ID"}
+    
+    # Search for matching SRT file
+    srt_content = await asyncio.to_thread(_find_subtitle_by_video_id, video_id)
+    
+    if srt_content:
+        return {"subtitles": srt_content}
+    else:
+        return {"subtitles": None, "message": "No subtitles found"}
+
+def _extract_video_id(url: str) -> Optional[str]:
+    """Extract video ID from various video platform URLs."""
+    try:
+        parsed = urlparse(url)
+        if 'youtube.com' in parsed.netloc or 'youtu.be' in parsed.netloc:
+            if 'youtu.be' in parsed.netloc:
+                return parsed.path.lstrip('/')
+            else:
+                qs = parse_qs(parsed.query)
+                return qs.get('v', [''])[0]
+        # Add other platforms as needed
+        return parsed.path.strip('/').split('/')[-1]
+    except Exception:
+        return None
+
+def _find_subtitle_by_video_id(video_id: str) -> Optional[str]:
+    """Find SRT file content matching the video ID."""
+    if not os.path.exists(OUTPUT_DIR):
+        return None
+    
+    patterns = [
+        f"**/*{video_id}*.srt",
+        f"**/*{video_id}*.en.srt",
+        f"**/*{video_id}*.en-US.srt",
+    ]
+    
+    for pattern in patterns:
+        matches = list(Path(OUTPUT_DIR).rglob(pattern))
+        if matches:
+            # Return the most recently modified
+            latest = max(matches, key=lambda p: p.stat().st_mtime)
+            return latest.read_text(encoding='utf-8')
+    
+    return None
 
 
 @app.get("/subtitles/list")

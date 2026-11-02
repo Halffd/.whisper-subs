@@ -207,6 +207,7 @@ class WhisperSubs:
         force: bool = False,
         ignore_subs: bool = False,
         sub_lang: Optional[str] = None,
+        language: Optional[str] = None,
         run_mpv: bool = False,
         browser: str = "firefox",
         strict_language_tier: bool = False,
@@ -218,6 +219,9 @@ class WhisperSubs:
         max_speakers: int = 2,
         temperature: Optional[float] = None,
         merge_lines: bool = False,
+        whisperx_vad: bool = True,
+        min_word_confidence: float = 0.4,
+        furigana: bool = False,
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         start_force: bool = False,
@@ -238,6 +242,7 @@ class WhisperSubs:
         self.force_retry = force_retry
         self.ignore_subs = ignore_subs
         self.sub_lang = sub_lang
+        self.language = language
         self.run_mpv = run_mpv
         self.specified_browser = browser
         self.force_cookies = True if browser else False
@@ -274,6 +279,10 @@ class WhisperSubs:
         # Transcription settings
         self.temperature = temperature
         self.merge_lines = merge_lines
+        # WhisperX-specific settings (vad, word confidence, furigana)
+        self.whisperx_vad = whisperx_vad
+        self.min_word_confidence = min_word_confidence
+        self.furigana = furigana
         # Time range settings
         self.start_time = start_time
         self.end_time = end_time
@@ -1826,6 +1835,7 @@ class WhisperSubs:
                 file=audio_file,
                 model_name=self.model_name,
                 srt_file=srt_file,
+                language=getattr(self, "language", None),
                 device=self.device,
                 compute_type=self.compute_type,
                 force_device=False,
@@ -1845,6 +1855,11 @@ class WhisperSubs:
                 media_source=audio_file if is_local else task_source,
                 show_segments=getattr(self, "show", False),
                 source_info=source_info,
+                whisperx_vad=getattr(self, "whisperx_vad", True),
+                min_word_confidence=getattr(self, "min_word_confidence", 0.4),
+                furigana=getattr(self, "furigana", False),
+                diarize=getattr(self, "diarization", False),
+                hf_token=os.environ.get("HF_TOKEN"),
             ):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
@@ -2535,6 +2550,23 @@ Examples:
         type=float,
         default=0,
         help="Sampling temperature for transcription (default: 0).",
+    )
+    advanced_group.add_argument(
+        "--no-whisperx-vad",
+        action="store_false",
+        dest="whisperx_vad",
+        help="Disable WhisperX VAD pre-filtering (on by default for whisperx:* models).",
+    )
+    advanced_group.add_argument(
+        "--min-word-confidence",
+        type=float,
+        default=0.4,
+        help="WhisperX: drop aligned words below this score, 0.0-1.0 (default: 0.4).",
+    )
+    advanced_group.add_argument(
+        "--furigana",
+        action="store_true",
+        help="Annotate Japanese cues with furigana readings (whisperx:* models; requires pykakasi).",
     )
     advanced_group.add_argument(
         "--merge-lines", action="store_true", help="Merge adjacent subtitle lines."

@@ -449,12 +449,20 @@ def _transcribe_with_adapter(
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
     keep_unfinished: bool = False,
+    mpv_auto: bool = False,
+    mpv_socket: str = "/tmp/mpvsocket",
+    media_source: Optional[str] = None,
     **kwargs,
 ) -> bool:
     """Transcribe using the adapter system (for all prefixed models).
 
     Dispatches through TranscriptionContext to the correct adapter,
     then writes the result as an SRT file.
+
+    When mpv_auto is set the player opens here, right after the first
+    cue lands in the in-progress file — the in-process equivalent of
+    the subprocess flow's FIRST_SEGMENT_WRITTEN marker. mpv_lock keeps
+    one window per media source across passes and fallbacks.
 
     Returns:
         bool: True if successful, False otherwise
@@ -482,10 +490,17 @@ def _transcribe_with_adapter(
             raise RuntimeError(
                 f"another process is transcribing {srt_file}"
             )
-        old_sigint = signal.getsignal(signal.SIGINT)
-        old_sigterm = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGINT, _handle_stop)
-        signal.signal(signal.SIGTERM, _handle_stop)
+        old_sigint = old_sigterm = None
+        # signal handlers are main-thread-only; the API server runs this
+        # function on ThreadPoolExecutor workers, where signal.signal()
+        # raises ValueError. The _handle_stop path is a CLI-only concern.
+        try:
+            old_sigint = signal.getsignal(signal.SIGINT)
+            old_sigterm = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGINT, _handle_stop)
+            signal.signal(signal.SIGTERM, _handle_stop)
+        except ValueError:
+            pass
         try:
             srt.write("1\n00:00:00,000 --> 00:00:00,000\n")
             srt.write("TRANSCRIPTION METADATA\n")
@@ -537,6 +552,33 @@ def _transcribe_with_adapter(
             loop_timestamp = 0.0
             segment_count = 0
             last_segment_end = 0.0
+            mpv_launched = False
+
+            def launch_live_preview():
+                """Open the player once, after the first cue is on disk."""
+                if not media_source:
+                    return
+                import mpv_lock
+
+                try:
+                    # launch() claims the single-instance lock itself and
+                    # returns None when a window is already open for this
+                    # media source.
+                    process = mpv_lock.launch(
+                        media_source,
+                        srt_file=srt_file,
+                        socket_path=mpv_socket,
+                    )
+                except Exception as e:
+                    mpv_lock.release(media_source)
+                    write(f"Warning: Failed to launch mpv: {e}")
+                    return
+                if process is None:
+                    write(f"mpv already open for {media_source}, not reopening")
+                    return
+                write(f"Launched mpv for live preview: {media_source}")
+                # Reap the player so it is not a zombie while we transcribe.
+                threading.Thread(target=process.wait, daemon=True).start()
 
             for segment in segments:
                 if _STOP_REQUESTED:
@@ -579,6 +621,9 @@ def _transcribe_with_adapter(
                 # Flush per cue: a reader (player, api) has to see the
                 # file grow while the model is still running.
                 srt.flush()
+                if mpv_auto and not mpv_launched:
+                    mpv_launched = True
+                    launch_live_preview()
                 if show_segments:
                     log_segment_line(write, start_time, segment.text)
         finally:
@@ -985,6 +1030,9 @@ def transcribe_audio(
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
     keep_unfinished: bool = False,
+    mpv_auto: bool = False,
+    mpv_socket: str = "/tmp/mpvsocket",
+    media_source: Optional[str] = None,
     **kwargs,
 ) -> bool:
     """
@@ -1031,6 +1079,9 @@ def transcribe_audio(
                     on_srt_created=on_srt_created,
                     show_segments=show_segments,
                     source_info=source_info,
+                    mpv_auto=mpv_auto,
+                    mpv_socket=mpv_socket,
+                    media_source=media_source,
                     **kwargs,
                 )
 
@@ -1131,6 +1182,14 @@ def transcribe_audio(
                 show_segments=show_segments,
                 source_info=source_info,
                 keep_unfinished=keep_unfinished,
+                mpv_auto=mpv_auto,
+                mpv_socket=mpv_socket,
+                media_source=media_source,
+                whisperx_vad=kwargs.pop("whisperx_vad", True),
+                min_word_confidence=kwargs.pop("min_word_confidence", 0.4),
+                furigana=kwargs.pop("furigana", False),
+                diarize=kwargs.pop("diarize", False),
+                hf_token=kwargs.pop("hf_token", None),
             )
         except LoopDetectedError as e:
             write(
@@ -1558,7 +1617,7 @@ def process_create(
     model_name: str,
     srt_file: str = "none",
     segments_file: str = "segments.json",
-    language: str = "none",
+    language: Optional[str] = None,
     device: str = "cpu",
     compute_type: str = "int8",
     force_device: bool = False,
@@ -1582,8 +1641,15 @@ def process_create(
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
     keep_unfinished: bool = False,
+    whisperx_vad: bool = True,
+    min_word_confidence: float = 0.4,
+    furigana: bool = False,
+    diarize: bool = False,
+    hf_token: Optional[str] = None,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
+    if language == "none":
+        language = None
     if file is None:
         raise ValueError(
             "The 'file' argument cannot be None. Please provide a valid file path."
@@ -1614,6 +1680,14 @@ def process_create(
             on_srt_created=on_srt_created,
             show_segments=show_segments,
             source_info=source_info,
+            mpv_auto=mpv_auto,
+            mpv_socket=mpv_socket,
+            media_source=media_source,
+            whisperx_vad=whisperx_vad,
+            min_word_confidence=min_word_confidence,
+            furigana=furigana,
+            diarize=diarize,
+            hf_token=hf_token,
         )
 
     # Only switch to CPU if not forcing device
@@ -2115,6 +2189,9 @@ def _two_pass_transcribe_adapter(
     on_srt_created: Optional[Callable[[str, str], None]] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
+    mpv_auto: bool = False,
+    mpv_socket: str = "/tmp/mpvsocket",
+    media_source: Optional[str] = None,
     **kwargs,
 ) -> bool:
     """
@@ -2152,6 +2229,9 @@ def _two_pass_transcribe_adapter(
         on_srt_created=on_srt_created,
         show_segments=show_segments,
         source_info=source_info,
+        mpv_auto=mpv_auto,
+        mpv_socket=mpv_socket,
+        media_source=media_source,
         **kwargs,
     )
 
@@ -2223,6 +2303,9 @@ def _transcribe_single_pass_adapter(
     on_srt_created: Optional[Callable[[str, str], None]] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
+    mpv_auto: bool = False,
+    mpv_socket: str = "/tmp/mpvsocket",
+    media_source: Optional[str] = None,
     **kwargs,
 ) -> bool:
     """
@@ -2318,6 +2401,9 @@ def _transcribe_single_pass_adapter(
             on_srt_created=on_srt_created,
             show_segments=show_segments,
             source_info=source_info,
+            mpv_auto=mpv_auto,
+            mpv_socket=mpv_socket,
+            media_source=media_source,
             **kwargs,
         )
     finally:
@@ -2884,11 +2970,12 @@ try:
 
         if rep_count >= 8 or compression_fail_streak >= compression_fail_max:
             hallu_ts = segment.start if rep_count >= 8 else compression_fail_first_ts
-            print("Hallucination detected (repeats=%d, ratio=%s, streak=%d) at %.1fs" % (rep_count, seg_cr, compression_fail_streak, hallu_ts))
-            with open(loop_detect_file, "w") as lf:
-                lf.write(str(hallu_ts + resume_offset))
-            stop_event.set()
-            os._exit(42)
+            print(
+                "Skipping hallucinated segment (repeats=%d, ratio=%s, streak=%d) at %.1fs"
+                % (rep_count, seg_cr, compression_fail_streak, hallu_ts)
+            )
+            compression_fail_streak = 0
+            continue
 
         adjusted_segment = Segment(
             start=segment.start + resume_offset,

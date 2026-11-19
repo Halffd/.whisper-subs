@@ -144,6 +144,22 @@ class TestRunner:
         except Exception as e:
             self._record("Context.resolve() prefixed", "FAIL", str(e))
 
+        # --- Provider alias resolution ---
+        try:
+            import model as _model_mod
+
+            assert _model_mod.getName("whisper.cpp") == "whispercpp:base", (
+                _model_mod.getName("whisper.cpp")
+            )
+            assert _model_mod.getName("whispercpp") == "whispercpp:base"
+            assert _model_mod.getName("whisper.cpp:small") == "whispercpp:small"
+            # Exact model names still win over alias matching.
+            assert _model_mod.getName("base") == "base"
+            assert _model_mod.getName("whispercpp:small") == "whispercpp:small"
+            self._record("Provider alias resolution", "PASS", "whisper.cpp -> whispercpp:base")
+        except Exception as e:
+            self._record("Provider alias resolution", "FAIL", str(e))
+
         # --- is_api_model ---
         try:
             ctx = TranscriptionContext()
@@ -690,6 +706,28 @@ class TestRunner:
                     )
                 r = tr.verify_srt_file(v("num.srt"), write=lambda m: None)
                 assert r["ok"] and any("numbering" in w for w in r["warnings"]), r
+
+                # whisper.cpp label cues ([MUSIC], [BLANK_AUDIO]) are real
+                # cues, not hallucination loops: many of them plus a couple
+                # of spoken lines must still verify.
+                with open(v("labels.srt"), "w", encoding="utf-8") as f:
+                    f.write(
+                        "1\n00:00:00,000 --> 00:00:10,000\n[BLANK_AUDIO]\n\n"
+                        + "".join(
+                            f"{i + 2}\n00:00:{10 * i:02d},000 --> "
+                            f"00:00:{10 * i + 9:02d},000\n[MUSIC]\n\n"
+                            for i in range(1, 11)
+                        )
+                        + "13\n00:02:00,000 --> 00:02:05,000\nspoken line one\n\n"
+                        "14\n00:02:05,000 --> 00:02:10,000\nspoken line two\n\n"
+                    )
+                r = tr.verify_srt_file(v("labels.srt"), write=lambda m: None)
+                assert r["ok"], r
+
+                # The label helper must not swallow ordinary speech.
+                assert tr.is_non_speech_label("[MUSIC]")
+                assert tr.is_non_speech_label("[BLANK_AUDIO]")
+                assert not tr.is_non_speech_label("we sang the music together")
 
             self._record(
                 "Verification gate",
@@ -2363,15 +2401,19 @@ class TestRunner:
             assert "Models:" in model_catalog.build_help_epilog()
 
             # The CLI exposes the flag and the help epilog carries the catalog.
+            # build_parser() owns the argument definitions; main() delegates to
+            # it (both must keep the wiring, and main must keep the epilog).
             import inspect as _inspect
 
             import whisper_subs as _ws
 
-            src = _inspect.getsource(_ws.main)
-            assert '"--model-list"' in src, "--model-list not registered"
-            assert '"--rate"' in src, "--rate not registered"
-            assert '"--verify"' in src and '"--clean"' in src
-            assert "model_catalog.build_help_epilog()" in src
+            parser_src = _inspect.getsource(_ws.build_parser)
+            main_src = _inspect.getsource(_ws.main)
+            assert '"--model-list"' in parser_src, "--model-list not registered"
+            assert '"--rate"' in parser_src, "--rate not registered"
+            assert '"--verify"' in parser_src and '"--clean"' in parser_src
+            assert "model_catalog.build_help_epilog()" in parser_src
+            assert "build_parser()" in main_src, "main must use build_parser"
 
             self._record("Model catalog", "PASS", "--help catalog + --model-list")
         except Exception as e:
@@ -3070,6 +3112,230 @@ class TestRunner:
         except Exception as e:
             self._record("sherpa window boundaries", "FAIL", str(e))
 
+        # --- ffmpeg stream selection: -map pins the audio track ---
+        try:
+            import audio_io as _aio_t
+
+            # These shapes all occur in the wild: an ordinal ("the second
+            # audio track"), a container index written either way, and a
+            # request the caller left unset.
+            assert _aio_t._stream_map("x", None) == [], "no map must not be forced"
+            assert _aio_t._stream_map("x", "1") == ["-map", "0:1"], _aio_t._stream_map("x", "1")
+            assert _aio_t._stream_map("x", "a:1") == ["-map", "0:a:1"]
+            assert _aio_t._stream_map("x", "1:a") == ["-map", "0:a:1"]
+            # Non-numeric selectors are passed through so ffmpeg reports
+            # the real error rather than silently falling back to track 0.
+            assert _aio_t._stream_map("x", "0:v:0") == ["-map", "0:0:v:0"]
+
+            # Selectors differ: a bare number is a container index, "a:N" an
+            # audio ordinal. They are not interchangeable, and mixing them
+            # up is what transcribes the wrong language track.
+            assert _aio_t._stream_map("x", "a:0") == ["-map", "0:a:0"]
+
+            self._record(
+                "ffmpeg stream selection",
+                "PASS",
+                "-map pins ordinal and index forms, unset stays unpinned",
+            )
+        except Exception as e:
+            self._record("ffmpeg stream selection", "FAIL", str(e))
+
+        # --- Cut and extract write 16 kHz mono M4A ---
+        try:
+            import math as _mmath
+            import shutil as _aio_sh
+            import struct as _mstruct
+            import tempfile as _aio_tf
+            import wave as _mwave
+
+            import audio_io as _aio_c
+
+            tmp = _aio_tf.mkdtemp()
+            try:
+                # Two audio tracks, mimic of the "JP dub + EN original" case.
+                wavs = []
+                for name, freq in (("a.wav", 300), ("b.wav", 900)):
+                    path = os.path.join(tmp, name)
+                    rate = 16000
+                    with _mwave.open(path, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(rate)
+                        wf.writeframes(
+                            b"".join(
+                                _mstruct.pack(
+                                    "<h",
+                                    int(9000 * _mmath.sin(2 * _mmath.pi * freq * i / rate)),
+                                )
+                                for i in range(rate * 10)
+                            )
+                        )
+                    wavs.append(path)
+
+                media = os.path.join(tmp, "multi.mkv")
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-v", "error",
+                        "-i", wavs[0], "-i", wavs[1],
+                        "-map", "0:a", "-map", "1:a", "-c", "copy", media,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+
+                streams = _aio_c.ffprobe_audio_streams(media)
+                assert len(streams) == 2, f"expected 2 tracks, got {streams}"
+
+                out_m4a = os.path.join(tmp, "cut.m4a")
+                ok = _aio_c.cut_audio(media, out_m4a, "1", "3", "1")
+                assert ok, "cut failed"
+                dur = _aio_c.probe_duration(out_m4a)
+                assert dur is not None and abs(dur - 2.0) < 0.5, f"duration {dur}"
+            finally:
+                _aio_sh.rmtree(tmp, ignore_errors=True)
+
+            self._record(
+                "ffmpeg cut writes playable mono m4a",
+                "PASS",
+                "selects the requested track, duration is right",
+            )
+        except Exception as e:
+            self._record("ffmpeg cut writes playable mono m4a", "FAIL", str(e))
+
+        # --- A 2-hour file survives the windowed decode ---
+        try:
+            from adapters.sherpa_adapter import SherpaAdapter as _Sherpa2h
+
+            HOUR = 3600
+            TWO_HOURS = 2 * HOUR
+
+            class _TwoHourStream:
+                def __init__(self, owner, rate, seconds):
+                    self.owner = owner
+                    self.rate = rate
+                    self.seconds = seconds
+                    # 5 tokens per second of audio.
+                    self._tokens = [f"t{i}" for i in range(int(seconds * 5))]
+
+                def accept_waveform(self, rate, samples):
+                    pass
+
+                @property
+                def tokens(self):
+                    return self._tokens
+
+                @property
+                def timestamps(self):
+                    return [i * 0.2 for i in range(len(self._tokens))]
+
+                @property
+                def result(self):
+                    o = self
+                    class _R:
+                        tokens = o._tokens
+                        timestamps = [i * 0.2 for i in range(len(o._tokens))]
+                        text = " ".join(o._tokens)
+                    return _R()
+
+            class _TwoHourRec:
+                def __init__(self, rate, window_seconds):
+                    self.streams = []
+                    self.rate = rate
+                    self.window_seconds = window_seconds
+                    self.calls = 0
+
+                def create_stream(self):
+                    s = _TwoHourStream(self, self.rate, self.window_seconds)
+                    self.streams.append(s)
+                    return s
+
+                def decode_stream(self, stream):
+                    self.calls += 1
+
+            adapter = _Sherpa2h.__new__(_Sherpa2h)
+            logs = []
+            rec = _TwoHourRec(16000, 30.0)  # one window per call
+            segs = adapter._decode_offline(
+                rec, [0.0] * (16000 * TWO_HOURS), 16000, lambda m: logs.append(m)
+            )
+            # The whole file was covered and the last cue ends near the end.
+            assert segs[-1].end > TWO_HOURS - 5, f"stopped at {segs[-1].end}"
+            # More than one window: long audio is split, not fed whole.
+            assert _TwoHourRec(16000, 30.0).calls == 0, "unused"
+            assert rec.calls > 200, f"windows not split: {rec.calls}"
+            assert any("windows" in m for m in logs), "no window log"
+
+            self._record(
+                "2-hour file decode",
+                "PASS",
+                f"{len(segs)} cues, {segs[-1].end:.0f}s of {TWO_HOURS}s",
+            )
+        except Exception as e:
+            self._record("2-hour file decode", "FAIL", str(e))
+
+        # --- Foreign-language lead-in does not poison later windows ---
+        try:
+            from adapters.sherpa_adapter import SherpaAdapter as _SherpaLead
+
+            class _LeadStream:
+                def __init__(self, owner):
+                    self.owner = owner
+
+                def accept_waveform(self, rate, samples):
+                    pass
+
+                @property
+                def _first(self):
+                    return self.owner.streams[0] is self
+
+                @property
+                def tokens(self):
+                    if self._first:
+                        return ["ga", "rba", "ge"]
+                    return ["cle", "an"]
+                @property
+                def timestamps(self):
+                    return [0.1, 0.3, 0.6] if self._first else [0.1, 0.5]
+                @property
+                def result(self):
+                    o = self
+                    class _R:
+                        tokens = o.tokens
+                        timestamps = o.timestamps
+                        text = "".join(o.tokens)
+                    return _R()
+
+            class _LeadRec:
+                def __init__(self):
+                    self.streams = []
+
+                def create_stream(self):
+                    s = _LeadStream(self)
+                    self.streams.append(s)
+                    return s
+
+                def decode_stream(self, stream):
+                    pass
+
+            adapter = _SherpaLead.__new__(_SherpaLead)
+            segs = adapter._decode_offline(
+                _LeadRec(), [0.0] * (16000 * 65), 16000, lambda m: None
+            )
+            texts = [s.text for s in segs]
+            # The garbage lead-in survives as the first cue (nothing is
+            # dropped silently), and later windows decode normally.
+            assert "garbage" in texts[0], texts
+            assert any("clean" in t for t in texts[1:]), texts
+            assert len(texts) == 3, f"lost windows: {texts}"
+
+            self._record(
+                "Foreign lead-in does not break decode",
+                "PASS",
+                "first window kept as a cue, later windows unaffected",
+            )
+        except Exception as e:
+            self._record("Foreign lead-in does not break decode", "FAIL", str(e))
+
         # --- Grouped cues must never end mid-word ---
         try:
             from adapters.sherpa_adapter import _group_tokens
@@ -3347,6 +3613,96 @@ class TestRunner:
         except Exception as e:
             self._record("API pages", "FAIL", str(e))
 
+        # --- API: /connect survives without the optional qrcode package ---
+        try:
+            import asyncio as _aio12
+            import sys as _sys12
+
+            from api.server import connect_page as _connect_page
+
+            saved_qr = _sys12.modules.get("qrcode", "ABSENT")
+            _sys12.modules["qrcode"] = None  # force ImportError inside the route
+            try:
+                resp = _aio12.run(_connect_page())
+            finally:
+                if saved_qr == "ABSENT":
+                    _sys12.modules.pop("qrcode", None)
+                else:
+                    _sys12.modules["qrcode"] = saved_qr
+
+            body = resp.body.decode("utf-8")
+            assert resp.status_code == 200, resp.status_code
+            assert "<!DOCTYPE html>" in body
+            # The URL must still be shown so the app can be paired by hand.
+            assert "class=\"url\"" in body, "connect page lost the manual URL"
+            assert "QR unavailable" in body, "expected the no-qrcode fallback"
+            self._record(
+                "API /connect without qrcode",
+                "PASS",
+                "page renders, manual URL shown",
+            )
+        except Exception as e:
+            self._record("API /connect without qrcode", "FAIL", str(e))
+
+        # --- API: video-URL -> subtitle lookup ---
+        try:
+            import shutil as _sh_api
+            import tempfile as _tf_api
+
+            import api.server as _srv_api
+
+            cases = {
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ": "dQw4w9WgXcQ",
+                "https://youtu.be/dQw4w9WgXcQ": "dQw4w9WgXcQ",
+                "https://www.youtube.com/shorts/abc123XYZ_-": "abc123XYZ_-",
+                "https://www.youtube.com/live/lIvE1234567": "lIvE1234567",
+                "https://www.youtube.com/embed/eMbEd12345": "eMbEd12345",
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s": "dQw4w9WgXcQ",
+            }
+            for url, want in cases.items():
+                got = _srv_api._extract_video_id(url)
+                assert got == want, f"{url} -> {got!r}, want {want!r}"
+
+            tmp = _tf_api.mkdtemp()
+            saved_dir = _srv_api.OUTPUT_DIR
+            saved_cache = dict(_srv_api._sub_index_cache)
+            try:
+                # whisper-subs names files by title; the URL lives in the
+                # sibling .htm helper.
+                chan = os.path.join(tmp, "Chan")
+                os.makedirs(chan)
+                base = os.path.join(chan, "2024-01-01_00-00_Some Title.large-v3")
+                with open(base + ".srt", "w", encoding="utf-8") as fh:
+                    fh.write("1\n00:00:00,000 --> 00:00:01,000\nhello\n")
+                with open(base + ".htm", "w", encoding="utf-8") as fh:
+                    fh.write(
+                        "<html><head><meta http-equiv=\"refresh\" "
+                        "content=\"0; URL='https://www.youtube.com/watch?v=dQw4w9WgXcQ'\" />"
+                        "</head></html>"
+                    )
+
+                _srv_api.OUTPUT_DIR = tmp
+                _srv_api._sub_index_cache["ts"] = 0.0
+                _srv_api._sub_index_cache["map"] = {}
+
+                found = _srv_api._find_subtitle_by_video_id("dQw4w9WgXcQ")
+                assert found and "hello" in found, f"lookup failed: {found!r}"
+                assert _srv_api._find_subtitle_by_video_id("zzzzzzzzzzz") is None
+                # Traversal-shaped input must not escape OUTPUT_DIR.
+                assert _srv_api._find_subtitle_by_video_id("../../etc/passwd") is None
+            finally:
+                _srv_api.OUTPUT_DIR = saved_dir
+                _srv_api._sub_index_cache.update(saved_cache)
+                _sh_api.rmtree(tmp, ignore_errors=True)
+
+            self._record(
+                "API subtitle lookup",
+                "PASS",
+                "URL shapes + helper-file index + traversal blocked",
+            )
+        except Exception as e:
+            self._record("API subtitle lookup", "FAIL", str(e))
+
         # --- Streaming adapter: the unfinished file grows while running ---
         try:
             import textwrap
@@ -3429,6 +3785,550 @@ class TestRunner:
             )
         finally:
             model_mod._context = saved_context
+
+        # --- --mpv: the adapter flow opens the player on the first cue ---
+        try:
+            import shutil as _sh_mpv
+            import wave as _wave_mpv
+
+            import model as _model_mpv
+            import mpv_lock as _mpv_lock_mod
+            import transcribe as _transcribe_mpv
+            from model import Segment, TranscriptionAdapter, register_adapter
+
+            launches = []
+            state = {"srt_file": None}
+
+            def _mpv_read(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        return handle.read()
+                except OSError:
+                    return ""
+
+            @register_adapter
+            class _LivePreviewAdapter(TranscriptionAdapter):
+                """Yields cues one at a time; slow enough to observe."""
+
+                @property
+                def prefix(self):
+                    return "livetest"
+
+                @property
+                def display_name(self):
+                    return "Live Preview Test"
+
+                def is_available(self):
+                    return True
+
+                def get_model_names(self):
+                    return ["m1"]
+
+                def transcribe(self, audio_file, model, language=None,
+                              write=print, temperature=0.0, **kwargs):
+                    for i in range(2):
+                        if i > 0:
+                            time.sleep(0.1)
+                        yield Segment(start=float(i), end=float(i) + 1.0,
+                                      text=f"cue {i}")
+
+            class _FakePopen:
+                def wait(self):
+                    return 0
+
+            def _fake_launch(media_source, srt_file=None, socket_path=None,
+                             playlist=None, extra_args=None, log_file=None):
+                # mpv_lock.launch() itself claims the single-instance
+                # lock; the replacement keeps that contract so the
+                # one-window-per-media guarantee is exercised too.
+                if not _mpv_lock_mod.claim(media_source):
+                    return None
+                unfinished = state["srt_file"] + ".unfinished"
+                launches.append(
+                    {
+                        "media_source": media_source,
+                        "srt_file": srt_file,
+                        "socket_path": socket_path,
+                        "content_at_launch": _mpv_read(unfinished),
+                    }
+                )
+                return _FakePopen()
+
+            saved_ctx = _model_mpv._context
+            _model_mpv._context = None
+            saved_launch = _mpv_lock_mod.launch
+            _mpv_lock_mod.launch = _fake_launch
+            lockdir = tempfile.mkdtemp()
+            real_tmpdir = tempfile.tempdir
+            tempfile.tempdir = lockdir
+            try:
+                media = "https://youtu.be/mpvadaptertest"
+                with tempfile.TemporaryDirectory() as tmp:
+                    audio = os.path.join(tmp, "a.wav")
+                    with _wave_mpv.open(audio, "wb") as w:
+                        w.setnchannels(1)
+                        w.setsampwidth(2)
+                        w.setframerate(16000)
+                        w.writeframes(b"\x00\x00" * (16000 * 5))
+
+                    # Single-pass: one launch, after the first cue is on
+                    # disk, pointed at the in-progress subtitle.
+                    srt_file = os.path.join(tmp, "clip.srt")
+                    state["srt_file"] = srt_file
+                    launches.clear()
+                    ok = _transcribe_mpv.process_create(
+                        file=audio,
+                        model_name="livetest:m1",
+                        srt_file=srt_file,
+                        write=lambda m: None,
+                        mpv_auto=True,
+                        mpv_socket="/tmp/mpvtestsock",
+                        media_source=media,
+                    )
+                    assert ok, "adapter transcription reported failure"
+                    assert len(launches) == 1, f"launches: {launches}"
+                    assert launches[0]["srt_file"] == srt_file
+                    assert launches[0]["socket_path"] == "/tmp/mpvtestsock"
+                    # The preview starts with a visible cue, and the second
+                    # cue is not there yet — launch happens mid-stream.
+                    assert "cue 0" in launches[0]["content_at_launch"]
+                    assert "cue 1" not in launches[0]["content_at_launch"]
+                    assert "cue 1" in open(srt_file, encoding="utf-8").read()
+
+                    # Two-pass (--start without --start-force): the window
+                    # opens once for the first pass; the second pass writes
+                    # a temporary file and must not open another.
+                    _mpv_lock_mod._claims.clear()
+                    srt2 = os.path.join(tmp, "clip2.srt")
+                    state["srt_file"] = srt2
+                    launches.clear()
+                    ok = _transcribe_mpv.process_create(
+                        file=audio,
+                        model_name="livetest:m1",
+                        srt_file=srt2,
+                        write=lambda m: None,
+                        start_time="0:01",
+                        start_force=False,
+                        mpv_auto=True,
+                        mpv_socket="/tmp/mpvtestsock",
+                        media_source=media,
+                    )
+                    assert ok, "two-pass adapter transcription reported failure"
+                    assert len(launches) == 1, f"launches: {launches}"
+                    merged = open(srt2, encoding="utf-8").read()
+                    assert "cue 0" in merged and "cue 1" in merged, merged[:200]
+
+                self._record(
+                    "--mpv adapter flow",
+                    "PASS",
+                    "player opens once on the first cue, single- and two-pass",
+                )
+            finally:
+                tempfile.tempdir = real_tmpdir
+                _mpv_lock_mod.launch = saved_launch
+                _mpv_lock_mod._claims.clear()
+                _model_mpv._context = saved_ctx
+                _sh_mpv.rmtree(lockdir, ignore_errors=True)
+        except Exception as e:
+            self._record("--mpv adapter flow", "FAIL", str(e))
+
+        # --- WhisperX pipeline: VAD, confidence filter, furigana, speakers ---
+        try:
+            import types as _types
+
+            import numpy as _np
+
+            import model as _model_wx
+            from adapters import whisperx_adapter as _wx_adapter_mod
+            from adapters.whisperx_adapter import WhisperXAdapter as _WXCls
+            from model import Segment as _Seg
+
+            # --- fake whisperx module: full pipeline without weights ---
+            fake = _types.ModuleType("whisperx")
+
+            fake.load_model_calls = []
+
+            def _load_model(model_name, device, compute_type=None, **kw):
+                fake.load_model_calls.append((model_name, device, compute_type, kw))
+                # VAD runs inside the pipeline (vad_method wiring); the fake
+                # drops the filler segment the same way the real VAD would.
+                inner_segments = [
+                    {
+                        "start": 0.0, "end": 2.0,
+                        "text": "今日はいい天気",
+                    },
+                ] if kw.get("vad_method") == "silero" else [
+                    {
+                        "start": 0.0, "end": 2.0,
+                        "text": "今日はいい天気",
+                    },
+                    {
+                        "start": 3.0, "end": 5.0,
+                        "text": "ご視聴ありがとうございました",
+                    },
+                ]
+                class _ASR:
+                    def transcribe(self, audio, batch_size=16, language=None):
+                        return {
+                            "language": "ja",
+                            "segments": [
+                                dict(s) for s in inner_segments
+                            ],
+                        }
+                return _ASR()
+
+            fake.load_model = _load_model
+            fake.load_audio = lambda path: _np.zeros(16000 * 5, dtype=_np.float32)
+
+            def _load_align_model(language_code, device):
+                return object(), {"language": language_code}
+
+            def _align(segments, model, metadata, audio, device, **kw):
+                # Per-character words with scores; filler words scored low.
+                out = []
+                for i, seg in enumerate(segments):
+                    words = []
+                    if "天気" in seg.get("text", ""):
+                        chars = [
+                            ("今", 0.0, 0.4, 0.95), ("日", 0.4, 0.8, 0.9),
+                            ("は", 0.8, 1.0, 0.88), ("い", 1.0, 1.2, 0.35),
+                            ("い", 1.2, 1.4, 0.3), ("天", 1.4, 1.8, 0.91),
+                            ("気", 1.8, 2.0, 0.89),
+                        ]
+                    else:
+                        chars = [
+                            ("ご", 3.0, 3.2, 0.2), ("視", 3.2, 3.4, 0.15),
+                            ("聴", 3.4, 3.6, 0.9),
+                        ]
+                    for w, s, e, sc in chars:
+                        words.append({"word": w, "start": s, "end": e, "score": sc})
+                    out.append({**seg, "words": words})
+                return {"segments": out}
+
+            fake.align = _align
+            fake.load_align_model = _load_align_model
+
+            # whisperx >= 3.3.4: DiarizationPipeline lives in whisperx.diarize
+            # and takes token= (not use_auth_token=).
+            diarize_mod = _types.ModuleType("whisperx.diarize")
+            diarize_calls = []
+            class _FakeDiarizationPipeline:
+                def __init__(self, model_name=None, token=None, device="cpu", cache_dir=None):
+                    diarize_calls.append({
+                        "token": token,
+                        "device": device,
+                        "num_speakers": None,
+                        "min_speakers": None,
+                        "max_speakers": None,
+                    })
+                def __call__(self, audio, num_speakers=None, min_speakers=None,
+                             max_speakers=None, **kw):
+                    diarize_calls[-1].update(
+                        num_speakers=num_speakers,
+                        min_speakers=min_speakers,
+                        max_speakers=max_speakers,
+                    )
+                    return [{"speaker": "SPK_1", "start": 0.0, "end": 5.0}]
+            diarize_mod.DiarizationPipeline = _FakeDiarizationPipeline
+            fake.diarize = diarize_mod
+            fake.DiarizationPipeline = diarize_mod.DiarizationPipeline  # legacy
+            def _assign_word_speakers(diar, result):
+                # Realistic WhisperX output: speaker is labelled per *word*,
+                # so a segment spanning a hand-over yields two speakers.
+                # Here SPK_1 speaks 今日は and SPK_2 takes over for 天気.
+                out = []
+                for seg in result["segments"]:
+                    words = []
+                    for w in seg.get("words", []):
+                        spk = "SPK_2" if w["word"] in ("天", "気") else "SPK_1"
+                        words.append({**w, "speaker": spk})
+                    seg_speakers = {w["speaker"] for w in words}
+                    out.append({
+                        **seg,
+                        "words": words,
+                        # Segment label = the dominant (first) speaker, as
+                        # the upstream helper does.
+                        "speaker": words[0]["speaker"] if words else None,
+                        "speaker_count": len(seg_speakers),
+                    })
+                return {**result, "segments": out}
+
+            fake.assign_word_speakers = _assign_word_speakers
+            fake._diarize_calls = diarize_calls
+
+            saved_wx = sys.modules.get("whisperx")
+            sys.modules["whisperx"] = fake
+
+            # torch stub: the adapter only calls from_numpy().unsqueeze(0)
+            # and passes the result into the fake VAD dict.
+            saved_torch = sys.modules.get("torch")
+            fake_torch = _types.ModuleType("torch")
+
+            class _FakeTensor:
+                def __init__(self, arr):
+                    self._arr = arr
+
+                def unsqueeze(self, dim):
+                    return _FakeTensor(self._arr)
+
+            fake_torch.from_numpy = lambda arr: _FakeTensor(arr)
+            fake_torch.cuda = _types.SimpleNamespace(is_available=lambda: False)
+            sys.modules["torch"] = fake_torch
+
+            saved_ctx = _model_wx._context
+            _model_wx._context = None
+            try:
+                adapter = _WXCls()
+                segments, info = adapter.transcribe(
+                    audio_file="/nonexistent.wav",
+                    model="large-v3",
+                    language="ja",
+                    write=lambda m: None,
+                    device="cpu",
+                    vad=True,
+                    min_word_confidence=0.4,
+                    diarize=True,
+                    hf_token="test-token",
+                    num_speakers=2,
+                    min_speakers=1,
+                    max_speakers=4,
+                    furigana=True,
+                )
+
+                # VAD (inside the pipeline) dropped the filler segment.
+                # The surviving segment spans a speaker hand-over (SPK_1
+                # says 今日は, SPK_2 takes 天気) and contains low-confidence
+                # filler (い 0.35, い 0.3) — so it must split into one cue
+                # per speaker, with the filler dropped.
+                texts_dbg = [s.text for s in segments]
+                assert len(segments) == 2, f"expected 2 cues, got {len(segments)}: {texts_dbg}"
+                s0, s1 = segments
+
+                # vad_method must have been passed to load_model: VAD is
+                # configured at model load, not as a separate call.
+                assert fake.load_model_calls, "load_model never called"
+                called_model, called_device, called_ct, called_kw = fake.load_model_calls[0]
+                assert called_model == "large-v3"
+                assert called_device == "cpu"
+                assert called_ct == "int8"
+                assert called_kw.get("vad_method") == "silero", called_kw
+
+                # DiarizationPipeline via whisperx.diarize with token=,
+                # and speaker bounds forwarded to the pipeline call.
+                assert fake._diarize_calls, "diarization never invoked"
+                assert fake._diarize_calls[0]["token"] == "test-token"
+                assert fake._diarize_calls[0]["device"] == "cpu"
+                assert fake._diarize_calls[0]["num_speakers"] == 2, fake._diarize_calls[0]
+                assert fake._diarize_calls[0]["min_speakers"] == 1, fake._diarize_calls[0]
+                assert fake._diarize_calls[0]["max_speakers"] == 4, fake._diarize_calls[0]
+
+                # Cue 1: SPK_1 turn, furigana, low-confidence い dropped.
+                assert s0.text == "[SPK_1] 今日（きょう）は", s0.text
+                assert s0.speaker == "SPK_1", s0.speaker
+                assert s0.start == 0.0 and s0.end == 1.0, (s0.start, s0.end)
+
+                # Cue 2: SPK_2 turn — the hand-over produced its own cue.
+                assert s1.text == "[SPK_2] 天気（てんき）", s1.text
+                assert s1.speaker == "SPK_2", s1.speaker
+                assert s1.start == 1.4 and s1.end == 2.0, (s1.start, s1.end)
+
+                # Language tag carried through.
+                assert s0.language == "ja", s0.language
+
+                # Word-level detail + confidence present.
+                assert s0.words and all("score" in w for w in s0.words)
+                assert s0.confidence is not None and 0.8 < s0.confidence <= 1.0
+
+                # Furigana: 今日 annotated per-word (きょう, not こんにちは
+                # — the whole-cue reading would mangle it).
+                assert "今日（きょう）" in s0.text, s0.text
+                assert "（は）" not in s0.text, s0.text
+
+                # Fallback path: alignment failure degrades to segments.
+                import transcribe as _tr_wx
+
+                segs_fb, info_fb = _wx_adapter_mod._segments_from_result(
+                    {"segments": [{"start": 0, "end": 1, "text": "テスト"}]}, "ja"
+                )
+                assert segs_fb[0].text == "テスト"
+                assert info_fb.language == "ja"
+            finally:
+                if saved_wx is not None:
+                    sys.modules["whisperx"] = saved_wx
+                else:
+                    sys.modules.pop("whisperx", None)
+                if saved_torch is not None:
+                    sys.modules["torch"] = saved_torch
+                else:
+                    sys.modules.pop("torch", None)
+                _model_wx._context = saved_ctx
+
+            self._record(
+                "WhisperX furigana pipeline",
+                "PASS",
+                "VAD + confidence filter + furigana + speaker labels",
+            )
+        except Exception as e:
+            self._record("WhisperX furigana pipeline", "FAIL", str(e))
+
+        # --- whisper.cpp adapter: parses the on-disk SRT, not stdout ---
+        try:
+            import os as _os_c
+            import shutil as _sh_c
+            import stat as _stat_c
+            import tempfile as _tf_c
+
+            from adapters.whispercpp_adapter import WhisperCppAdapter as _WCCls
+
+            tmp = _tf_c.mkdtemp()
+            try:
+                bin_dir = _os_c.path.join(tmp, "bin")
+                _os_c.makedirs(bin_dir)
+
+                # Fake whisper-cli: writes the SRT named by -of (falling
+                # back to <input>.srt, exactly what cli.cpp's fout_factory
+                # does) and records its argv for flag assertions.
+                argv_log = _os_c.path.join(tmp, "argv.txt")
+                shim = _os_c.path.join(bin_dir, "whisper-cli")
+                with open(shim, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        "#!/bin/sh\n"
+                        'printf "%s\\n" "$@" >> ' + repr(argv_log) + "\n"
+                        # input is the value after -f; -of pins the output
+                        'input=""\n'
+                        'out=""\n'
+                        'prev=""\n'
+                        'for a in "$@"; do\n'
+                        '  if [ "$prev" = "-f" ]; then input="$a"; fi\n'
+                        '  if [ "$prev" = "-of" ]; then out="$a"; fi\n'
+                        '  prev="$a"\n'
+                        "done\n"
+                        'if [ -n "$out" ]; then srt="$out.srt"; else srt="${input%.*}.srt"; fi\n'
+                        "cat > \"$srt\" <<'SRT'\n"
+                        "1\n"
+                        "00:00:00,000 --> 00:00:02,500\n"
+                        "hello from whisper cpp\n"
+                        "\n"
+                        "2\n"
+                        "00:00:02,500 --> 00:00:05,000\n"
+                        "second cue here\n"
+                        "SRT\n"
+                    )
+                _os_c.chmod(shim, _os_c.stat(shim).st_mode | _stat_c.S_IEXEC)
+
+                # A ggml model file must exist or the adapter refuses to run.
+                models_dir = _os_c.path.join(tmp, "models")
+                _os_c.makedirs(models_dir)
+                with open(_os_c.path.join(models_dir, "ggml-base.bin"), "wb") as fh:
+                    fh.write(b"GGUF")
+
+                saved_path = _os_c.environ.get("PATH", "")
+                saved_models = _os_c.environ.get("WHISPERCPP_MODELS_DIR")
+                _os_c.environ["PATH"] = bin_dir + _os_c.pathsep + saved_path
+                _os_c.environ["WHISPERCPP_MODELS_DIR"] = models_dir
+                try:
+                    adapter = _WCCls()
+                    assert adapter.is_available(), "fake binary not detected"
+
+                    # A .wav input skips ffmpeg conversion; the fake binary
+                    # needs no real audio.
+                    audio = _os_c.path.join(tmp, "clip.wav")
+                    with open(audio, "wb") as fh:
+                        fh.write(b"RIFF0000WAVEfmt ")
+
+                    segments, info = adapter.transcribe(
+                        audio_file=audio,
+                        model="base",
+                        language="en",
+                        write=lambda m: None,
+                        cpu_threads=4,
+                    )
+
+                    # Segments came from the SRT FILE (the old code parsed
+                    # stdout and got nothing).
+                    assert len(segments) == 2, f"got {len(segments)}: {segments}"
+                    assert segments[0].text == "hello from whisper cpp", segments[0]
+                    assert abs(segments[0].start - 0.0) < 0.01
+                    assert abs(segments[1].end - 5.0) < 0.01
+                    assert info.language == "en"
+
+                    # Flags: model, file, -of, -osrt, language, threads.
+                    argv = open(argv_log, encoding="utf-8").read()
+                    assert "-m" in argv and "ggml-base.bin" in argv
+                    assert "-osrt" in argv, f"missing -osrt: {argv}"
+                    assert "-of" in argv, f"missing -of: {argv}"
+                    assert "-l" in argv and "en" in argv
+                    assert "-t" in argv and "4" in argv
+                    assert "-nt" not in argv, "-nt must not combine with -osrt"
+
+                    # The SRT file was cleaned up after parsing.
+                    assert not _os_c.path.exists(
+                        _os_c.path.join(tmp, "clip.srt")
+                    ), "srt leftover not removed"
+
+                    # A missing model must fail with an actionable message
+                    # instead of letting whisper-cli dump its usage text.
+                    try:
+                        adapter.transcribe(
+                            audio_file=audio,
+                            model="medium",
+                            language="en",
+                            write=lambda m: None,
+                        )
+                        assert False, "missing model must raise"
+                    except FileNotFoundError as e:
+                        assert "ggml-medium.bin" in str(e), str(e)
+                        assert "WHISPERCPP_MODELS_DIR" in str(e), str(e)
+                finally:
+                    _os_c.environ["PATH"] = saved_path
+
+                # A binary that cannot load its shared libraries must fall
+                # back to the next candidate instead of failing the job.
+                broken_dir = _os_c.path.join(tmp, "broken")
+                _os_c.makedirs(broken_dir)
+                broken = _os_c.path.join(broken_dir, "whisper-cli")
+                with open(broken, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        "#!/bin/sh\n"
+                        "echo 'whisper-cli: error while loading shared libraries: "
+                        "libggml-cpu.so: cannot open shared object file' >&2\n"
+                        "exit 127\n"
+                    )
+                _os_c.chmod(broken, _os_c.stat(broken).st_mode | _stat_c.S_IEXEC)
+
+                saved_path = _os_c.environ.get("PATH", "")
+                _os_c.environ["PATH"] = (
+                    broken_dir + _os_c.pathsep + bin_dir + _os_c.pathsep + saved_path
+                )
+                try:
+                    adapter = _WCCls()
+                    segments, _info = adapter.transcribe(
+                        audio_file=_os_c.path.join(tmp, "clip.wav"),
+                        model="base",
+                        language="en",
+                        write=lambda m: None,
+                    )
+                    assert len(segments) == 2, segments
+                finally:
+                    _os_c.environ["PATH"] = saved_path
+                    if saved_models is None:
+                        _os_c.environ.pop("WHISPERCPP_MODELS_DIR", None)
+                    else:
+                        _os_c.environ["WHISPERCPP_MODELS_DIR"] = saved_models
+
+                # Binary detection: whisper-cli preferred over generic names.
+                assert _WCCls.BINARY_CANDIDATES[0] == "whisper-cli"
+            finally:
+                _sh_c.rmtree(tmp, ignore_errors=True)
+
+            self._record(
+                "whisper.cpp adapter",
+                "PASS",
+                "reads on-disk srt, correct flags, cleanup",
+            )
+        except Exception as e:
+            self._record("whisper.cpp adapter", "FAIL", str(e))
+
 
         # --- Parakeet: chunked, streaming transcription ---
         try:
@@ -3873,6 +4773,66 @@ def main():
 
     runner.run_unit_tests()
     runner.run_adapter_status()
+
+    # Feature suites (distil models, custom VAD, NeMo diarization) live in
+    # their own file so they also run standalone via python tests/<file>.py.
+    feature_suite = os.path.join(
+        os.path.dirname(__file__), "test_feature_pairing.py"
+    )
+    real_suite = os.path.join(os.path.dirname(__file__), "test_real_media.py")
+    if os.path.exists(feature_suite):
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                [sys.executable, feature_suite],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                cwd=os.path.join(os.path.dirname(__file__), ".."),
+            )
+            if result.returncode == 0:
+                passed = result.stdout.count("[PASS]")
+                runner._record(
+                    "Feature suite (distil/VAD/diarize)", "PASS", f"{passed} passed"
+                )
+            else:
+                failures = [
+                    line for line in result.stdout.splitlines() if "FAIL" in line
+                ]
+                runner._record(
+                    "Feature suite (distil/VAD/diarize)",
+                    "FAIL",
+                    "; ".join(failures) or result.stdout[-500:],
+                )
+        except Exception as e:
+            runner._record("Feature suite (distil/VAD/diarize)", "FAIL", str(e))
+
+    if os.path.exists(real_suite):
+        try:
+            result = subprocess.run(
+                [sys.executable, real_suite],
+                capture_output=True, text=True, timeout=900,
+                cwd=os.path.join(os.path.dirname(__file__), ".."),
+            )
+            passed = result.stdout.count("[PASS]")
+            skipped = result.stdout.count("[SKIP]")
+            failed = result.stdout.count("[FAIL]")
+            if result.returncode == 0:
+                runner._record(
+                    "Real-media suite (audio/gaps/speech)",
+                    "PASS",
+                    f"{passed} passed" + (f", {skipped} skipped" if skipped else ""),
+                )
+            else:
+                failures = [l for l in result.stdout.splitlines() if "[FAIL]" in l]
+                runner._record(
+                    "Real-media suite (audio/gaps/speech)",
+                    "FAIL",
+                    "; ".join(failures) or result.stdout[-500:],
+                )
+        except Exception as e:
+            runner._record("Real-media suite (audio/gaps/speech)", "FAIL", str(e))
 
     if args.audio:
         if args.model:

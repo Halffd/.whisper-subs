@@ -20,6 +20,7 @@ import random
 import pyperclip
 import yt_dlp
 import hashlib
+import vad
 import app_meta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -198,6 +199,16 @@ def list_jobs():
 
 
 # --- Core Class ---
+def cookie_domains_hit(domains) -> bool:
+    """True when a cookie jar holds a youtube.com / youtube-nocookie login."""
+    return any(
+        domain == "youtube.com"
+        or domain.endswith(".youtube.com")
+        or domain.endswith(".youtube-nocookie.com")
+        for domain in domains
+    )
+
+
 class WhisperSubs:
     def __init__(
         self,
@@ -206,10 +217,16 @@ class WhisperSubs:
         compute_type: str = "int8",
         force: bool = False,
         ignore_subs: bool = False,
+        fetch_caps: Optional[bool] = None,
+        fetch_auto: bool = False,
+        fetch_langs: str = "",
+        inpaint: bool = False,
+        inpaint_min_gap: float = 3.0,
         sub_lang: Optional[str] = None,
         language: Optional[str] = None,
         run_mpv: bool = False,
         browser: str = "firefox",
+        cookie_file: Optional[str] = None,
         strict_language_tier: bool = False,
         force_retry: bool = False,
         vad_filter: Optional[bool] = None,
@@ -217,6 +234,7 @@ class WhisperSubs:
         diarization: bool = False,
         min_speakers: int = 1,
         max_speakers: int = 2,
+        num_speakers: Optional[int] = None,
         temperature: Optional[float] = None,
         merge_lines: bool = False,
         whisperx_vad: bool = True,
@@ -229,6 +247,10 @@ class WhisperSubs:
         mpv_socket: Optional[str] = None,
         mpv_auto: bool = False,
         cpu_threads: Optional[int] = None,
+        audio_track: Optional[str] = None,
+        diarize_engine: Optional[str] = None,
+        vad_engine: Optional[str] = None,
+        vad_params_extra: Optional[Dict[str, str]] = None,
         playlist_mode: Optional[str] = None,
         playlist_path: Optional[str] = None,
         save_video: bool = False,
@@ -241,10 +263,21 @@ class WhisperSubs:
         self.force = force
         self.force_retry = force_retry
         self.ignore_subs = ignore_subs
+        # Caption fetching: None means "human captions only, on by default".
+        self.fetch_caps = fetch_caps
+        self.fetch_auto = fetch_auto
+        self.fetch_langs = [
+            l.strip() for l in (fetch_langs or "").split(",") if l.strip()
+        ]
+        self.inpaint = inpaint
+        self.inpaint_min_gap = inpaint_min_gap
         self.sub_lang = sub_lang
         self.language = language
         self.run_mpv = run_mpv
         self.specified_browser = browser
+        self.cookie_file = cookie_file
+        # '' means probed and none found; None means not probed yet.
+        self._cookie_browser_cache: Optional[str] = None
         self.force_cookies = True if browser else False
         self.strict_language_tier = strict_language_tier
         self.save_video = save_video
@@ -276,6 +309,7 @@ class WhisperSubs:
         self.diarization = diarization
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
+        self.num_speakers = num_speakers
         # Transcription settings
         self.temperature = temperature
         self.merge_lines = merge_lines
@@ -293,6 +327,13 @@ class WhisperSubs:
         self.mpv_auto = mpv_auto
         # CPU threads setting
         self.cpu_threads = cpu_threads
+        # Preferred audio stream for multi-track media (None = first track)
+        self.audio_track = audio_track
+        # Diarization engine (pyannote / nemo / auto)
+        self.diarize_engine = diarize_engine
+        # VAD engine for adapter models (None = silero default)
+        self.vad_engine = vad_engine
+        self.vad_params_extra = vad_params_extra or {}
 
         # Optional callback when SRT file is created (for streaming)
         # Called with (srt_path, unfinished_srt_path) when the unfinished SRT is created
@@ -366,6 +407,55 @@ class WhisperSubs:
         except Exception as e:
             self.log(f"Warning: could not build channel playlist: {e}")
 
+    def _find_cookie_browser(self) -> Optional[str]:
+        """Which installed browser can actually yield a YouTube cookie jar.
+
+        yt-dlp aborts the whole download with `CookieLoadError` when the named
+        browser's cookie store is missing or unreadable — which is what a bare
+        `cookiesfrombrowser=("firefox",)` produces on a machine where the
+        default browser is Chrome, or where Firefox is not installed at all.
+        Probing once keeps metadata-only calls working for every channel and
+        avoids retrying a download that cannot succeed.
+        """
+        if self._cookie_browser_cache is not None:
+            return self._cookie_browser_cache
+
+        ordered: List[str] = []
+        if self.specified_browser:
+            ordered.append(self.specified_browser)
+        for candidate in (
+            "firefox", "chrome", "chromium", "edge", "brave", "opera",
+            "vivaldi", "safari", "whale",
+        ):
+            if candidate not in ordered:
+                ordered.append(candidate)
+
+        from yt_dlp.cookies import extract_cookies_from_browser
+
+        for candidate in ordered:
+            try:
+                jar = extract_cookies_from_browser(candidate)
+            except Exception:
+                continue
+            domains = {c.domain.lstrip(".") for c in jar}
+            if cookie_domains_hit(domains):
+                self._cookie_browser_cache = candidate
+                return candidate
+
+        self._cookie_browser_cache = ""
+        return None
+
+    def _cookie_error(self) -> str:
+        """Actionable message when no browser cookies can be read."""
+        return (
+            "No browser cookies readable for a YouTube login. yt-dlp aborts "
+            "downloads with HTTP 403 when it cannot authenticate. Fix any of: "
+            "log into youtube.com in your browser; pass --browser "
+            "<firefox|chrome|chromium|edge|brave|opera|vivaldi>; or export a "
+            "cookies.txt (Netscape format) and pass --cookies-file pointing at "
+            "it (equivalent to yt-dlp's --cookies-from-browser)."
+        )
+
     def _get_ytdlp_base_opts(self, **extra_opts) -> Dict[str, Any]:
         """Get base yt-dlp options with cookies from browser (required for YouTube)."""
         base_opts = {
@@ -374,9 +464,16 @@ class WhisperSubs:
             "socket_timeout": 10,
             "no_check_certificate": True,
         }
-        # Always include cookies from browser for YouTube (now required)
         if self.specified_browser:
-            base_opts["cookiesfrombrowser"] = (self.specified_browser,)
+            browser = self._find_cookie_browser()
+            if browser:
+                base_opts["cookiesfrombrowser"] = (browser,)
+            else:
+                message = self._cookie_error()
+                self.log(message)
+                raise RuntimeError(message)
+        if self.cookie_file:
+            base_opts["cookiefile"] = self.cookie_file
         base_opts.update(extra_opts)
         return base_opts
 
@@ -935,34 +1032,14 @@ class WhisperSubs:
 
         self.log(f"Extracting audio from {os.path.basename(video_path)}...")
 
-        import subprocess
+        import audio_io
 
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-vn",
-            "-acodec",
-            "aac",
-            "-b:a",
-            "128k",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            audio_path,
-        ]
+        track = self._select_audio_track(video_path)
 
-        result = subprocess.run(
-            ffmpeg_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
+        def _note(msg):
+            self.log(msg)
 
-        if result.returncode == 0 and os.path.exists(audio_path):
+        if audio_io.extract_audio(video_path, audio_path, audio_track=track, log=_note):
             self.log(f"Audio extracted: {os.path.basename(audio_path)}")
             try:
                 import audio_cache
@@ -975,6 +1052,37 @@ class WhisperSubs:
             self.log(f"Audio extraction failed, using original file")
             return video_path
 
+    def _select_audio_track(self, video_path: str) -> Optional[str]:
+        """Pick the audio track to transcribe.
+
+        Explicit `--audio-track N` wins (validated against the real
+        stream list). Otherwise the first track is used and a multi-track
+        file is noted, so a Japanese dub hiding behind an English track
+        is visible instead of silent.
+        """
+        import audio_io
+
+        requested = getattr(self, "audio_track", None)
+        if requested:
+            return str(requested)
+
+        if os.environ.get("WHISPERSUBS_AUDIO_TRACK"):
+            return os.environ["WHISPERSUBS_AUDIO_TRACK"]
+
+        try:
+            streams = audio_io.ffprobe_audio_streams(video_path)
+        except Exception:
+            return None
+
+        if len(streams) > 1:
+            langs = ", ".join(str(s.get("language") or "?") for s in streams)
+            self.log(
+                f"{os.path.basename(video_path)} has {len(streams)} audio "
+                f"tracks ({langs}); using the first. Pass --audio-track N "
+                "(0-based) or --lang <code> to choose."
+            )
+        return None
+
     def check_and_download_subs(self, url, output_dir, title):
         """Check for subs with minimal overhead.
 
@@ -984,48 +1092,31 @@ class WhisperSubs:
         if self.ignore_subs:
             return None
 
+        # Default behaviour: human-made captions only. --no-fetch-caps turns
+        # the whole path off, --fetch-auto also accepts YouTube's automatic
+        # captions.
+        if self.fetch_caps is False:
+            return None
+
         self.log("Checking for existing subtitles...")
 
         try:
-            # Ultra-minimal options for just checking subs
-            ydl_opts = self._get_ytdlp_base_opts(
-                skip_download=True,
-                writesubtitles=False,
-                listsubtitles=False,
-            )
+            import caption_fetch
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            timestamp = ""
+            try:
+                ydl_opts = self._get_ytdlp_base_opts(
+                    skip_download=True,
+                    writesubtitles=False,
+                    listsubtitles=False,
+                )
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                if info:
+                    timestamp = info.get("timestamp", "") or ""
+            except Exception:
+                timestamp = ""
 
-            if info is None:
-                return False
-
-            # Quick check for human-made subs
-            subtitles = info.get("subtitles", {})
-            if not subtitles:
-                self.log("No subtitles available.")
-                return False
-
-            video_lang = (info.get("language") or "en").split("-")[0]
-            target_langs = (
-                {video_lang, self.sub_lang} if self.sub_lang else {video_lang}
-            )
-
-            best_sub_lang = None
-            for lang in target_langs:
-                lang_subs = subtitles.get(lang, [])
-                if any(not s.get("is_automatic") for s in lang_subs):
-                    best_sub_lang = lang
-                    break
-
-            if not best_sub_lang:
-                self.log("No human-made subtitles found.")
-                return False
-
-            self.log(f"Found '{best_sub_lang}' subs. Downloading...")
-
-            # Now actually download with minimal overhead
-            timestamp = info.get("timestamp", "")
             if timestamp:
                 date_time = datetime.datetime.fromtimestamp(timestamp)
                 timeday = date_time.strftime("%Y-%m-%d_%H-%M")
@@ -1037,29 +1128,29 @@ class WhisperSubs:
                 if timeday
                 else self.clean_filename(title)
             )
-            sub_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
+            # Extension-less: caption_fetch appends ".<lang>.srt".
+            out_base = os.path.join(output_dir, safe_title)
 
-            ydl_opts_dl = self._get_ytdlp_base_opts(
-                skip_download=True,
-                writesubtitles=True,
-                subtitleslangs=[best_sub_lang],
-                subtitlesformat="srt",
-                outtmpl=sub_template,
+            result = caption_fetch.fetch_captions(
+                url,
+                out_base,
+                langs=self.fetch_langs,
+                allow_automatic=bool(self.fetch_auto),
+                write=self.log,
+                video_title=title,
             )
+            if not result.ok:
+                # Distinguish "nothing to grab" from a fetch failure; both
+                # fall through to transcription, which is the safe default.
+                return None
 
-            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
-                ydl.download([url])
-
-            expected_file = os.path.join(
-                output_dir, f"{safe_title}.{best_sub_lang}.srt"
-            )
             final_file = os.path.join(output_dir, f"{safe_title}.srt")
-
-            if os.path.exists(expected_file):
+            if result.path and os.path.exists(result.path):
                 if os.path.exists(final_file):
                     os.remove(final_file)
-                os.rename(expected_file, final_file)
-                self.log(f"Subtitle saved to {final_file}")
+                os.rename(result.path, final_file)
+                kind = "automatic" if result.automatic else "human-made"
+                self.log(f"Subtitle saved to {final_file} ({kind})")
                 _get_helper_files().make_files(final_file, url=url)
                 return final_file
 
@@ -1695,16 +1786,22 @@ class WhisperSubs:
                 audio_file = self._convert_to_audio(task_source)
                 if not audio_file:
                     self.log(f"Failed to convert video to audio: {task_source}")
+                    # Mark the task failed: an unmarked task reads as "not
+                    # failed" where the job status is computed, so the job was
+                    # reported "completed" after every download failed.
+                    update_task_status(job_id, task_source, "failed")
                     return
             else:
                 result = self.download_audio(task_source, channel_dir)
                 if not result:
                     self.log(f"Failed to download audio: {task_source}")
+                    update_task_status(job_id, task_source, "failed")
                     return
                 audio_file, timeday = result
 
             if not audio_file or not os.path.exists(audio_file):
                 self.log(f"Audio file not found: {audio_file}")
+                update_task_status(job_id, task_source, "failed")
                 return
 
             # Register audio file for media streaming API
@@ -1860,6 +1957,12 @@ class WhisperSubs:
                 furigana=getattr(self, "furigana", False),
                 diarize=getattr(self, "diarization", False),
                 hf_token=os.environ.get("HF_TOKEN"),
+                diarize_engine=getattr(self, "diarize_engine", None),
+                vad_engine=getattr(self, "vad_engine", None),
+                vad_params_extra=getattr(self, "vad_params_extra", None),
+                min_speakers=getattr(self, "min_speakers", None),
+                max_speakers=getattr(self, "max_speakers", None),
+                num_speakers=getattr(self, "num_speakers", None),
             ):
                 self.log("Transcription successful.")
                 # Update the SRT filename in case it was changed during processing
@@ -1869,6 +1972,44 @@ class WhisperSubs:
                     if new_srt_file != srt_file and os.path.exists(new_srt_file):
                         srt_file = new_srt_file
                 _get_helper_files().make_files(srt_file, url=task_source)
+
+                # Fill in the stretches the SRT left empty. Runs on the local
+                # faster-whisper backend (the adapter path has no way to feed
+                # a clipped file back to a model), and only when the user
+                # asked: it re-transcribes audio, so it doubles the pass over
+                # the gaps and is not something to do silently.
+                if self.inpaint:
+                    try:
+                        import audio_inpaint
+
+                        # Runs on the local faster-whisper backend (the adapter
+                        # path has no way to feed a clipped file to a model),
+                        # and re-transcribes audio, so it doubles the pass over
+                        # the holes -- done only when asked, never silently.
+                        result = audio_inpaint.inpaint_srt(
+                            srt_path=srt_file,
+                            audio_path=audio_file,
+                            model=self.model_name,
+                            language=self.language or "en",
+                            min_gap_seconds=self.inpaint_min_gap,
+                            write=self.log,
+                        )
+                        report = result.as_dict()
+                        self.log(
+                            f"Inpainting: {report['filled']}/{report['gaps']} "
+                            f"gap(s) filled, {report['added_cues']} cue(s) "
+                            f"added ({report['recovered_seconds']:.1f}s)"
+                        )
+                        for failure in report["failures"]:
+                            self.log(f"  inpaint: {failure}")
+
+                        self.log("Verifying inpainted subtitles...")
+                        srt_problems = self._verify_inpaint(srt_file, audio_file)
+                        if srt_problems:
+                            for problem in srt_problems:
+                                self.log(f"  verify: {problem}")
+                    except Exception as inpaint_err:
+                        self.log(f"Warning: inpainting skipped: {inpaint_err}")
 
                 # Copy to secondary location if applicable
                 if srt_file_secondary and os.path.exists(srt_file):
@@ -2016,6 +2157,43 @@ class WhisperSubs:
                     self.log(f"mpv output tail: {tail}")
 
         threading.Thread(target=watcher, daemon=True).start()
+
+    def _verify_inpaint(self, srt_file: str, audio_file: str) -> List[str]:
+        """Report gaps that survive in the SRT after inpainting.
+
+        Re-parses the finished file rather than trusting the pass, since the
+        point of inpainting is measurable: fewer holes, more cues. Uses the
+        shared gap analysis so the thresholds match what `verify_subtitles`
+        and the tests use.
+        """
+        try:
+            import audio_inpaint as ai
+            import audio_io as aio
+        except Exception as exc:
+            return [f"could not load verification modules: {exc}"]
+
+        cues = ai.parse_srt(srt_file)
+        if not cues:
+            return ["SRT has no usable cues"]
+
+        duration = aio.probe_duration(audio_file)
+        remaining = ai.find_gaps(
+            cues, duration, min_gap_seconds=self.inpaint_min_gap
+        )
+        if not remaining:
+            return []
+
+        problems: List[str] = []
+        for start, end in remaining:
+            problems.append(
+                f"gap remains: {start:.1f}s-{end:.1f}s ({end - start:.1f}s)"
+            )
+        if duration:
+            still = sum(b - a for a, b in remaining)
+            problems.append(
+                f"{still:.1f}s of {duration:.0f}s still uncovered"
+            )
+        return problems
 
     def start_mpv_auto_reload(self, srt_file, stop_event):
         """Start background thread to auto-reload subtitles every minute."""
@@ -2171,10 +2349,13 @@ class WhisperSubs:
         ] or []
         failed = sum(1 for s in task_statuses if s == "failed")
         if task_statuses and failed == len(task_statuses):
+            # Every task reported in and none worked.
             final_status = "failed"
         elif failed:
             final_status = "completed_with_errors"
         else:
+            # Nothing failed: some tasks may still be unstarted, but the job
+            # itself ran to completion, which is what "completed" means here.
             final_status = "completed"
         update_job(job["id"], {"status": final_status})
         self.log(f"Job {job['id']} finished with status: {final_status}")
@@ -2260,7 +2441,8 @@ def read_sources_from_file(filename):
         sys.exit(1)
 
 
-def main():
+def build_parser():
+    """Build the full CLI parser (importable for tests)."""
     # The catalog is rendered into --help so the model list is discoverable
     # without a second command. Built lazily; a runtime failure must not stop
     # the parser from working.
@@ -2453,6 +2635,34 @@ Examples:
         "-is", "--ignore-subs", action="store_true", help="Ignore existing subtitles."
     )
     process_group.add_argument(
+        "--fetch-caps",
+        action="store_true",
+        default=None,
+        dest="fetch_caps",
+        help="Fetch YouTube captions when they exist instead of transcribing "
+        "(default: on for human-made captions). '--no-fetch-caps' disables.",
+    )
+    process_group.add_argument(
+        "--no-fetch-caps",
+        action="store_false",
+        dest="fetch_caps",
+        help="Never use YouTube captions; always transcribe.",
+    )
+    process_group.add_argument(
+        "--fetch-auto",
+        action="store_true",
+        help="Also accept YouTube's automatic captions when no human track "
+        "exists (off by default: auto captions are low quality).",
+    )
+    process_group.add_argument(
+        "--fetch-langs",
+        type=str,
+        default="",
+        metavar="LANGS",
+        help="Comma-separated caption language preference, e.g. 'en,pt' "
+        "(default: video language, then English).",
+    )
+    process_group.add_argument(
         "-i", "--invert", action="store_true", help="Invert lines"
     )
     process_group.add_argument(
@@ -2514,21 +2724,97 @@ Examples:
         dest="save_thumbnail",
         help="Do not save the video thumbnail.",
     )
+    process_group.add_argument(
+        "--yt-search-channels",
+        metavar="QUERY",
+        help="Search YouTube for channels matching QUERY and list them "
+        "(no transcription).",
+    )
+    process_group.add_argument(
+        "--yt-subscribe",
+        metavar="CHANNEL",
+        help="Follow a YouTube channel (name, @handle, or channel URL).",
+    )
+    process_group.add_argument(
+        "--yt-unsubscribe",
+        metavar="CHANNEL",
+        help="Unfollow a channel by URL or @handle.",
+    )
+    process_group.add_argument(
+        "--yt-subscriptions",
+        action="store_true",
+        help="List the channels you follow.",
+    )
+    process_group.add_argument(
+        "--yt-feed",
+        action="store_true",
+        help="Show the ranked feed of videos from channels you follow.",
+    )
     process_group.set_defaults(save_thumbnail=True)
 
     # Advanced transcription options
     advanced_group = parser.add_argument_group("Advanced Transcription Options")
     advanced_group.add_argument(
         "--vad",
-        action="store_false",
+        action="store_true",
         dest="vad_filter",
-        help="Disable Voice Activity Detection (VAD) filter.",
+        help="Enable the Voice Activity Detection (VAD) filter. Off by "
+        "default: the filter drops whole stretches of real speech on "
+        "material with background music or archive audio, and no smaller "
+        "model can recover the missing text.",
     )
     advanced_group.add_argument(
         "--vad-silence",
         type=int,
         default=500,
         help="VAD minimum silence duration in ms (default: 500).",
+    )
+    advanced_group.add_argument(
+        "--browser",
+        type=str,
+        default="firefox",
+        choices=["firefox", "chrome", "chromium", "edge", "brave",
+                 "opera", "vivaldi", "safari", "whale"],
+        help="Browser to read YouTube login cookies from (default: firefox). "
+        "Whichever installed browser has a youtube.com login is used when the "
+        "named one has none.",
+    )
+    advanced_group.add_argument(
+        "--cookies-file",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Netscape cookies.txt to authenticate YouTube downloads with "
+        "(overrides browser cookies).",
+    )
+    advanced_group.add_argument(
+        "--inpaint",
+        action="store_true",
+        help="After transcribing, re-transcribe the stretches the SRT left "
+        "empty (with condition_on_previous_text=False) and splice the "
+        "recovered cues back in.",
+    )
+    advanced_group.add_argument(
+        "--inpaint-min-gap",
+        type=float,
+        default=3.0,
+        metavar="SECONDS",
+        help="Shortest hole to inpaint (default: 3.0).",
+    )
+    advanced_group.add_argument(
+        "--vad-engine",
+        type=str,
+        default=None,
+        choices=["silero", "pyannote", "webrtc", "custom"],
+        help="VAD engine for adapter models (default: silero). \"custom\" needs "
+        "WHISPERSUBS_VAD=module:callable.",
+    )
+    advanced_group.add_argument(
+        "--vad-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Parameter for the selected VAD engine; repeat for multiple keys.",
     )
     advanced_group.add_argument(
         "--diarization", action="store_true", help="Enable speaker diarization."
@@ -2544,6 +2830,28 @@ Examples:
         type=int,
         default=2,
         help="Maximum number of speakers for diarization (default: 2).",
+    )
+    advanced_group.add_argument(
+        "--num-speakers",
+        type=int,
+        default=None,
+        help="Exact number of speakers for diarization (overrides min/max).",
+    )
+    advanced_group.add_argument(
+        "--diarize-engine",
+        type=str,
+        default=None,
+        choices=["auto", "pyannote", "nemo"],
+        help="Diarization engine: pyannote (needs HF_TOKEN) or nemo (NeMo MSDD, "
+        "offline). Default: auto.",
+    )
+    advanced_group.add_argument(
+        "--audio-track",
+        type=str,
+        default=None,
+        metavar="N",
+        help="Audio stream to transcribe for multi-track media (0-based ordinal, "
+        "as reported by ffprobe). Default: the first track.",
     )
     advanced_group.add_argument(
         "--temperature",
@@ -2614,12 +2922,16 @@ Examples:
         default=1.02,
         help="Livestream growth threshold factor (default: 1.02 = 2%% growth).",
     )
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.list:
         list_jobs()
         return
-
     if args.model_list:
         import model_catalog
 
@@ -2634,6 +2946,60 @@ Examples:
         if args.choose is not None:
             print()
             srt_compare.choose(args.compare, args.choose)
+        return
+
+    # YouTube channel discovery, subscriptions and feed — all metadata-only,
+    # none of them transcribe anything.
+    if (
+        args.yt_search_channels
+        or args.yt_subscribe
+        or args.yt_unsubscribe
+        or args.yt_subscriptions
+        or args.yt_feed
+    ):
+        import api.youtube as yt
+
+        if args.yt_search_channels:
+            results = yt.search_channels(args.yt_search_channels)
+            if not results:
+                print(f"No YouTube channels found for {args.yt_search_channels!r}")
+            for r in results:
+                subs = f"{r['subscribers']:,}" if r.get("subscribers") else "?"
+                print(f"{r['name']:34} {subs:>14} subs  {r['url']}")
+        elif args.yt_subscribe:
+            channel = yt.channel_from_query(args.yt_subscribe)
+            if channel:
+                result = yt.subscribe(channel)
+                if result["subscribed"]:
+                    print(f"Subscribed to {result['channel']['name']}")
+                    print(f"  {result['channel']['url']}")
+                else:
+                    print(f"Could not subscribe: {result.get('reason')}")
+            else:
+                print(f"No channel found for {args.yt_subscribe!r}")
+        elif args.yt_unsubscribe:
+            channel = yt.channel_from_query(args.yt_unsubscribe)
+            target = (channel or {}).get("url") or args.yt_unsubscribe
+            yt.unsubscribe(target)
+            print(f"Unsubscribed: {target}")
+        elif args.yt_subscriptions:
+            subs = yt.load_subscriptions()
+            if not subs:
+                print("No subscriptions yet. Use --yt-search-channels to find channels.")
+            for s in subs:
+                print(f"{s.get('name', '?'):34} {s.get('url', '')}")
+        elif args.yt_feed:
+            feed = yt.recommend(limit=20)
+            if not feed:
+                print("Your feed is empty — subscribe to a channel with --yt-subscribe.")
+            for item in feed:
+                reasons = ", ".join(item.get("reasons") or [])
+                minutes = (item.get("duration") or 0) / 60.0
+                print(
+                    f"{item['score']:.2f}  {minutes:5.0f}m  "
+                    f"{(item.get('channel') or '?')[:20]:20}  {item['title'][:48]}"
+                    + (f"  [{reasons}]" if reasons else "")
+                )
         return
 
     if args.verify:
@@ -2667,6 +3033,8 @@ Examples:
             device="cuda" if args.gpu else args.device,
             compute_type=args.compute,
             cpu_threads=args.cpu_threads,
+            audio_track=args.audio_track,
+            diarize_engine=args.diarize_engine,
         )
         return
 
@@ -2737,15 +3105,24 @@ Examples:
                     compute_type=args.compute,
                     force=args.force,
                     ignore_subs=args.ignore_subs,
+                    fetch_caps=args.fetch_caps,
+                    fetch_auto=args.fetch_auto,
+                    fetch_langs=args.fetch_langs,
+                    inpaint=args.inpaint,
+                    inpaint_min_gap=args.inpaint_min_gap,
                     sub_lang=args.language,
+                    language=args.language,
                     run_mpv=args.run or args.play,
                     strict_language_tier=args.cross_tier,
                     force_retry=args.force_retry,
                     vad_filter=args.vad_filter,
+                    browser=args.browser,
+                    cookie_file=args.cookies_file,
                     vad_min_silence_duration=args.vad_silence,
                     diarization=args.diarization,
                     min_speakers=args.min_speakers,
                     max_speakers=args.max_speakers,
+                    num_speakers=args.num_speakers,
                     temperature=args.temperature,
                     merge_lines=args.merge_lines,
                     start_time=args.start_time,
@@ -2755,6 +3132,8 @@ Examples:
                     mpv_socket=args.mpv_socket,
                     mpv_auto=args.mpv,
                     cpu_threads=args.cpu_threads,
+                    audio_track=args.audio_track,
+                    diarize_engine=args.diarize_engine,
                     save_video=args.video,
                     save_thumbnail=args.save_thumbnail,
                     show=args.show,
@@ -2945,15 +3324,22 @@ Examples:
             compute_type=args.compute,
             force=args.force,
             ignore_subs=args.ignore_subs,
+            fetch_caps=args.fetch_caps,
+            fetch_auto=args.fetch_auto,
+            fetch_langs=args.fetch_langs,
             sub_lang=args.language,
+            language=args.language,
             run_mpv=args.run or args.play,
             strict_language_tier=args.cross_tier,
             force_retry=args.force_retry,
             vad_filter=args.vad_filter,
+            browser=args.browser,
+            cookie_file=args.cookies_file,
             vad_min_silence_duration=args.vad_silence,
             diarization=args.diarization,
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
+            num_speakers=args.num_speakers,
             temperature=args.temperature,
             merge_lines=args.merge_lines,
             start_time=args.start_time,
@@ -2963,9 +3349,15 @@ Examples:
             mpv_socket=args.mpv_socket,
             mpv_auto=args.mpv,
             cpu_threads=args.cpu_threads,
-            save_video=args.video,
-            save_thumbnail=args.save_thumbnail,
-            show=args.show,
+            audio_track=args.audio_track,
+            diarize_engine=args.diarize_engine,
+            vad_engine=args.vad_engine,
+                    vad_params_extra=vad.parse_vad_params(args.vad_param),
+                    inpaint=args.inpaint,
+                    inpaint_min_gap=args.inpaint_min_gap,
+                    save_video=args.video,
+                    save_thumbnail=args.save_thumbnail,
+                    show=args.show,
             playlist_mode=(
                 "channel"
                 if args.playlist_channel

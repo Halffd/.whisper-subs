@@ -11,6 +11,7 @@ local faster-whisper pipeline for backward compatibility.
 import inspect
 import model as _model_module
 from model import Segment, TranscriptionContext, get_context
+from adapters.faster_whisper_adapter import _resolve_fw_model
 import app_meta
 import logging
 import psutil
@@ -48,6 +49,51 @@ def _handle_stop(signum, frame):
 # Identical consecutive cues at or above this count are treated as a whisper
 # hallucination run (e.g. a whole OP of "次回予告") and dropped from the file.
 _DUPLICATE_RUN_THRESHOLD = 5
+
+# A hole between consecutive cues at or above this many seconds is reported.
+# whisper's own timestamps are written verbatim, so a hole means no text was
+# produced for that audio -- most often the VAD filter dropping it.
+_GAP_REPORT_SECONDS = 3.0
+
+# A hole that opens mid-sentence is the fingerprint of speech removed by the
+# VAD filter: genuinely silent stretches fall between finished sentences.
+# Enough of those together mean the transcript lost real dialogue.
+_GAP_PROBLEM_COUNT = 4
+_GAP_PROBLEM_SECONDS = 20.0
+
+
+def ends_sentence(text: str) -> bool:
+    """True when a cue's text closes a thought, so a following hole is normal."""
+    return bool(re.search(r"[.!?…:;\"'\)\]]\s*$", (text or "").strip()))
+
+
+def resume_mismatch(
+    metadata: Dict[str, Any],
+    current_model: str,
+    language: Optional[str],
+    vad_filter: bool,
+) -> Optional[str]:
+    """Why an unfinished subtitle must not be resumed, or None if it can be.
+
+    Resuming keeps the segments already written, so a run made with different
+    settings would re-use the very output that was wrong -- a retry with the
+    VAD filter disabled would inherit the holes it exists to repair. The VAD
+    setting is compared for exactly that reason; ``vad_enabled`` has been
+    recorded in the metadata all along, it simply was not checked.
+    """
+    if metadata.get("model") != current_model:
+        return (
+            f"⚠️  Model changed "
+            f"({metadata.get('model')} → {current_model}), starting fresh"
+        )
+    if metadata.get("language") != (language or "auto-detect"):
+        return "⚠️  Language changed, starting fresh"
+    if metadata.get("vad_enabled") != vad_filter:
+        return (
+            f"⚠️  VAD filter changed "
+            f"({metadata.get('vad_enabled')} → {vad_filter}), starting fresh"
+        )
+    return None
 
 
 class _DuplicateRunGuard:
@@ -110,6 +156,33 @@ class LoopDetectedError(Exception):
     def __init__(self, timestamp: float, message: str = ""):
         self.timestamp = timestamp
         super().__init__(message or f"Transcription loop detected at {timestamp:.1f}s")
+
+
+class UnusableWindowError(Exception):
+    """The requested --start/--end range holds no audio.
+
+    Raised instead of handing an empty file to the ASR backend, where it
+    surfaced as an opaque PyAV IndexError. Callers abort rather than
+    retrying the same impossible range with smaller models.
+    """
+
+
+# Labels backends emit for non-speech audio. They are legitimate cues,
+# not hallucinations, so they must not feed the loop detector.
+def is_non_speech_label(text: str) -> bool:
+    """True when a cue is a backend's non-speech marker, e.g. '[MUSIC]'.
+
+    The pattern lives inside the function on purpose: the generated child
+    script receives this function through ``inspect.getsource``, and a
+    separate module-level pattern would not travel with it. The re module
+    caches compiled patterns, so rebuilding it per call is a dict lookup.
+    """
+    pattern = re.compile(
+        r"^\s*[\[\(](blank_audio|blank|music|silence|noise|applause|inaudible"
+        r"|no speech|no_speech)[\]\)]\s*$",
+        re.IGNORECASE,
+    )
+    return bool(pattern.match(text or ""))
 
 
 def detect_segment_loop(
@@ -188,6 +261,42 @@ def count_phrase_repeats(text: str) -> int:
     if m2:
         best = max(best, m2.group(0).count(m2.group(1)))
     return best
+
+
+def _format_duration(audio_file: str) -> str:
+    """Human-readable length of a media file, for error messages.
+
+    Falls back to "(unknown length)" so a probe failure never masks the
+    real problem being reported.
+    """
+    total = _audio_window_duration(audio_file)
+    if not total:
+        return "(unknown length)"
+    minutes, seconds = divmod(int(total), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+# Spellings that mean "let the model detect the language". The child
+# script needs Python None for all of them; anything else is a real code.
+_AUTO_LANGUAGE_SPELLINGS = ("", "none", "auto", "auto-detect", "null")
+
+
+def _language_param(language: Optional[str], current_model: str) -> str:
+    """Render the `language` kwarg for the generated child script.
+
+    Interpolating None directly produced the string 'None', which
+    faster-whisper rejects: "'None' is not a valid language code". English-
+    only models are forced to 'en' regardless of the request.
+    """
+    if ".en" in current_model:
+        return "'en'"
+    lang = (language or "").strip().lower()
+    if lang in _AUTO_LANGUAGE_SPELLINGS:
+        return "None"
+    return repr(lang)
 
 
 def _audio_window_duration(
@@ -353,6 +462,8 @@ def verify_srt_file(
     max_repeats = 0
     worst_segment = 0
     for i, seg in enumerate(segments, 1):
+        if is_non_speech_label(seg["text"]):
+            continue
         r = count_phrase_repeats(seg["text"])
         if r > max_repeats:
             max_repeats = r
@@ -364,7 +475,10 @@ def verify_srt_file(
     elif max_repeats >= 4:
         warnings.append(f"phrase repeated {max_repeats}x in segment {worst_segment}")
 
-    norm = [seg["text"].strip().lower() for seg in segments]
+    spoken = [
+        seg for seg in segments if not is_non_speech_label(seg["text"])
+    ]
+    norm = [seg["text"].strip().lower() for seg in spoken]
     best_run = 1
     run_text = ""
     run = 1
@@ -380,14 +494,14 @@ def verify_srt_file(
     elif best_run >= 3:
         warnings.append(f"'{run_text[:40]}' in {best_run} consecutive segments")
 
-    if len(segments) >= 10 and len(set(norm)) * 2 < len(segments):
+    if len(spoken) >= 10 and len(set(norm)) * 2 < len(spoken):
         problems.append(
-            f"hallucination: only {len(set(norm))} unique of {len(segments)} segments"
+            f"hallucination: only {len(set(norm))} unique of {len(spoken)} segments"
         )
 
     # near-duplicate variant loop anywhere in the file (sliding 20-block
     # window keeps the O(n^2) cluster scan bounded)
-    window = [(t, seg["end"]) for t, seg in zip(norm, segments)]
+    window = [(t, seg["end"]) for t, seg in zip(norm, spoken)]
     loop_start = None
     for chunk in range(0, len(window), 10):
         loop_start = detect_segment_loop(window[chunk : chunk + 20])
@@ -407,6 +521,47 @@ def verify_srt_file(
                 f"covers only {report['coverage']:.0%} of "
                 f"{expected_duration:.0f}s audio"
             )
+
+    # --- gaps: audio the transcript never covers.
+    # The coverage figure below only measures how *far* the file reaches, so a
+    # transcript missing its middle still scores 100%. A hole that opens
+    # mid-sentence is speech the VAD filter removed, which no smaller model
+    # can recover -- it needs the filter turned off, not a retry.
+    gaps = []
+    for i in range(1, len(segments)):
+        prev, cur = segments[i - 1], segments[i]
+        hole = cur["start"] - prev["end"]
+        if hole >= _GAP_REPORT_SECONDS:
+            gaps.append(
+                {
+                    "seconds": round(hole, 2),
+                    "from": round(prev["end"], 2),
+                    "to": round(cur["start"], 2),
+                    "mid_sentence": not ends_sentence(prev["text"]),
+                }
+            )
+    report["gaps"] = gaps
+    report["total_gap_seconds"] = round(sum(g["seconds"] for g in gaps), 2)
+    mid_sentence_gaps = [g for g in gaps if g["mid_sentence"]]
+    report["mid_sentence_gap_seconds"] = round(
+        sum(g["seconds"] for g in mid_sentence_gaps), 2
+    )
+    if gaps:
+        largest = max(gaps, key=lambda g: g["seconds"])
+        detail = (
+            f"{len(gaps)} gap(s) totalling {report['total_gap_seconds']:.0f}s, "
+            f"largest {largest['seconds']:.0f}s at {largest['from']:.0f}s"
+        )
+        if len(mid_sentence_gaps) >= _GAP_PROBLEM_COUNT and (
+            report["mid_sentence_gap_seconds"] >= _GAP_PROBLEM_SECONDS
+        ):
+            problems.append(
+                f"speech likely removed: {len(mid_sentence_gaps)} gap(s) open "
+                f"mid-sentence, {report['mid_sentence_gap_seconds']:.0f}s total "
+                f"({detail})"
+            )
+        else:
+            warnings.append(detail)
 
     report["ok"] = not problems
 
@@ -431,6 +586,54 @@ def verify_srt_file(
 # ============ ADAPTER-BASED TRANSCRIPTION (for prefixed models) ============
 
 
+def _speaker_turns_for(
+    audio_file: str,
+    engine: Optional[str],
+    num_speakers: Optional[int],
+    min_speakers: Optional[int],
+    max_speakers: Optional[int],
+    write: Callable,
+) -> List[Any]:
+    """Speaker turns for an adapter transcription, or [] when disabled.
+
+    Runs the chosen engine (or none) on whichever audio file the adapter
+    is actually transcribing, so a two-pass run labels the window it is
+    working on rather than the whole source.
+    """
+    try:
+        import diarize
+    except ImportError as e:  # pragma: no cover - module always ships
+        write(f"Diarization unavailable ({e})")
+        return []
+
+    requested = engine or os.environ.get("WHISPERSUBS_DIARIZE_ENGINE")
+    if requested and requested.strip().lower() in ("none", "off"):
+        return []
+    if not requested:
+        # An explicit engine request is enough; otherwise a speaker count
+        # is what turns diarization on.
+        if not (num_speakers or min_speakers or max_speakers):
+            return []
+
+    resolved = diarize.resolve_engine(requested)
+    if resolved is None:
+        write(
+            f"Requested diarization engine '{requested or diarize.DEFAULT_ENGINE}'"
+            " is not installed; continuing without speaker labels"
+        )
+        return []
+
+    write(f"Diarizing with {resolved}")
+    return diarize.diarize(
+        audio_file,
+        engine=resolved,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        write=write,
+    )
+
+
 def _transcribe_with_adapter(
     audio_file: str,
     model_name: str,
@@ -451,7 +654,13 @@ def _transcribe_with_adapter(
     keep_unfinished: bool = False,
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
     media_source: Optional[str] = None,
+    diarize_engine: Optional[str] = None,
+    vad_engine: Optional[str] = None,
+    vad_params_extra: Optional[Dict[str, str]] = None,
     **kwargs,
 ) -> bool:
     """Transcribe using the adapter system (for all prefixed models).
@@ -542,6 +751,15 @@ def _transcribe_with_adapter(
                 cpu_threads=cpu_threads,
                 vad_filter=vad_filter,
                 vad_params=vad_params,
+                # Speaker bounds are named params here, so they would not
+                # ride along in **kwargs; pass them explicitly or the
+                # adapter never sees them.
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                num_speakers=num_speakers,
+                diarize_engine=diarize_engine,
+                vad_engine=vad_engine,
+                vad_params_extra=vad_params_extra,
                 **kwargs,
             )
 
@@ -580,6 +798,19 @@ def _transcribe_with_adapter(
                 # Reap the player so it is not a zombie while we transcribe.
                 threading.Thread(target=process.wait, daemon=True).start()
 
+            # Speaker turns are computed before the cue loop so the labels
+            # can ride on every written cue: the SRT streamed to the player
+            # (and the live preview) shows who is speaking, not just what
+            # was said.
+            speaker_turns = _speaker_turns_for(
+                audio_file,
+                diarize_engine,
+                num_speakers,
+                min_speakers,
+                max_speakers,
+                write,
+            )
+
             for segment in segments:
                 if _STOP_REQUESTED:
                     break
@@ -590,7 +821,7 @@ def _transcribe_with_adapter(
                     segment.end += start_offset_seconds
 
                 text_normalized = segment.text.strip().lower()
-                if text_normalized:
+                if text_normalized and not is_non_speech_label(segment.text):
                     loop_window.append((text_normalized, segment.end))
                     while len(loop_window) > loop_consecutive_required * 2:
                         loop_window.pop(0)
@@ -613,6 +844,8 @@ def _transcribe_with_adapter(
 
                 segment_count += 1
                 last_segment_end = segment.end
+                if speaker_turns:
+                    diarize.assign_speakers([segment], speaker_turns)
                 start_time = format_timestamp(segment.start if segment.start > 0 else 0)
                 end_time = format_timestamp(segment.end if segment.end > 0 else 0)
                 srt.write(f"{segment_count}\n")
@@ -1032,7 +1265,13 @@ def transcribe_audio(
     keep_unfinished: bool = False,
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
     media_source: Optional[str] = None,
+    diarize_engine: Optional[str] = None,
+    vad_engine: Optional[str] = None,
+    vad_params_extra: Optional[Dict[str, str]] = None,
     **kwargs,
 ) -> bool:
     """
@@ -1082,10 +1321,27 @@ def transcribe_audio(
                     mpv_auto=mpv_auto,
                     mpv_socket=mpv_socket,
                     media_source=media_source,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    num_speakers=num_speakers,
+                    diarize_engine=diarize_engine,
+                    vad_engine=vad_engine,
+                    vad_params_extra=vad_params_extra,
                     **kwargs,
                 )
 
         if start_time or end_time:
+            # Same guard as the local path: an empty window must fail with a
+            # readable message, not as a decoder crash on a 0-byte file.
+            window_len = _audio_window_duration(audio_file, start_time, end_time)
+            if window_len is not None and window_len <= 0.1:
+                raise UnusableWindowError(
+                    f"--start {start_time or '0'}"
+                    + (f" --end {end_time}" if end_time else "")
+                    + f" is outside {os.path.basename(audio_file)} "
+                    f"({_format_duration(audio_file)} long) — nothing to transcribe"
+                )
+
             trimmed_audio_path = os.path.splitext(audio_file)[0] + ".trimmed.m4a"
             ffmpeg_cmd = ["ffmpeg", "-y"]
 
@@ -1185,11 +1441,19 @@ def transcribe_audio(
                 mpv_auto=mpv_auto,
                 mpv_socket=mpv_socket,
                 media_source=media_source,
+                diarize_engine=diarize_engine,
+                vad_engine=vad_engine,
+                vad_params_extra=vad_params_extra,
                 whisperx_vad=kwargs.pop("whisperx_vad", True),
                 min_word_confidence=kwargs.pop("min_word_confidence", 0.4),
                 furigana=kwargs.pop("furigana", False),
                 diarize=kwargs.pop("diarize", False),
                 hf_token=kwargs.pop("hf_token", None),
+                # These are named parameters of transcribe_audio, so they
+                # are NOT in **kwargs — read them directly.
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                num_speakers=num_speakers,
             )
         except LoopDetectedError as e:
             write(
@@ -1248,8 +1512,10 @@ def transcribe_audio(
         # Initialize model with specified CPU threads
         import faster_whisper
 
+        from adapters.faster_whisper_adapter import _resolve_fw_model
+
         whisper_model = faster_whisper.WhisperModel(
-            model_name,
+            _resolve_fw_model(model_name),
             device=device,
             compute_type=compute_type,
             device_index=0,
@@ -1391,7 +1657,7 @@ def transcribe_audio(
                         f"at {segment.start:.1f}s"
                     )
                     break
-                if text_normalized:
+                if text_normalized and not is_non_speech_label(segment.text):
                     loop_window.append((text_normalized, segment.end))
                     while len(loop_window) > loop_consecutive_required * 2:
                         loop_window.pop(0)
@@ -1637,6 +1903,9 @@ def process_create(
     on_srt_created: Optional[Callable[[str, str], None]] = None,
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
     media_source: Optional[str] = None,
     show_segments: bool = False,
     source_info: Optional[Dict[str, Any]] = None,
@@ -1646,6 +1915,9 @@ def process_create(
     furigana: bool = False,
     diarize: bool = False,
     hf_token: Optional[str] = None,
+    diarize_engine: Optional[str] = None,
+    vad_engine: Optional[str] = None,
+    vad_params_extra: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Creates a new process to retry the transcription. Routes prefixed models through adapters."""
     if language == "none":
@@ -1688,6 +1960,12 @@ def process_create(
             furigana=furigana,
             diarize=diarize,
             hf_token=hf_token,
+            diarize_engine=diarize_engine,
+            vad_engine=vad_engine,
+            vad_params_extra=vad_params_extra,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            num_speakers=num_speakers,
         )
 
     # Only switch to CPU if not forcing device
@@ -1710,29 +1988,35 @@ def process_create(
     if model_name in model_names:
         i = model_names.index(model_name)
 
-        # Try with original settings first
+        # Try with original settings first. Keyword arguments throughout: the
+        # positional form put media_source into min_speakers (the speaker
+        # bounds sit ahead of it) and silently dropped the rest.
         success = try_transcribe(
-            file,
-            model_name,
-            srt_file,
-            language,
-            device,
-            compute_type,
-            force_device,
-            write,
-            cpu_threads,
-            vad_filter,
-            vad_params,
-            diarization,
-            diarization_params,
-            temperature,
-            merge_lines,
-            start_time,
-            end_time,
-            start_force,
-            mpv_auto,
-            mpv_socket,
-            media_source,
+            file=file,
+            current_model=model_name,
+            srt_file=srt_file,
+            language=language,
+            device=device,
+            compute_type=compute_type,
+            force_device=force_device,
+            write=write,
+            cpu_threads=cpu_threads,
+            vad_filter=vad_filter,
+            vad_params=vad_params,
+            diarization=diarization,
+            diarization_params=diarization_params,
+            temperature=temperature,
+            merge_lines=merge_lines,
+            start_time=start_time,
+            end_time=end_time,
+            start_force=start_force,
+            mpv_auto=mpv_auto,
+            mpv_socket=mpv_socket,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            num_speakers=num_speakers,
+            media_source=media_source,
+            mpv_ipc_reload=mpv_ipc_reload,
             show_segments=show_segments,
             source_info=source_info,
             keep_unfinished=keep_unfinished,
@@ -1745,28 +2029,34 @@ def process_create(
             write("Trying smaller models...")
             for j in range(i - 1, -1, -1):
                 current_model = model_names[j]
+                # Keyword arguments throughout: the positional form silently
+                # bound media_source to min_speakers once the speaker bounds
+                # were inserted ahead of it.
                 success = try_transcribe(
-                    file,
-                    current_model,
-                    srt_file,
-                    language,
-                    device,
-                    compute_type,
-                    force_device,
-                    write,
-                    cpu_threads,
-                    vad_filter,
-                    vad_params,
-                    diarization,
-                    diarization_params,
-                    temperature,
-                    merge_lines,
-                    start_time,
-                    end_time,
-                    start_force,
-                    mpv_auto,
-                    mpv_socket,
-                    media_source,
+                    file=file,
+                    current_model=current_model,
+                    srt_file=srt_file,
+                    language=language,
+                    device=device,
+                    compute_type=compute_type,
+                    force_device=force_device,
+                    write=write,
+                    cpu_threads=cpu_threads,
+                    vad_filter=vad_filter,
+                    vad_params=vad_params,
+                    diarization=diarization,
+                    diarization_params=diarization_params,
+                    temperature=temperature,
+                    merge_lines=merge_lines,
+                    start_time=start_time,
+                    end_time=end_time,
+                    start_force=start_force,
+                    mpv_auto=mpv_auto,
+                    mpv_socket=mpv_socket,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    num_speakers=num_speakers,
+                    media_source=media_source,
                     show_segments=show_segments,
                     source_info=source_info,
                     keep_unfinished=keep_unfinished,
@@ -1774,30 +2064,75 @@ def process_create(
                 if success:
                     write(f"Successfully transcribed with {current_model}")
                     return True
+
+            # Every rung above reused the same VAD settings, so a filter that
+            # removed the speech could not be escaped by shrinking the model:
+            # all of them inherited the same holes. Retry the originally
+            # requested model with the filter off before changing hardware.
+            if vad_filter:
+                write(
+                    "Retrying without the VAD filter "
+                    "(it may have dropped speech)..."
+                )
+                if try_transcribe(
+                    file=file,
+                    current_model=model_name,
+                    srt_file=srt_file,
+                    language=language,
+                    device=device,
+                    compute_type=compute_type,
+                    force_device=force_device,
+                    write=write,
+                    cpu_threads=cpu_threads,
+                    vad_filter=False,
+                    vad_params=None,
+                    diarization=diarization,
+                    diarization_params=diarization_params,
+                    temperature=temperature,
+                    merge_lines=merge_lines,
+                    start_time=start_time,
+                    end_time=end_time,
+                    start_force=start_force,
+                    mpv_auto=mpv_auto,
+                    mpv_socket=mpv_socket,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    num_speakers=num_speakers,
+                    media_source=media_source,
+                    show_segments=show_segments,
+                    source_info=source_info,
+                    keep_unfinished=keep_unfinished,
+                ):
+                    write("Successfully transcribed with the VAD filter disabled")
+                    return True
+
             if device == "cuda":
                 write("All GPU models failed, falling back to CPU...")
                 return try_transcribe(
-                    file,
-                    "medium.en" if "en" in model_name else "large-v3",
-                    srt_file,
-                    language,
-                    "cpu",
-                    "int8",
-                    False,
-                    write,
-                    cpu_threads,
-                    vad_filter,
-                    vad_params,
-                    diarization,
-                    diarization_params,
-                    temperature,
-                    merge_lines,
-                    start_time,
-                    end_time,
-                    start_force,
-                    mpv_auto,
-                    mpv_socket,
-                    media_source,
+                    file=file,
+                    current_model="medium.en" if "en" in model_name else "large-v3",
+                    srt_file=srt_file,
+                    language=language,
+                    device="cpu",
+                    compute_type="int8",
+                    force_device=False,
+                    write=write,
+                    cpu_threads=cpu_threads,
+                    vad_filter=vad_filter,
+                    vad_params=vad_params,
+                    diarization=diarization,
+                    diarization_params=diarization_params,
+                    temperature=temperature,
+                    merge_lines=merge_lines,
+                    start_time=start_time,
+                    end_time=end_time,
+                    start_force=start_force,
+                    mpv_auto=mpv_auto,
+                    mpv_socket=mpv_socket,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    num_speakers=num_speakers,
+                    media_source=media_source,
                     show_segments=show_segments,
                     source_info=source_info,
                     keep_unfinished=keep_unfinished,
@@ -2191,7 +2526,11 @@ def _two_pass_transcribe_adapter(
     source_info: Optional[Dict[str, Any]] = None,
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
     media_source: Optional[str] = None,
+    diarize_engine: Optional[str] = None,
     **kwargs,
 ) -> bool:
     """
@@ -2232,6 +2571,10 @@ def _two_pass_transcribe_adapter(
         mpv_auto=mpv_auto,
         mpv_socket=mpv_socket,
         media_source=media_source,
+        diarize_engine=diarize_engine,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        num_speakers=num_speakers,
         **kwargs,
     )
 
@@ -2264,6 +2607,10 @@ def _two_pass_transcribe_adapter(
         on_srt_created=on_srt_created,
         show_segments=show_segments,
         source_info=source_info,
+        diarize_engine=diarize_engine,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        num_speakers=num_speakers,
         **kwargs,
     )
 
@@ -2305,7 +2652,11 @@ def _transcribe_single_pass_adapter(
     source_info: Optional[Dict[str, Any]] = None,
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
     media_source: Optional[str] = None,
+    diarize_engine: Optional[str] = None,
     **kwargs,
 ) -> bool:
     """
@@ -2316,6 +2667,17 @@ def _transcribe_single_pass_adapter(
     temp_audio_path = None
 
     if start_time or end_time:
+        # Empty window (--start past the end) must fail readably; see the
+        # local path for the failure this prevents.
+        window_len = _audio_window_duration(audio_file, start_time, end_time)
+        if window_len is not None and window_len <= 0.1:
+            raise UnusableWindowError(
+                f"--start {start_time or '0'}"
+                + (f" --end {end_time}" if end_time else "")
+                + f" is outside {os.path.basename(audio_file)} "
+                f"({_format_duration(audio_file)} long) — nothing to transcribe"
+            )
+
         temp_audio_path = (
             os.path.splitext(audio_file)[0] + f".trimmed_{os.getpid()}.m4a"
         )
@@ -2404,6 +2766,10 @@ def _transcribe_single_pass_adapter(
             mpv_auto=mpv_auto,
             mpv_socket=mpv_socket,
             media_source=media_source,
+            diarize_engine=diarize_engine,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            num_speakers=num_speakers,
             **kwargs,
         )
     finally:
@@ -2437,6 +2803,9 @@ def try_transcribe(
     start_force: bool = False,
     mpv_auto: bool = False,
     mpv_socket: str = "/tmp/mpvsocket",
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+    num_speakers: Optional[int] = None,
     media_source: Optional[str] = None,
     mpv_ipc_reload: Optional[Callable] = None,
     show_segments: bool = False,
@@ -2498,6 +2867,19 @@ def try_transcribe(
         start_offset_seconds = 0.0
 
         if start_time or end_time:
+            # A window that starts at/after the media end (--start on a short
+            # OP/ED, say) cuts to nothing; ffmpeg still exits 0 and the empty
+            # file then crashes the decoder with an opaque PyAV IndexError.
+            # Fail here with a message that names the range instead.
+            window_len = _audio_window_duration(file, start_time, end_time)
+            if window_len is not None and window_len <= 0.1:
+                raise UnusableWindowError(
+                    f"--start {start_time or '0'}"
+                    + (f" --end {end_time}" if end_time else "")
+                    + f" is outside {os.path.basename(file)} "
+                    f"({_format_duration(file)} long) — nothing to transcribe"
+                )
+
             trimmed_audio_path = os.path.splitext(file)[0] + ".trimmed.m4a"
             # Use -ss BEFORE -i for faster seeking, -vn to skip video processing
             ffmpeg_cmd = ["ffmpeg", "-y"]
@@ -2610,14 +2992,13 @@ def try_transcribe(
                 with open(metadata_file, "r", encoding="utf-8") as f:
                     metadata = json.load(f)
 
-                # Validate key settings match
-                if metadata.get("model") != current_model:
-                    write(
-                        f"⚠️  Model changed ({metadata.get('model')} → {current_model}), starting fresh"
-                    )
-                    can_resume = False
-                elif metadata.get("language") != (language or "auto-detect"):
-                    write(f"⚠️  Language changed, starting fresh")
+                # Validate key settings match. A VAD change counts: resuming
+                # would keep the segments the filter produced.
+                mismatch = resume_mismatch(
+                    metadata, current_model, language, vad_filter
+                )
+                if mismatch:
+                    write(mismatch)
                     can_resume = False
             except Exception as e:
                 write(f"⚠️  Could not read metadata: {e}")
@@ -2755,12 +3136,7 @@ def try_transcribe(
         except OSError:
             write(f"Could not create symlink, skipping")
 
-        is_english_only = ".en" in current_model
-        language_param = (
-            "'en'"
-            if is_english_only
-            else ("None" if language == "none" else f"'{language}'")
-        )
+        language_param = _language_param(language, current_model)
         whisper_log = srt_file.replace(".srt", ".whisper.log")
 
         # Initialize audio_duration for progress tracking (will be updated after model loads)
@@ -2773,6 +3149,7 @@ sys.path.insert(0, r"{os.path.dirname(os.path.abspath(__file__))}")
 
 import faster_whisper
 import os
+import re
 import threading
 import queue
 import time
@@ -2836,6 +3213,11 @@ compression_fail_max = 20
 
 {inspect.getsource(count_phrase_repeats)}
 
+# This script runs in its own process, so every module-level helper it
+# references has to be injected here. Forgetting one raises NameError at
+# runtime (which is how is_non_speech_label went missing per segment).
+{inspect.getsource(is_non_speech_label)}
+
 def write_segments():
     global segments_written
     global last_segment_end
@@ -2873,7 +3255,7 @@ def write_segments():
                     sys.stdout.flush()
 
                 text_normalized = segment.text.strip().lower()
-                if text_normalized:
+                if text_normalized and not is_non_speech_label(segment.text):
                     loop_window.append((text_normalized, adjusted_end))
                     while len(loop_window) > loop_consecutive_required * 2:
                         loop_window.pop(0)
@@ -2906,7 +3288,9 @@ try:
     print(f"Starting transcription with model {current_model} on device {{device}}")
     print(f"Full log will be written to: {{log_file}}")
 
-    model = faster_whisper.WhisperModel("{current_model}", device=device, compute_type=compute_type, cpu_threads=cpu_threads if cpu_threads else os.cpu_count())
+    # MODEL_NAMES carries HF repo ids; this child process has no access to
+    # the adapter, so the resolved faster-whisper name is baked in here.
+    model = faster_whisper.WhisperModel("{_resolve_fw_model(current_model)}", device=device, compute_type=compute_type, cpu_threads=cpu_threads if cpu_threads else os.cpu_count())
 
     # Build transcribe kwargs dynamically - only pass non-None values
     transcribe_kwargs = {{
@@ -3198,29 +3582,34 @@ finally:
 
             if _loop_retry_count < 2:
                 write(f"Retrying transcription (attempt {_loop_retry_count + 1}/2)...")
+                # Keywords: positionally, media_source and mpv_ipc_reload were
+                # landing in min_speakers/max_speakers, so the retry lost both.
                 return try_transcribe(
-                    file,
-                    current_model,
-                    srt_file,
-                    language,
-                    device,
-                    compute_type,
-                    force_device,
-                    write,
-                    cpu_threads,
-                    vad_filter,
-                    vad_params,
-                    diarization,
-                    diarization_params,
-                    temperature,
-                    merge_lines,
-                    start_time,
-                    end_time,
-                    start_force,
-                    mpv_auto,
-                    mpv_socket,
-                    media_source,
-                    mpv_ipc_reload,
+                    file=file,
+                    current_model=current_model,
+                    srt_file=srt_file,
+                    language=language,
+                    device=device,
+                    compute_type=compute_type,
+                    force_device=force_device,
+                    write=write,
+                    cpu_threads=cpu_threads,
+                    vad_filter=vad_filter,
+                    vad_params=vad_params,
+                    diarization=diarization,
+                    diarization_params=diarization_params,
+                    temperature=temperature,
+                    merge_lines=merge_lines,
+                    start_time=start_time,
+                    end_time=end_time,
+                    start_force=start_force,
+                    mpv_auto=mpv_auto,
+                    mpv_socket=mpv_socket,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    num_speakers=num_speakers,
+                    media_source=media_source,
+                    mpv_ipc_reload=mpv_ipc_reload,
                     show_segments=show_segments,
                     source_info=source_info,
                     _loop_retry_count=_loop_retry_count + 1,
@@ -3287,6 +3676,12 @@ finally:
             return False
         write(f"Process exited with code {exit_code}")
         return False
+
+    except UnusableWindowError:
+        # Not a transcription failure: the requested range is empty. Let it
+        # out so the caller aborts instead of retrying every smaller model
+        # against the same impossible window.
+        raise
 
     except Exception as e:
         write(f"An error occurred: {e}")

@@ -5,3 +5,5 @@ python-socketio
 pyjwt
 bcrypt
 python-multipart
+qrcode
+httpx

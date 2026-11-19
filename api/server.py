@@ -419,7 +419,8 @@ class TranscriptionRequest(BaseModel):
     language: Optional[str] = Field(None, description="Source audio language")
     run_mpv: bool = Field(False, description="Run MPV player")
 
-    # VAD settings
+    # VAD settings. None = "not requested": the caller's default (VAD off)
+    # applies, so this endpoint can opt in without changing the default.
     vad_filter: Optional[bool] = Field(None, description="Enable VAD filter")
     vad_silence_duration: Optional[int] = Field(
         None, description="VAD min silence (ms)"
@@ -429,6 +430,9 @@ class TranscriptionRequest(BaseModel):
     diarization: bool = Field(False, description="Enable speaker diarization")
     min_speakers: Optional[int] = Field(None, description="Min speakers")
     max_speakers: Optional[int] = Field(None, description="Max speakers")
+    num_speakers: Optional[int] = Field(
+        None, description="Exact speaker count (overrides min/max)"
+    )
 
     # Advanced
     temperature: Optional[float] = Field(None, description="Sampling temperature")
@@ -793,6 +797,7 @@ async def start_transcription(
                 diarization=request.diarization,
                 min_speakers=request.min_speakers,
                 max_speakers=request.max_speakers,
+                num_speakers=request.num_speakers,
                 # Advanced
                 temperature=request.temperature,
                 start_time=request.start_time,
@@ -1036,6 +1041,7 @@ async def start_batch_transcription(
                     diarization=request.diarization,
                     min_speakers=request.min_speakers,
                     max_speakers=request.max_speakers,
+                    num_speakers=request.num_speakers,
                     temperature=request.temperature,
                     start_time=request.start_time,
                     end_time=request.end_time,
@@ -1222,39 +1228,115 @@ async def get_subtitles_by_url(
         return {"subtitles": None, "message": "No subtitles found"}
 
 def _extract_video_id(url: str) -> Optional[str]:
-    """Extract video ID from various video platform URLs."""
-    try:
-        parsed = urlparse(url)
-        if 'youtube.com' in parsed.netloc or 'youtu.be' in parsed.netloc:
-            if 'youtu.be' in parsed.netloc:
-                return parsed.path.lstrip('/')
-            else:
-                qs = parse_qs(parsed.query)
-                return qs.get('v', [''])[0]
-        # Add other platforms as needed
-        return parsed.path.strip('/').split('/')[-1]
-    except Exception:
+    """Extract the platform video ID from a URL.
+
+    Handles the YouTube shapes that actually occur in the wild:
+    watch?v=, youtu.be/<id>, /shorts/<id>, /live/<id>, /embed/<id>,
+    and bare 11-char IDs. Non-YouTube sources fall back to the last
+    path segment (which is what the on-disk filename matching expects).
+    """
+    if not url:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+
+    if "youtu.be" in host:
+        candidate = path.lstrip("/").split("/")[0]
+        return candidate or None
+
+    if "youtube.com" in host or "youtube-nocookie.com" in host:
+        qs = urllib.parse.parse_qs(parsed.query)
+        if qs.get("v"):
+            return qs["v"][0]
+        for prefix in ("/shorts/", "/live/", "/embed/", "/v/"):
+            if path.startswith(prefix):
+                candidate = path[len(prefix):].split("/")[0]
+                if candidate:
+                    return candidate
         return None
 
+    parts = [p for p in path.strip("/").split("/") if p]
+    return parts[-1] if parts else None
+
+# video_id -> newest SRT path, rebuilt at most once per TTL. The library
+# scan reads helper files per item, so it is cached rather than repeated
+# on every page load.
+_sub_index_cache: Dict[str, Any] = {"ts": 0.0, "map": {}}
+_SUB_INDEX_TTL = 30.0
+
+
+def _subtitle_index() -> Dict[str, str]:
+    """Map platform video ID -> newest finished SRT path.
+
+    whisper-subs names subtitles after the *title*, not the video ID, so
+    the ID is recovered from each item's inferred source URL (the .htm
+    helper carries `URL='...'`, the metadata JSON carries `url`).
+    """
+    now = time.time()
+    cached = _sub_index_cache["map"]
+    if cached and now - _sub_index_cache["ts"] < _SUB_INDEX_TTL:
+        return cached
+
+    index: Dict[str, str] = {}
+    newest: Dict[str, float] = {}
+    for item in _library_items():
+        url = item.get("source_url")
+        if not url:
+            continue
+        vid = _extract_video_id(url)
+        path = item.get("path")
+        if not vid or not path:
+            continue
+        srt_path = os.path.join(OUTPUT_DIR, path)
+        if not os.path.isfile(srt_path):
+            continue
+        mtime = os.path.getmtime(srt_path)
+        if vid not in newest or mtime > newest[vid]:
+            newest[vid] = mtime
+            index[vid] = srt_path
+
+    _sub_index_cache["ts"] = now
+    _sub_index_cache["map"] = index
+    return index
+
+
 def _find_subtitle_by_video_id(video_id: str) -> Optional[str]:
-    """Find SRT file content matching the video ID."""
-    if not os.path.exists(OUTPUT_DIR):
+    """SRT content for a video ID, or None.
+
+    Primary lookup is the source-URL index (matches how whisper-subs
+    actually names files). A filename glob is the fallback for libraries
+    that embed the ID in the name; the ID is sanitized first so it cannot
+    walk out of OUTPUT_DIR.
+    """
+    if not video_id:
         return None
-    
-    patterns = [
-        f"**/*{video_id}*.srt",
-        f"**/*{video_id}*.en.srt",
-        f"**/*{video_id}*.en-US.srt",
+
+    path = _subtitle_index().get(video_id)
+    if path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "", video_id)
+    if not safe_id or not os.path.isdir(OUTPUT_DIR):
+        return None
+    root = os.path.realpath(OUTPUT_DIR)
+    candidates = [
+        p
+        for p in Path(root).rglob(f"*{safe_id}*.srt")
+        if os.path.isfile(p) and os.path.realpath(p).startswith(root + os.sep)
     ]
-    
-    for pattern in patterns:
-        matches = list(Path(OUTPUT_DIR).rglob(pattern))
-        if matches:
-            # Return the most recently modified
-            latest = max(matches, key=lambda p: p.stat().st_mtime)
-            return latest.read_text(encoding='utf-8')
-    
-    return None
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        with open(latest, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 @app.get("/subtitles/list")
@@ -2282,6 +2364,156 @@ async def api_search_youtube(
     return {"results": results, "count": len(results), "query": q}
 
 
+# ---------------------------------------------------------------------------
+# YouTube: channel discovery, subscriptions, feed
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/v1/youtube/channels/search")
+async def api_youtube_channel_search(
+    q: str,
+    limit: int = 8,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Find YouTube channels by name or @handle."""
+    import asyncio
+
+    import api.youtube as yt_mod
+
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    results = await asyncio.to_thread(yt_mod.search_channels, q, limit)
+    for r in results:
+        if r.get("avatar"):
+            r["avatar"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+                r["avatar"], safe=""
+            )
+        r["subscribed"] = yt_mod.is_subscribed(r.get("url") or "")
+    return {"results": results, "count": len(results), "query": q}
+
+
+@app.get("/api/v1/youtube/channel")
+async def api_youtube_channel(
+    channel: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Resolve a typed channel reference (name/@handle/URL) to a channel."""
+    import asyncio
+
+    import api.youtube as yt_mod
+
+    text = (channel or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty channel")
+
+    resolved = await asyncio.to_thread(yt_mod.channel_from_query, text)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    if resolved.get("avatar"):
+        resolved["avatar"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+            resolved["avatar"], safe=""
+        )
+    resolved["subscribed"] = yt_mod.is_subscribed(resolved.get("url") or "")
+    return resolved
+
+
+@app.get("/api/v1/youtube/channel/videos")
+async def api_youtube_channel_videos(
+    channel: str,
+    limit: int = 50,
+    refresh: bool = Query(False),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Video list for a channel URL (cached 30 min; ?refresh=true forces)."""
+    import asyncio
+
+    import api.youtube as yt_mod
+
+    url = (channel or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Empty channel")
+
+    videos = await asyncio.to_thread(yt_mod.fetch_channel_videos, url, limit, refresh)
+    for v in videos:
+        if v.get("thumbnail_url"):
+            v["thumbnail_url"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+                v["thumbnail_url"], safe=""
+            )
+    return {"channel": url, "videos": videos, "count": len(videos)}
+
+
+@app.get("/api/v1/youtube/subscriptions")
+async def api_youtube_subscriptions(
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Channels this account follows."""
+    import api.youtube as yt_mod
+
+    subs = yt_mod.load_subscriptions()
+    for s in subs:
+        if s.get("avatar"):
+            s["avatar"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+                s["avatar"], safe=""
+            )
+    return {"subscriptions": subs, "count": len(subs)}
+
+
+class SubscribeRequest(BaseModel):
+    channel: Dict[str, Any]
+
+
+@app.post("/api/v1/youtube/subscriptions")
+async def api_youtube_subscribe(
+    body: SubscribeRequest,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Follow a channel (id/name/url)."""
+    import api.youtube as yt_mod
+
+    result = yt_mod.subscribe(body.channel or {})
+    return result
+
+
+@app.delete("/api/v1/youtube/subscriptions")
+async def api_youtube_unsubscribe(
+    channel: str,
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Unfollow a channel by URL."""
+    import api.youtube as yt_mod
+
+    return yt_mod.unsubscribe(channel)
+
+
+@app.get("/api/v1/youtube/feed")
+async def api_youtube_feed(
+    limit: int = 20,
+    refresh: bool = Query(False),
+    subscribed_only: bool = Query(True),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Ranked videos from followed channels (local algorithm, no accounts)."""
+    import asyncio
+
+    import api.youtube as yt_mod
+
+    feed = await asyncio.to_thread(
+        yt_mod.recommend, limit, subscribed_only, refresh
+    )
+    for item in feed:
+        if item.get("thumbnail_url"):
+            item["thumbnail_url"] = "/api/v1/thumb/proxy?url=" + urllib.parse.quote(
+                item["thumbnail_url"], safe=""
+            )
+    return {
+        "feed": feed,
+        "count": len(feed),
+        "subscribed": len(yt_mod.load_subscriptions()),
+    }
+
+
 @app.get("/api/v1/search/twitch")
 async def api_search_twitch(
     channel: str,
@@ -2495,6 +2727,9 @@ async def api_export_subtitles(
 
 # Search history: per-user recent queries (persisted JSON, in-memory fallback)
 SEARCH_HISTORY_FILE = os.path.expanduser("~/.config/WhisperSubs/search_history.json")
+# Caption formats that arrive as SRT with no conversion; lower index = cheaper.
+# Mirrors caption_fetch._FORMAT_RANK so the server and the CLI agree.
+_SRT_FIRST = ("srt", "vtt", "json3", "ttml")
 _search_history_lock = threading.Lock()
 _search_history_memory: Dict[str, Any] = {}
 
@@ -2522,6 +2757,114 @@ def _save_search_history(history: Dict[str, Any]) -> None:
             json.dump(history, f, indent=2)
     except OSError:
         pass  # read-only FS -> history lives in memory for this session
+
+
+@app.get("/api/v1/captions")
+async def api_captions(
+    url: str = Query(...),
+    dest: Optional[str] = Query(
+        None,
+        description="Relative output filename to write the SRT to. "
+        "Omit to only list available tracks.",
+    ),
+    langs: str = Query(""),
+    allow_automatic: bool = Query(False),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """List, or fetch, YouTube captions for a URL.
+
+    Without `dest`, returns the available tracks (so a client can show what
+    exists before spending bandwidth). With `dest` (a relative filename), the
+    best track is written under OUTPUT_DIR/captions/ and the result describes
+    the file that was written.
+
+    Human-made captions are preferred; automatic ones are only used when
+    `allow_automatic` is set, matching the CLI default.
+    """
+    import asyncio
+
+    import caption_fetch
+
+    wanted = [l.strip() for l in langs.split(",") if l.strip()] or None
+
+    tracks = await asyncio.to_thread(caption_fetch.list_captions, url)
+    if not tracks:
+        raise HTTPException(
+            status_code=404, detail="No captions available for that URL"
+        )
+
+    if not dest:
+        # One row per language: YouTube lists srt/vtt/json3/ttml/srv* for the
+        # same language, and the fetch path converts the cheapest format, so
+        # handing the client every row would only give it duplicates to
+        # filter out. Human tracks always win over automatic.
+        seen: Dict[str, Dict[str, Any]] = {}
+        for t in tracks:
+            if t.ext not in _SRT_FIRST:
+                # Convertible formats need the server's converters; the app
+                # can still request them via ?langs=&allow_automatic=.
+                continue
+            key = caption_fetch._lang_key(t.lang)
+            row = {
+                "lang": t.lang,
+                "ext": t.ext,
+                "automatic": t.is_automatic,
+                "name": t.name,
+            }
+            previous = seen.get(key)
+            better = (
+                previous is None
+                or (previous["automatic"] and not t.is_automatic)
+                or (
+                    previous["automatic"] == t.is_automatic
+                    and _SRT_FIRST.index(t.ext) < _SRT_FIRST.index(previous["ext"])
+                )
+            )
+            if better:
+                seen[key] = row
+        return {
+            "url": url,
+            "tracks": list(seen.values()),
+            "has_human": caption_fetch.has_human_captions(url),
+        }
+
+    safe = os.path.basename(dest)
+    # Never let a client name escape the captions dir or carry a traversal.
+    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in safe)
+    if not safe.endswith(".srt"):
+        safe += ".srt"
+    # Strip any extension so caption_fetch appends ".<lang>.srt".
+    out_base = os.path.join(OUTPUT_DIR, "captions", safe[:-4])
+    os.makedirs(os.path.dirname(out_base), exist_ok=True)
+
+    result = await asyncio.to_thread(
+        caption_fetch.fetch_captions, url, out_base, wanted, allow_automatic
+    )
+    if not result.ok:
+        raise HTTPException(status_code=404, detail=result.reason)
+
+    rel = os.path.relpath(result.path, OUTPUT_DIR).replace(os.sep, "/")
+    return {
+        "ok": True,
+        "path": result.path,
+        "rel_path": rel,
+        "lang": result.lang,
+        "automatic": result.automatic,
+        "subtitle_url": "/api/v1/media/file?path=" + urllib.parse.quote(rel, safe=""),
+    }
+
+
+@app.get("/api/v1/search/history")
+async def api_get_search_history(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: str = Depends(get_current_user_optional),
+):
+    """Recent search queries (per-user, most recent first)."""
+    user = current_user or "anonymous"
+    with _search_history_lock:
+        history = _load_search_history()
+    entries = history.get(user, [])[:limit]
+    return {"history": entries}
 
 
 @app.post("/api/v1/search/history")
@@ -2785,8 +3128,13 @@ async def connect_page():
     Mobile connect page: shows QR code encoding the server URL (and API key if
     present), plus manual entry fields.
     """
-    import qrcode
-    import qrcode.image.svg
+    # QR rendering is optional: the page must still work (URL + key are
+    # shown below the image) when the qrcode package is not installed.
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ImportError:
+        qrcode = None
 
     # Detect server host + port from request
     base_url = f"http://{os.environ.get('WHISPER_HOST', '')}:{os.environ.get('WHISPER_PORT', '8000')}"
@@ -2814,11 +3162,17 @@ async def connect_page():
     if api_key:
         connect_data = f"{base_url}?api_key={api_key}"
 
-    qr = qrcode.QRCode(border=2, box_size=8)
-    qr.add_data(connect_data)
-    qr.make(fit=True)
-    img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
-    qr_svg = img.to_string().decode("utf-8")
+    if qrcode is not None:
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data(connect_data)
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
+        qr_svg = img.to_string().decode("utf-8")
+    else:
+        qr_svg = (
+            '<div class="hint">QR unavailable &mdash; install it with '
+            "<code>pip install qrcode</code>, or enter the URL below manually.</div>"
+        )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -3174,7 +3528,7 @@ async def start_live_transcription(
     compute_type: str = Form("int8"),
     force: bool = Form(False),
     language: Optional[str] = Form(None),
-    vad_filter: bool = Form(True),
+    vad_filter: bool = Form(False),
     background_tasks: BackgroundTasks = None,
     current_user: str = Depends(get_current_user),
 ):

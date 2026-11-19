@@ -163,18 +163,36 @@ def _group_tokens(
         )
 
     def word_break(begin: int, limit: int) -> Optional[int]:
-        """Largest k in (begin, limit] where a new word starts at token k.
+        """Largest k in (begin, limit] where a cue may end without cutting a
+        word in half.
 
-        sherpa emits word-initial tokens with a LEADING space (" grandin") and
-        continuations without one ("ha"). A cue may therefore end at k only
-        when tokens[k] begins a word; looking for whitespace at the *end* of
-        the accumulated text never matches, which is what let cues be cut
-        mid-word at exactly max_chars.
+        A cue may end at k only when token k is the last token of its word,
+        i.e. when the token after k starts a new word. Both conventions in
+        the wild have to be handled:
+
+        - whitespace-marked tokens (" grandin"), where the *next* token
+          begins with a space;
+        - a word split across bare BPE tokens ("grandin", "ha", "."),
+          where the next token " o" begins with a space.
+
+        Returning the *start* of the next word (the previous behaviour)
+        made cue 1 end on "…grandin" with "ha." opening the next cue,
+        because the token that follows a bare word-initial token is
+        usually bare too.
         """
-        for k in range(min(limit, total - 1), begin, -1):
-            token = tokens[k]
-            if token[:1] in (" ", "\n", "\t"):
-                return k
+        # The scan starts one past `limit`: `limit` is the token that
+        # overflowed, and the word it belongs to may legitimately be
+        # completed by it. Starting at `limit` itself (the old behaviour)
+        # never saw that token, so the cue was cut on the token before it.
+        for k in range(min(limit + 1, total - 1), begin, -1):
+            nxt = tokens[k + 1] if k + 1 < total else None
+            if nxt is None:
+                return k + 1
+            if nxt[:1] in (" ", "\n", "\t"):
+                return k + 1
+        # No boundary inside the cue: fall back to the last token that is
+        # short enough, so a mid-word cut at max_chars is still preferred
+        # over an unusably short cue.
         return None
 
     total = len(tokens)
@@ -352,9 +370,10 @@ class SherpaAdapter(TranscriptionAdapter):
         # Short clips take the single-pass path: it keeps timestamps exact and
         # avoids splitting a sentence that would fit in one window anyway.
         if duration <= window:
-            return self._decode_offline_window(
+            tokens, times = self._decode_offline_window(
                 recognizer, samples, rate, offset=0.0, emitted_until=0.0, write=write
             )
+            return _group_tokens(tokens, times)
 
         step = window - overlap
         all_tokens: List[str] = []

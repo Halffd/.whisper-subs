@@ -25,3 +25,4 @@ moonshine
 whisperx
 deepgram-sdk
 google-cloud-speech
+pykakasi>=2.2

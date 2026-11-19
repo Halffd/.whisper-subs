@@ -10,6 +10,7 @@ import sys
 import os
 import argparse
 import importlib
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
@@ -24,6 +25,16 @@ class Segment:
     start: float
     end: float
     text: str
+    # Word-level detail (WhisperX alignment). Empty when the backend is
+    # segment-only — the writer treats absent words as plain text cues.
+    words: Optional[List[Dict[str, Any]]] = None
+    # Mean per-word alignment confidence, 0.0-1.0. None = not computed.
+    confidence: Optional[float] = None
+    # BCP-47-ish language tag from the backend (ja, en, ...). Drives
+    # furigana rendering and SRT metadata.
+    language: Optional[str] = None
+    # Speaker label from diarization (pyannote). None when not diarized.
+    speaker: Optional[str] = None
 
 
 # ============ Transcription Adapter (Strategy Interface) ============
@@ -315,6 +326,65 @@ def getIndex(model_name: str) -> int:
         return -1
 
 
+def _normalize_provider_alias(value: str) -> str:
+    """Fold a provider name to a comparable key ('whisper.cpp' -> 'whispercpp')."""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _default_model_for_prefix(prefix: str, adapter: TranscriptionAdapter) -> Optional[str]:
+    """Canonical model used when a provider is named without a model."""
+    for name in ADAPTER_MODEL_NAMES:
+        if name.startswith(prefix + ":"):
+            return name
+    models = adapter.get_model_names()
+    return f"{prefix}:{models[0]}" if models else None
+
+
+_alias_map: Optional[Dict[str, str]] = None
+_alias_adapters: Optional[Dict[str, TranscriptionAdapter]] = None
+
+
+def _provider_alias_map() -> Tuple[Dict[str, str], Dict[str, TranscriptionAdapter]]:
+    """Map every provider spelling (prefix, display name) to its prefix."""
+    global _alias_map, _alias_adapters
+    if _alias_map is None or _alias_adapters is None:
+        alias_map: Dict[str, str] = {}
+        adapters = build_adapter_map()
+        for prefix, adapter in adapters.items():
+            alias_map[_normalize_provider_alias(prefix)] = prefix
+            alias_map[_normalize_provider_alias(adapter.display_name)] = prefix
+        _alias_map = alias_map
+        _alias_adapters = adapters
+    return _alias_map, _alias_adapters
+
+
+def resolve_provider_prefix(value: str) -> Optional[str]:
+    """Canonical adapter prefix for a provider spelling, or None."""
+    key = _normalize_provider_alias(value)
+    if not key:
+        return None
+    alias_map, _adapters = _provider_alias_map()
+    return alias_map.get(key)
+
+
+def resolve_provider_alias(value: str) -> Optional[str]:
+    """Map a provider name to '<prefix>:<model>'.
+
+    Accepts the adapter prefix ('whispercpp') and the display name
+    ('whisper.cpp', 'WhisperX'), so a backend can be selected without
+    remembering its exact spelling. Returns None when the value is not a
+    provider name.
+    """
+    prefix = resolve_provider_prefix(value)
+    if not prefix:
+        return None
+    _alias_map, adapters = _provider_alias_map()
+    adapter = adapters.get(prefix)
+    if adapter is None:
+        return None
+    return _default_model_for_prefix(prefix, adapter)
+
+
 def list_available_models() -> None:
     print("Available models:")
     print("\n  -- Local (faster-whisper) --")
@@ -344,12 +414,21 @@ def list_available_models() -> None:
 
 def getName(value: str) -> Optional[str]:
     if ":" in value:
+        # The provider part may contain dots ('whisper.cpp:small'), so try
+        # every colon from the left and take the first known provider.
+        for index, char in enumerate(value):
+            if char != ":":
+                continue
+            canonical = resolve_provider_prefix(value[:index])
+            if canonical:
+                return f"{canonical}:{value[index + 1:]}"
         return value
+    if value in ALL_MODEL_NAMES or value in MODEL_NAMES:
+        return value
+    alias = resolve_provider_alias(value)
+    if alias:
+        return alias
     try:
-        if value in ALL_MODEL_NAMES:
-            return value
-        if value in MODEL_NAMES:
-            return value
         model_index = int(value)
         if 0 <= model_index < len(ALL_MODEL_NAMES):
             return ALL_MODEL_NAMES[model_index]

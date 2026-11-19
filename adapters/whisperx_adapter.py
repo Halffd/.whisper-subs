@@ -39,8 +39,17 @@ class WhisperXAdapter(TranscriptionAdapter):
         compute_type: str = 'int8',
         diarize: bool = False,
         hf_token: Optional[str] = None,
+        num_speakers: Optional[int] = None,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
         **kwargs,
     ) -> Tuple[List[Segment], Any]:
+        """Transcribe with WhisperX.
+
+        Diarization (``diarize=True``) needs an HF token and uses pyannote.
+        ``num_speakers`` pins the count exactly; otherwise ``min_speakers``
+        / ``max_speakers`` bound the automatic estimate.
+        """
         import whisperx
         import torch
 
@@ -50,12 +59,33 @@ class WhisperXAdapter(TranscriptionAdapter):
         # VAD runs inside the pipeline when enabled: upstream load_model
         # wires vad_method ("pyannote" needs an HF token; silero ships
         # weights with the package). Disabling here keeps raw segmentation.
+        # A custom VAD runs before the model: its regions replace
+        # whisperx's own segmentation. `vad_model` outranks `vad_method`
+        # inside load_model, so naming one keeps whisperx's built-in
+        # silero/pyannote path when no custom engine is requested.
         use_vad = kwargs.get("vad", True)
+        vad_engine = kwargs.get("vad_engine")
+        vad_model_obj = None
+        if use_vad and vad_engine and vad_engine not in ("silero", "pyannote"):
+            try:
+                import vad as _vad_mod
+
+                vad_model_obj = _vad_mod.build_whisperx_vad(
+                    audio_file, vad_engine,
+                    params=kwargs.get("vad_params_extra"), write=write,
+                )
+                if vad_model_obj is None:
+                    write(f"VAD {vad_engine} produced no regions; using raw audio")
+            except Exception as e:
+                write(f"VAD {vad_engine} unavailable ({e}); using raw audio")
+
         load_kwargs = {}
-        if use_vad:
+        if use_vad and vad_model_obj is None:
             load_kwargs["vad_method"] = kwargs.get("vad_method", "silero")
             if load_kwargs["vad_method"] == "pyannote":
                 load_kwargs["vad_options"] = {}
+        else:
+            load_kwargs["vad_model"] = vad_model_obj
         asr = whisperx.load_model(
             model,
             _device,
@@ -99,47 +129,77 @@ class WhisperXAdapter(TranscriptionAdapter):
                         whisperx, "diarize", whisperx
                     ).DiarizationPipeline
                     diarize_model = diarize_cls(token=_hf_token, device=_device)
-                    diarize_segments = diarize_model(audio)
+                    diarize_segments = diarize_model(
+                        audio,
+                        num_speakers=num_speakers,
+                        min_speakers=min_speakers,
+                        max_speakers=max_speakers,
+                    )
                     result = whisperx.assign_word_speakers(
                         diarize_segments, result
                     )
                 except Exception as e:
                     write(f"Diarization failed ({e}), continuing without speakers")
 
-        # Confidence filter: low-score words are the model guessing at
-        # lyrics/music/overlapping speech. Drop them and rebuild cue text.
+        # Build cues: one per speaker turn, low-confidence words dropped.
+        #
+        # Two splits compose here, and the order matters:
+        #   1. Speaker turns — consecutive words sharing a speaker form a
+        #      group. pyannote labels each *word*, so a segment that spans
+        #      a hand-over yields one cue per speaker.
+        #   2. Confidence gaps *inside* a group — a dropped word means the
+        #      model guessed (music, overlap), so the text either side is
+        #      not contiguous and must not be joined (joining is what makes
+        #      furigana read the wrong word: 今日は + 天気 → こんにちは).
+        # The *unfiltered* group is what the gap splitter sees; passing the
+        # filtered list would hide the very gaps it exists to find.
         min_conf = float(kwargs.get("min_word_confidence", 0.4))
         segments: List[Segment] = []
         for seg in result.get("segments", []):
             words = seg.get("words") or []
-            kept = [
-                w for w in words
-                if float(w.get("score", 1.0)) >= min_conf and w.get("word", "").strip()
-            ]
-            if not kept:
-                continue
-            # A confidence gap inside the cue means the model guessed
-            # mid-sentence (music, overlap). Split there instead of
-            # silently joining unrelated text — furigana on a re-joined
-            # cue reads the wrong word boundaries (今日は+天気 would
-            # come out こんにちは…).
-            for cue_start, cue_end, cue_words in _split_on_confidence_gaps(
-                kept, words
-            ):
-                cue_text = _rebuild_text(cue_words, detected_lang)
-                if not cue_text:
+            seg_speaker = seg.get("speaker") or ""
+
+            groups: List[List[Dict[str, Any]]] = []
+            current: List[Dict[str, Any]] = []
+            current_speaker: Optional[str] = None
+            for w in words:
+                # Fall back to the segment-level label when the diarizer
+                # only annotated segments (older WhisperX, or no diarize).
+                spk = w.get("speaker") or seg_speaker
+                if spk != current_speaker:
+                    if current:
+                        groups.append(current)
+                    current = []
+                    current_speaker = spk
+                current.append(w)
+            if current:
+                groups.append(current)
+
+            for grp in groups:
+                speaker = grp[0].get("speaker") or seg_speaker or ""
+                kept = [
+                    w for w in grp
+                    if float(w.get("score", 1.0)) >= min_conf
+                    and w.get("word", "").strip()
+                ]
+                if not kept:
                     continue
-                speaker = seg.get("speaker", "")
-                prefix = f"[{speaker}] " if speaker else ""
-                segments.append(Segment(
-                    start=cue_start,
-                    end=cue_end,
-                    text=prefix + cue_text,
-                    words=cue_words,
-                    confidence=_mean_confidence(cue_words),
-                    language=detected_lang,
-                    speaker=speaker or None,
-                ))
+                for cue_start, cue_end, cue_words in _split_on_confidence_gaps(
+                    kept, grp
+                ):
+                    cue_text = _rebuild_text(cue_words, detected_lang)
+                    if not cue_text:
+                        continue
+                    prefix = f"[{speaker}] " if speaker else ""
+                    segments.append(Segment(
+                        start=cue_start,
+                        end=cue_end,
+                        text=prefix + cue_text,
+                        words=cue_words,
+                        confidence=_mean_confidence(cue_words),
+                        language=detected_lang,
+                        speaker=speaker or None,
+                    ))
 
         info = type("Info", (), {
             "duration": result.get("segments", [{}])[-1].get("end", 0.0) if segments else 0.0,

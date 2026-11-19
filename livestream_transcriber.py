@@ -127,15 +127,16 @@ class LiveStreamTranscriber:
                 mpv_auto=self.mpv_auto,
                 mpv_socket=self.mpv_socket,
                 media_source=audio_file,
-                show_segments=self.show_segments,
+                show_segments=True,
                 keep_unfinished=True,
             )
 
             if not success:
-                self.log("Initial transcription failed")
-                return
-
-            self.log("Initial transcription completed")
+                self.log(
+                    "Initial transcription failed — will retry on next audio growth"
+                )
+            else:
+                self.log("Initial transcription completed")
 
             # Now continue with periodic updates as file grows
             last_size = os.path.getsize(audio_file)
@@ -171,7 +172,7 @@ class LiveStreamTranscriber:
                         mpv_auto=False,  # mpv already launched on first segment
                         mpv_socket=self.mpv_socket,
                         media_source=audio_file,
-                        show_segments=self.show_segments,
+                        show_segments=True,
                         keep_unfinished=True,
                     )
 

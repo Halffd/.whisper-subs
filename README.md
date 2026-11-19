@@ -6,6 +6,11 @@ Transcribe YouTube videos, local audio/video files, and live streams to subtitle
 
 - **Multi-backend transcription**: 13 adapters — local (faster-whisper, whisper.cpp, WhisperX, Moonshine, Voxtral, VibeVoice, Whisper Turbo) and cloud (Groq, Deepgram, Google Chirp, HuggingFace, NVIDIA Canary/Parakeet)
 - **Unified model syntax**: Use `provider:model` (e.g. `groq:whisper-large-v3`) or bare names for local models
+- **distil models**: `distil-whisper/distil-medium.en` and friends work from the local path (HF repo ids are translated to what faster-whisper accepts)
+- **YouTube captions**: `--fetch-caps` / `--no-fetch-caps` / `--fetch-auto` / `--fetch-langs` use existing human-made captions instead of transcribing (automatic captions are opt-in)
+- **Pluggable VAD**: `--vad-engine silero|pyannote|webrtc|custom`, plus your own detector via `WHISPERSUBS_VAD_CUSTOM` — see [Custom VAD](#custom-vad)
+- **NeMo diarization**: `--diarize-engine nemo` (MSDD/Sortformer) alongside pyannote
+- **YouTube discovery & feed**: find channels, follow them, and get a ranked feed of their new videos — no accounts, no tracking, all on-device
 - **YouTube transcription**: Download and transcribe videos/channels via `yt-dlp`
 - **MKV/file selector**: GUI for selecting and transcribing local files
 - **Live captioner**: Real-time captioning with PyQt6/GTK4/tkinter interfaces
@@ -18,6 +23,27 @@ Transcribe YouTube videos, local audio/video files, and live streams to subtitle
 - **Terminal UI** (`tui/`): browse and search the subtitle library, full-text cue search, job history, YouTube search + transcription, and mpv playback — see [tui/README.md](tui/README.md)
 
 ## Quick Start
+
+Transcribe one video, find channels to follow, and look at the feed:
+
+```bash
+# Transcribe (the usual path)
+wsub large-v3 --url https://www.youtube.com/watch?v=L3MFjZXyMcI
+
+# Find a channel, follow it, then see its newest videos ranked
+wsub --yt-search-channels "Kurzgesagt"
+wsub --yt-subscribe kurzgesagt
+wsub --yt-feed
+
+# Channels you follow
+wsub --yt-subscriptions
+wsub --yt-unsubscribe https://www.youtube.com/@kurzgesagt
+```
+
+`--yt-*` commands are metadata-only: they never download or transcribe
+media. Subscriptions live in `~/.config/WhisperSubs/subscriptions.json` and
+the feed is ranked locally (recency + watches + watchable length + live),
+with the reason for each entry shown so the ranking is inspectable.
 
 ```bash
 # Clone and install
@@ -83,6 +109,7 @@ python whisper_subs.py chirp:chirp_2 audio.wav
 
 # Local alternative backends
 python whisper_subs.py whispercpp:base audio.wav          # needs whisper-cpp binary
+python whisper_subs.py whisper.cpp audio.wav              # provider alias -> whispercpp:base
 python whisper_subs.py whisperturbo:whisper-large-v3-turbo audio.wav  # needs torch+transformers
 python whisper_subs.py moonshine:moonshine-tiny audio.wav # needs moonshine or transformers
 python whisper_subs.py voxtral:voxtral-mini audio.wav     # needs torch+transformers
@@ -158,6 +185,23 @@ loaded once instead of per file:
 `--gpu` selects the CUDA execution provider; thread count follows
 `--cpu-threads`.
 
+### Choosing an audio track
+
+A file with several audio streams (`JP dub`, `EN original`, commentary tracks)
+uses the first one unless told otherwise, and the log says which track was
+picked and how many there were, so a mistaken language is visible rather than
+silent:
+
+```bash
+# 0-based audio-stream ordinal, as reported by ffprobe
+python whisper_subs.py large --file ./anm/Show --audio-track 1
+```
+
+`-lang`/`--language` selects the *target* language; with a model that can be
+ordered to a language (e.g. `whisperx:`) it is passed through to the decoder,
+so a Japanese lead-in is transcribed as Japanese rather than degrading every
+later window.
+
 Long media is decoded in **overlapping windows**. sherpa's offline encoder
 cannot take unbounded input — past a few minutes ONNX Runtime aborts with
 `Attempting to broadcast an axis by a dimension other than 1`. Audio is
@@ -226,6 +270,9 @@ Note: `-f/--force` bypasses the audio cache and human-subtitle checks; the "alre
 | `HF_API_KEY` | HuggingFace | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
 | `HF_TOKEN` | WhisperX (diarization) | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Chirp | [cloud.google.com/iam](https://cloud.google.com/iam/docs/creating-managing-service-account-keys) |
+| `WHISPERSUBS_VAD` | Adapter models | See [Custom VAD](#custom-vad) |
+| `WHISPERSUBS_VAD_CUSTOM` | Adapter models | See [Custom VAD](#custom-vad) |
+| `WHISPERSUBS_VAD_PARAMS` | Adapter models | See [Custom VAD](#custom-vad) |
 
 Set them in your shell or in the `.env` file (already gitignored):
 
@@ -236,6 +283,33 @@ DEEPGRAM_API_KEY=...
 HF_API_KEY=hf_...
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/gcp-sa.json
 ```
+
+### Custom VAD
+
+Adapter models (`whisperx:…`) trim silence with a VAD before transcribing.
+The engine is pluggable in `vad.py`: `silero` (default, weights ship with
+WhisperX), `pyannote` (WhisperX's own, needs `HF_TOKEN`), `webrtc`, or
+`custom` pointing at any importable callable.
+
+```bash
+# Pick an engine
+whisper_subs.py whisperx:large-v3 clip.mp4 --vad-engine webrtc
+
+# Point at your own detector — it must return [(start, end), ...] in seconds
+export WHISPERSUBS_VAD_CUSTOM=mypkg.vads:detect
+whisper_subs.py whisperx:large-v3 clip.mp4 --vad-engine custom
+
+# Pass engine parameters (repeat the flag for more keys)
+whisper_subs.py whisperx:large-v3 clip.mp4 --vad-param threshold=0.35
+```
+
+Notes:
+
+- A missing dependency or unknown engine degrades to *no VAD* and keeps
+  transcribing — VAD is an optimization, never a hard requirement.
+- A custom callable takes the audio path: `detect(path, **params) -> regions`.
+- Regions are sorted and coalesced before use, so overlapping or
+  out-of-order output is accepted.
 
 ## Installation
 
@@ -258,6 +332,15 @@ pip install requests    # Groq, Deepgram, HuggingFace adapters use requests
 # Arch: yay -S whisper-cpp
 # Ubuntu: see https://github.com/ggerganov/whisper.cpp
 # macOS: brew install whisper-cpp
+#
+# The ggml model file is separate from the binary. Download it from
+# https://huggingface.co/ggerganov/whisper.cpp (e.g. ggml-base.bin) and put
+# it where the adapter looks, or point the adapter at its directory:
+#   export WHISPERCPP_MODELS_DIR=/path/to/models
+# Searched by default: ~/.cache/whisper.cpp, ~/.cache/whisper,
+# ~/.local/share/whisper.cpp, ~/models/whisper.cpp, ~/models,
+# /usr/share/whisper.cpp/models, /usr/share/whisper-cpp,
+# /opt/whisper.cpp/models, ./models
 
 # WhisperX
 pip install whisperx
@@ -426,6 +509,24 @@ python start_api.py --host 0.0.0.0 --port 8000
 ```
 
 API docs at http://localhost:8000/docs
+
+### Caption endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/captions?url=…` | List caption tracks (human + automatic) without downloading anything |
+| `GET /api/v1/captions?url=…&dest=name.srt` | Write the best track to `OUTPUT_DIR/captions/` and return its URL |
+| `GET /api/v1/search/history` | This account's recent searches |
+| `GET /api/v1/youtube/channels/search?q=…` | Find YouTube channels by name or @handle |
+| `GET /api/v1/youtube/channel?channel=…` | Resolve a typed channel reference to a channel |
+| `GET /api/v1/youtube/channel/videos?channel=…` | A channel's video list (cached 30 min; `?refresh=true`) |
+| `GET/POST/DELETE /api/v1/youtube/subscriptions` | List / follow / unfollow channels |
+| `GET /api/v1/youtube/feed` | Ranked videos from followed channels (local algorithm) |
+| `POST /api/v1/search/history?q=…` | Record a search |
+
+Human-made captions are preferred; automatic ones require
+`allow_automatic=true`. Both the CLI and the Android app use these, so a
+link that already has human captions never gets transcribed.
 
 ## Testing
 

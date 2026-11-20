@@ -1,9 +1,18 @@
 package com.halffd.whispersubs.ui.local
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +43,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -42,18 +52,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.halffd.whispersubs.R
+import com.halffd.whispersubs.data.ApiClient
+import com.halffd.whispersubs.data.MediaLinks
+import com.halffd.whispersubs.data.ServerConfig
 import com.halffd.whispersubs.local.LocalTranscriptionViewModel
 import com.halffd.whispersubs.local.ModelManager
+import com.halffd.whispersubs.local.StreamSource
 import com.halffd.whispersubs.local.TranscriptionService
 import com.halffd.whispersubs.local.WhisperModel
 
@@ -99,7 +118,7 @@ fun LocalScreen(navController: NavController) {
         }
     }
 
-    fun startMicTranscription() {
+    fun launchMicService() {
         val model = uiState.selectedModel ?: return
         val intent = Intent(context, TranscriptionService::class.java).apply {
             action = TranscriptionService.ACTION_START
@@ -110,8 +129,41 @@ fun LocalScreen(navController: NavController) {
         navController.navigate("local_player")
     }
 
+    // RECORD_AUDIO is a runtime permission: ask for it and start capture only
+    // once it is granted, otherwise the service dies before recording.
+    val micPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            launchMicService()
+        } else {
+            Toast.makeText(
+                context,
+                "Microphone permission is required for live transcription",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    fun startMicTranscription() {
+        val model = uiState.selectedModel ?: return
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            launchMicService()
+        } else {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     val selectedIsDownloaded =
         uiState.selectedModel?.let { ModelManager.isModelDownloaded(context, it.id) } == true
+
+    // Stream/URL source (fetched on device, or queued on the server).
+    var urlInput by remember { mutableStateOf("") }
+    var isStreaming by remember { mutableStateOf(false) }
+    var streamProgress by remember { mutableStateOf(0f) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -194,6 +246,93 @@ fun LocalScreen(navController: NavController) {
                 ) {
                     Text("Video")
                 }
+            }
+            // Stream/URL source. Two paths:
+            //  1. Device-side: a direct media URL (.mp3/.m4a/.mp4/m3u8) is
+            //     fetched by StreamSource into the cache and transcribed
+            //     locally — no server needed.
+            //  2. Server-side: a page link (YouTube/Twitch/…) needs yt-dlp,
+            //     which lives on the server, so it is queued there and the
+            //     finished file shows up in Local when ready.
+            OutlinedTextField(
+                value = urlInput,
+                onValueChange = { urlInput = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Stream or media URL (m3u8, mp3, mp4…)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                enabled = selectedIsDownloaded,
+            )
+            if (isStreaming) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Fetching stream… ${(streamProgress * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { streamProgress },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+            Button(
+                onClick = {
+                    val link = urlInput.trim()
+                    val model = uiState.selectedModel ?: return@Button
+                    if (StreamSource.isFetchable(link)) {
+                        isStreaming = true
+                        streamProgress = 0f
+                        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                            val uri = StreamSource.fetch(
+                                context,
+                                link,
+                                onProgress = { read, total ->
+                                    if (total > 0) {
+                                        streamProgress = (read.toFloat() / total).coerceIn(0f, 1f)
+                                    }
+                                },
+                            )
+                            withContext(Dispatchers.Main) {
+                                isStreaming = false
+                                if (uri != null) {
+                                    startFileTranscription(uri)
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Could not fetch that stream",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                            }
+                        }
+                    } else {
+                        val api = ApiClient(ServerConfig.getInstance(context))
+                        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                            val entry = api.startDownload(link)
+                            withContext(Dispatchers.Main) {
+                                entry.onSuccess {
+                                    Toast.makeText(
+                                        context,
+                                        "Resolving ${MediaLinks.label(link)} — it will appear in Local when ready",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }.onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "Could not start that link: ${it.message}",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = selectedIsDownloaded && urlInput.isNotBlank(),
+            ) {
+                Text("Transcribe from URL")
             }
             Button(
                 onClick = ::startMicTranscription,

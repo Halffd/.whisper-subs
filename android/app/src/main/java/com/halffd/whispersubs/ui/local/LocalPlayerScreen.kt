@@ -27,6 +27,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -56,6 +57,7 @@ fun LocalPlayerScreen(navController: NavController) {
 
     val state by TranscriptionService.sharedState.collectAsState()
     val segments by TranscriptionService.sharedSegments.collectAsState()
+    val progress by TranscriptionService.sharedProgress.collectAsState()
 
     Column(
         modifier = Modifier
@@ -97,6 +99,17 @@ fun LocalPlayerScreen(navController: NavController) {
             fontSize = 14.sp,
             modifier = Modifier.fillMaxWidth().padding(16.dp, 8.dp)
         )
+
+        // Only file transcription knows a total, so the bar is meaningful only
+        // while a file is running (live capture leaves it at zero).
+        if (state is TranscriptionState.Transcribing && progress > 0f) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            )
+        }
 
         // Transcript feed (scrolling, live-updating)
         if (segments.isEmpty()) {

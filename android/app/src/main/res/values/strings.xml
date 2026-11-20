@@ -20,4 +20,35 @@
     <string name="disconnect">Disconnect</string>
     <string name="search">Search</string>
     <string name="widget_search_hint">Search WhisperSubs...</string>
+    <string name="info_duration">Duration</string>
+    <string name="info_resolution">Resolution</string>
+    <string name="info_source">Source</string>
+    <string name="info_open_source">Open source in browser</string>
+    <string name="info_subtitles">Subtitles</string>
+    <string name="info_cue_count">%1$d cues</string>
+    <string name="info_transcript_preview">Transcript preview</string>
+    <string name="info_now_playing">Now playing</string>
+    <!-- Video info pane (adaptive player) -->
+    <string name="pane_label_format">Format</string>
+    <string name="pane_live_badge">Live transcription</string>
+    <string name="pane_section_subtitle_file">Subtitle file</string>
+    <string name="yt_discover">Discover</string>
+    <string name="yt_subscriptions">Subscriptions</string>
+    <string name="yt_feed">Feed</string>
+    <string name="yt_search_hint">Channel name or @handle</string>
+    <string name="yt_search_channels">Search</string>
+    <string name="yt_refresh">Refresh</string>
+    <string name="yt_follow">Follow</string>
+    <string name="yt_following">Following</string>
+    <string name="yt_subscribers">%1$s subscribers</string>
+    <string name="yt_empty_discover">Search for a channel to follow</string>
+    <string name="yt_empty_discover_hint">Results show subscribers and a follow button.</string>
+    <string name="yt_empty_subs">No subscriptions yet</string>
+    <string name="yt_empty_subs_hint">Find channels on Discover and follow them.</string>
+    <string name="yt_empty_feed">Your feed is empty</string>
+    <string name="yt_empty_feed_hint">Follow a channel and its newest videos appear here.</string>
+    <string name="yt_minutes">%1$d min</string>
+    <string name="yt_live">LIVE</string>
+    <string name="yt_retry">Retry</string>
+    <string name="yt_needs_server">YouTube search and the feed need a WhisperSubs server to resolve channels.</string>
 </resources>

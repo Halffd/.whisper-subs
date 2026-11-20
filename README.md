@@ -341,6 +341,19 @@ pip install requests    # Groq, Deepgram, HuggingFace adapters use requests
 # ~/.local/share/whisper.cpp, ~/models/whisper.cpp, ~/models,
 # /usr/share/whisper.cpp/models, /usr/share/whisper-cpp,
 # /opt/whisper.cpp/models, ./models
+#
+# Transcription runs chunk by chunk (whisper-cli writes its subtitle only
+# after the whole input is decoded, so one run over a full episode means
+# an hour of silence and nothing on disk when it is interrupted). Every
+# chunk is one whisper-cli run with -pp, its cues are written as they
+# arrive, and finished chunks are cached so a stopped run resumes.
+#   export WHISPERCPP_CHUNK_SECONDS=120    # audio seconds per run
+#   export WHISPERCPP_OVERLAP_SECONDS=2     # overlap between two chunks
+#   export WHISPERCPP_TIMEOUT=3600          # wall-clock limit per chunk (0 = none)
+#   export WHISPERCPP_NO_CACHE=1            # disable the resume cache
+#   export WHISPERCPP_CACHE_DIR=/path       # where the cached chunks live
+#   export WHISPERCPP_TMPDIR=/path          # scratch dir for the chunk wavs
+# The cache defaults to ~/.cache/whisper-subs/whispercpp/<model-key>/.
 
 # WhisperX
 pip install whisperx

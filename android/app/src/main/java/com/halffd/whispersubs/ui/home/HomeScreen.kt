@@ -22,12 +22,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.LocalLibrary
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Subscriptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -111,6 +115,15 @@ fun HomeScreen(navController: NavController) {
             title = { Text("WhisperSubs", fontWeight = FontWeight.Bold) },
             colors = TopAppBarDefaults.mediumTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             actions = {
+                IconButton(onClick = { navController.navigate("history") }) {
+                    Icon(Icons.Filled.History, contentDescription = "History")
+                }
+                IconButton(onClick = { navController.navigate("search?query=") }) {
+                    Icon(Icons.Filled.Search, contentDescription = "Search")
+                }
+                IconButton(onClick = { navController.navigate("settings") }) {
+                    Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                }
                 IconButton(onClick = {
                     isLoading = true
                     kotlinx.coroutines.CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
@@ -140,6 +153,46 @@ fun HomeScreen(navController: NavController) {
                 }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
+                    // Set up server first — a tap on a server-backed screen with no
+                    // server configured used to open a screen that only ever showed
+                    // an error, leaving the app feeling dead.
+                    if (!serverConfig.isConfigured()) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp, 16.dp, 16.dp, 0.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer
+                            ),
+                            onClick = { navController.navigate("connect") },
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    Icons.Filled.Settings,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "No server connected",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                    Text(
+                                        text = "Tap to add your WhisperSubs server. "
+                                            + "On-device Local transcription works without it.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                }
+                            }
+                        }
+                    }
                     // Quick Actions
                     Text(
                         text = "Quick Actions",
@@ -185,6 +238,23 @@ fun HomeScreen(navController: NavController) {
                             onClick = { navController.navigate("local") }
                         )
                     }
+                    // Reachable text entry: the deep-link and URL paths were only
+                    // wired to a route that did not exist, so this is the in-app
+                    // equivalent.
+                    QuickActionCard(
+                        icon = Icons.Filled.Search,
+                        title = "Search / transcribe a link",
+                        subtitle = "YouTube, Twitch, subtitles or on-device",
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { navController.navigate("search?query=") }
+                    )
+                    QuickActionCard(
+                        icon = Icons.Filled.Subscriptions,
+                        title = "YouTube channels",
+                        subtitle = "Find channels, follow them, see their feed",
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { navController.navigate("youtube") }
+                    )
 
                     // Recent Transcriptions
                     if (recentItems.isNotEmpty()) {

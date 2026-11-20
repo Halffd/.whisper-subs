@@ -27,11 +27,20 @@ object AudioDecoder {
      * Decode the given URI to 16kHz mono float PCM, invoking [onChunk] with
      * each converted chunk (samples relative to file start).
      * Returns total number of samples produced.
+     *
+     * @param blockMs how much audio to hand over per [onChunk] call. whisper.cpp
+     *   wants ~30 s of context to transcribe well, so tiny blocks (the old
+     *   fixed quarter-second) wreck accuracy; callers pick a size that suits
+     *   their latency budget.
+     * @param onTotal expected total sample count when the container advertises
+     *   a duration, so a caller can render real progress. Null when unknown.
      */
     fun decode(
         context: Context,
         uri: Uri,
         onChunk: (FloatArray) -> Unit,
+        blockMs: Int = 1000,
+        onTotal: ((Int) -> Unit)? = null,
         cancelled: AtomicBoolean = AtomicBoolean(false),
     ): Int {
         val extractor = MediaExtractor()
@@ -58,6 +67,22 @@ object AudioDecoder {
             val mime = format.getString(MediaFormat.KEY_MIME)!!
             val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+
+            // Containers usually advertise a duration (microseconds); tell the
+            // caller up front so it can show progress for the whole file.
+            if (onTotal != null) {
+                val durationUs = try {
+                    if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                        format.getLong(MediaFormat.KEY_DURATION)
+                    } else 0L
+                } catch (e: Exception) {
+                    0L
+                }
+                if (durationUs > 0) {
+                    val expected = (durationUs / 1_000_000.0 * TARGET_SAMPLE_RATE).toInt()
+                    if (expected > 0) onTotal(expected)
+                }
+            }
 
             extractor.selectTrack(audioTrackIndex)
 
@@ -112,8 +137,12 @@ object AudioDecoder {
                             pcmDone = true
                         }
 
-                        // Resample + emit in blocks when enough accumulated
-                        if (accumulated.size >= sampleRate * channelCount / 4) {
+                        // Resample + emit once enough source audio is buffered
+                        // for one block (blockMs at the source sample rate).
+                        val blockTarget =
+                            (sampleRate.toLong() * channelCount * blockMs / 1000L)
+                                .coerceAtLeast(1L)
+                        if (accumulated.size >= blockTarget) {
                             val (floats, consumed) = resampleTo16kMono(accumulated, sampleRate, channelCount)
                             // Remove consumed prefix
                             accumulated = ArrayList(accumulated.subList(consumed, accumulated.size))

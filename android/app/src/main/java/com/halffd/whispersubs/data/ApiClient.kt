@@ -308,6 +308,22 @@ class ApiClient(private val serverConfig: ServerConfig) {
         }
     }
 
+    /** Recent search queries, most recent first (server per-user history). */
+    suspend fun getSearchHistory(limit: Int = 50): Result<HistoryResponse> {
+        return try {
+            val response = client.get(url("/api/v1/search/history?limit=$limit")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<HistoryResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     /** Record a search query in per-user history (fire-and-forget friendly). */
     suspend fun recordSearchHistory(q: String, scope: String = "subtitles"): Result<Unit> {
         return try {
@@ -337,6 +353,196 @@ class ApiClient(private val serverConfig: ServerConfig) {
                 Result.success(response.body<SuggestionsResponse>())
             } else {
                 Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // YouTube: channel search, subscriptions, feed
+    // -----------------------------------------------------------------
+
+    /** Find channels by name or @handle. */
+    suspend fun searchYtChannels(q: String, limit: Int = 8): Result<YtChannelSearchResponse> {
+        return try {
+            val encodedQ = URLEncoder.encode(q, "UTF-8")
+            val response = client.get(url("/api/v1/youtube/channels/search?q=$encodedQ&limit=$limit")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<YtChannelSearchResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Resolve a typed channel reference (name/@handle/URL) to a channel. */
+    suspend fun resolveYtChannel(channel: String): Result<YtChannel> {
+        return try {
+            val encoded = URLEncoder.encode(channel, "UTF-8")
+            val response = client.get(url("/api/v1/youtube/channel?channel=$encoded")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<YtChannel>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Video list for a channel URL (server caches 30 min unless refreshed). */
+    suspend fun getYtChannelVideos(
+        channel: String,
+        limit: Int = 50,
+        refresh: Boolean = false,
+    ): Result<YtChannelVideosResponse> {
+        return try {
+            val encoded = URLEncoder.encode(channel, "UTF-8")
+            val response = client.get(
+                url("/api/v1/youtube/channel/videos?channel=$encoded&limit=$limit&refresh=$refresh")
+            ) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<YtChannelVideosResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Channels this account follows. */
+    suspend fun getYtSubscriptions(): Result<YtSubscriptionsResponse> {
+        return try {
+            val response = client.get(url("/api/v1/youtube/subscriptions")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<YtSubscriptionsResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Follow a channel. */
+    suspend fun subscribeYt(channel: YtChannel): Result<Unit> {
+        return try {
+            val response = client.post(url("/api/v1/youtube/subscriptions")) {
+                contentType(ContentType.Application.Json)
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+                setBody(Json.encodeToString(YtSubscribeRequest(channel)))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Unfollow a channel by URL. */
+    suspend fun unsubscribeYt(channelUrl: String): Result<Unit> {
+        return try {
+            val encoded = URLEncoder.encode(channelUrl, "UTF-8")
+            val response = client.delete(url("/api/v1/youtube/subscriptions?channel=$encoded")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Ranked feed from followed channels. Ranking runs on the server
+     * (recency + watches + watchable length + live), so the app only renders.
+     */
+    suspend fun getYtFeed(
+        limit: Int = 20,
+        refresh: Boolean = false,
+    ): Result<YtFeedResponse> {
+        return try {
+            val response = client.get(url("/api/v1/youtube/feed?limit=$limit&refresh=$refresh")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<YtFeedResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Captions API (YouTube caption tracks)
+    // -----------------------------------------------------------------
+
+    /** Caption tracks available for a YouTube URL (human + automatic). */
+    suspend fun listCaptions(url: String): Result<CaptionListResponse> {
+        return try {
+            val encoded = URLEncoder.encode(url, "UTF-8")
+            val response = client.get(url("/api/v1/captions?url=$encoded")) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<CaptionListResponse>())
+            } else {
+                Result.failure(RuntimeException("HTTP ${response.status.value}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Fetch the best caption track for [url] as SRT.
+     *
+     * The server writes it under its captions dir and returns a subtitle URL
+     * the player can side-load, so a link with human captions never needs to
+     * be transcribed at all.
+     */
+    suspend fun fetchCaptions(
+        url: String,
+        dest: String,
+        langs: String = "",
+        allowAutomatic: Boolean = false,
+    ): Result<CaptionFetchResponse> {
+        return try {
+            val encoded = URLEncoder.encode(url, "UTF-8")
+            val response = client.get(
+                url(
+                    "/api/v1/captions?url=$encoded&dest=$dest" +
+                        "&langs=$langs&allow_automatic=$allowAutomatic"
+                )
+            ) {
+                serverConfig.apiKey?.takeIf { it.isNotBlank() }?.let { header("X-API-Key", it) }
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body<CaptionFetchResponse>())
+            } else {
+                Result.failure(
+                    RuntimeException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}")
+                )
             }
         } catch (e: Exception) {
             Result.failure(e)

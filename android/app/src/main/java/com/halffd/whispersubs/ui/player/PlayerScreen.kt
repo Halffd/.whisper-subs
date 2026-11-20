@@ -33,14 +33,12 @@ import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -77,6 +75,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.navigation.NavController
 import com.halffd.whispersubs.data.ApiClient
+import com.halffd.whispersubs.data.PlayResponse
 import com.halffd.whispersubs.data.ResumeStore
 import com.halffd.whispersubs.data.SrtBlock
 import com.halffd.whispersubs.player.SrtParser
@@ -147,6 +146,10 @@ fun PlayerScreen(
     var positionMs by remember { mutableLongStateOf(0L) }
     var bufferedMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
+
+    // Resolved stream metadata for the info pane (PlayResponse already fetched above)
+    var playInfo by remember { mutableStateOf<PlayResponse?>(null) }
+
     LaunchedEffect(exoPlayer) {
         var lastSaveMs = 0L
         while (true) {
@@ -301,6 +304,7 @@ fun PlayerScreen(
         } else if (sourceUrl.isNotBlank()) {
             apiClient.getPlayInfo(sourceUrl, if (isLive) null else srtUrl)
                 .onSuccess { resp ->
+                    playInfo = resp
                     isLoading = false
                     controlsVisible = true
                     val playUrl = apiClient.absoluteUrl(resp.play_url)
@@ -528,35 +532,47 @@ fun PlayerScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0D1117))) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            if (!isFullscreen && !inPip) {
-                TopAppBar(
-                    title = {
-                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.White)
-                    },
-                    colors = TopAppBarDefaults.mediumTopAppBarColors(containerColor = Color.Black),
-                    navigationIcon = {
-                        IconButton(onClick = { navController.popBackStack() }) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
-                        }
-                    }
-                )
+    // Info pane payload, built from what this screen already resolved.
+    // Playback state (duration, live flag, subtitle count) updates recomposition of the
+    // pane; the pane never touches ExoPlayer, gestures or the overlay.
+    val videoInfo = VideoInfo(
+        title = title,
+        channel = playInfo?.channel?.takeIf { it.isNotBlank() },
+        durationText = remember(durationMs, playInfo) {
+            val seconds = playInfo?.duration?.takeIf { it > 0 }
+                ?: durationMs.takeIf { it > 0L }?.div(1000.0)
+            if (seconds != null && seconds > 0) formatMs((seconds * 1000).toLong()) else null
+        },
+        resolutionText = remember(playInfo) {
+            val w = playInfo?.width
+            val h = playInfo?.height
+            if (w != null && w > 0 && h != null && h > 0) {
+                "$w × $h"
+            } else {
+                null
             }
+        },
+        formatNote = playInfo?.format_note,
+        sourceUrl = sourceUrl,
+        srtPath = srtUrl,
+        subtitleCount = srtBlocks.size,
+        transcriptPreview = remember(srtBlocks) { srtBlocks.take(3) },
+        currentSubtitle = currentSubtitle,
+        isLive = isLive,
+    )
 
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0D1117))) {
+        val playerContent: @Composable () -> Unit = {
+            // Flow-ish player: video stays pinned, pane scrolls beside/below it.
             Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+                modifier = Modifier
+                    .then(
+                        if (isFullscreen || inPip) Modifier.fillMaxSize()
+                        else Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                    )
+                    .background(Color.Black)
+                    .then(gestureModifier)
             ) {
-                Box(
-                    modifier = Modifier
-                        .then(
-                            if (isFullscreen || inPip) Modifier.fillMaxSize()
-                            else Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                        )
-                        .background(Color.Black)
-                        .then(gestureModifier)
-                ) {
                     // Video surface (controls handled by our overlay, not PlayerView)
                     AndroidView(
                         factory = { ctx ->
@@ -839,6 +855,42 @@ fun PlayerScreen(
             }
         }
 
+        // Flow-style adaptive shell: side pane once the window is Expanded,
+        // pane-below-player otherwise. Fullscreen and PiP stay full-bleed.
+        AdaptivePlayerLayout(
+            info = videoInfo,
+            player = playerContent,
+            showPane = !isFullscreen && !inPip,
+            topBar = if (!isFullscreen && !inPip) {
+                {
+                    TopAppBar(
+                        title = {
+                            Text(
+                                title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = Color.White
+                            )
+                        },
+                        colors = TopAppBarDefaults.mediumTopAppBarColors(
+                            containerColor = Color.Black
+                        ),
+                        navigationIcon = {
+                            IconButton(onClick = { navController.popBackStack() }) {
+                                Icon(
+                                    Icons.Filled.ArrowBack,
+                                    contentDescription = "Back",
+                                    tint = Color.White
+                                )
+                            }
+                        }
+                    )
+                }
+            } else {
+                {}
+            },
+        )
+
         // PotPlayer-style jump-to-time dialog
         if (showJumpDialog) {
             JumpToTimeDialog(
@@ -850,7 +902,6 @@ fun PlayerScreen(
             )
         }
     }
-}
 
 /** SRT timestamp: HH:MM:SS,mmm */
 private fun srtTimestamp(sec: Double): String {

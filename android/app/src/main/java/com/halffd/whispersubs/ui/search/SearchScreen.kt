@@ -23,8 +23,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.OpenInNew
@@ -41,12 +43,15 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -71,7 +76,10 @@ import androidx.navigation.NavController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.halffd.whispersubs.data.ApiClient
+import com.halffd.whispersubs.data.CaptionFetchResponse
+import com.halffd.whispersubs.data.CaptionTrackInfo
 import com.halffd.whispersubs.data.DownloadEntry
+import com.halffd.whispersubs.data.MediaLinks
 import com.halffd.whispersubs.data.ServerConfig
 import com.halffd.whispersubs.data.SubtitleMatch
 import com.halffd.whispersubs.data.SubtitleSearchResult
@@ -89,13 +97,13 @@ private val SORT_OPTIONS = listOf("date", "views", "duration", "title")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchScreen(navController: NavController) {
+fun SearchScreen(navController: NavController, initialQuery: String = "") {
     val context = LocalContext.current
     val serverConfig = ServerConfig.getInstance(context)
     val apiClient = remember { ApiClient(serverConfig) }
 
     var scope by rememberSaveable { mutableStateOf("Subtitles") }
-    var query by rememberSaveable { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf(initialQuery) }
     var submittedQuery by rememberSaveable { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -111,10 +119,51 @@ fun SearchScreen(navController: NavController) {
     var onlineResults by remember { mutableStateOf<List<VideoSearchResult>>(emptyList()) }
     var twitchLive by remember { mutableStateOf<VideoSearchResult?>(null) }
     var downloadState by remember { mutableStateOf<DownloadEntry?>(null) }
+    // Human captions found for a pasted link: no transcription needed.
+    var captionState by remember { mutableStateOf<CaptionFetchResponse?>(null) }
+    var linkLabel by remember { mutableStateOf("") }
+    // Tracks the user may pick from before anything is fetched.
+    var captionChoices by remember { mutableStateOf<List<CaptionTrackInfo>>(emptyList()) }
+    var allCaptionTracks by remember { mutableStateOf<List<CaptionTrackInfo>>(emptyList()) }
+    var pendingLinkUrl by remember { mutableStateOf("") }
+    var pendingDest by remember { mutableStateOf("") }
+    // Automatic tracks are opt-in, like the CLI's --fetch-auto.
+    var includeAutomatic by remember { mutableStateOf(false) }
+
+    /** Fetch the chosen track; empty language -> best available (server-side). */
+    fun fetchCaptionTrack(track: CaptionTrackInfo) {
+        val link = pendingLinkUrl
+        if (link.isBlank()) return
+        captionChoices = emptyList()
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            val fetched = apiClient.fetchCaptions(
+                link,
+                dest = pendingDest,
+                langs = track.lang,
+                allowAutomatic = track.automatic,
+            )
+            withContext(Dispatchers.Main) {
+                fetched.onSuccess { result -> captionState = result }
+                    .onFailure { queueLinkDownload(link) }
+            }
+        }
+    }
+
+    /** Queue a link for server-side download + transcription (no captions). */
+    fun queueLinkDownload(url: String) {
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            val result = apiClient.startDownload(url)
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                result.onSuccess { entry -> downloadState = entry }
+                    .onFailure { error = it.message ?: "Could not start that link" }
+                isSearching = false
+            }
+        }
+    }
 
     // Suggestions / history (autocomplete)
     var searchFocused by remember { mutableStateOf(false) }
-    var suggestions by remember { mutableStateOf<List<Suggestion>>(emptyList()) }
+    var suggestions by remember { mutableStateOf<List<Suggestion>>(emptyList<>())
 
     // Debounced autocomplete fetch while the search field is focused
     LaunchedEffect(query, searchFocused) {
@@ -132,6 +181,36 @@ fun SearchScreen(navController: NavController) {
         error = null
         searchFocused = false
         suggestions = emptyList()
+
+        // A pasted URL is not a keyword search: hand it straight to the
+        val url = q.takeIf { MediaLinks.isMediaUrl(it) }
+        if (url != null) {
+            linkLabel = MediaLinks.label(url)
+            pendingLinkUrl = url
+            // The server writes the SRT under its captions dir using this
+            // as a filename, so strip path/query characters.
+            pendingDest = "app_" + linkLabel.map {
+                if (it.isLetterOrDigit() || it in "._-") it else '_'
+            }.joinToString("").take(64)
+            // List what exists before choosing: a video with human captions in
+            // several languages should let the user pick, not silently take
+            // the first match. No captions at all falls through to download.
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                val listed = apiClient.listCaptions(url)
+                withContext(Dispatchers.Main) {
+                    isSearching = false
+                    listed.onSuccess { response ->
+                        allCaptionTracks = response.tracks
+                        // Human tracks up front; automatic are opt-in.
+                        captionChoices = response.tracks.filter { !it.automatic }
+                        if (captionChoices.isEmpty()) {
+                            queueLinkDownload(url)
+                        }
+                    }.onFailure { queueLinkDownload(url) }
+                }
+            }
+            return
+        }
 
         CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             // Record in per-user history (fire-and-forget)
@@ -187,6 +266,25 @@ fun SearchScreen(navController: NavController) {
                     isSearching = false
                 }
             }
+        }
+    }
+
+    // A deep link (widget tap or whispersubs:// URL) hands over a query;
+    // run it once on entry so the user lands on results, not an empty field.
+    LaunchedEffect(initialQuery) {
+        if (initialQuery.isNotBlank()) runSearch()
+    }
+
+    // Poll a queued link download until it completes, fails, or is dismissed.
+    LaunchedEffect(downloadState?.download_id) {
+        val entry = downloadState ?: return@LaunchedEffect
+        if (entry.status == "completed" || entry.status == "failed") return@LaunchedEffect
+        while (true) {
+            delay(1500)
+            val result = apiClient.getDownloadStatus(entry.download_id)
+            val latest = result.getOrNull() ?: break
+            downloadState = latest
+            if (latest.status == "completed" || latest.status == "failed") break
         }
     }
 
@@ -378,6 +476,40 @@ fun SearchScreen(navController: NavController) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
+        } else if (captionChoices.isNotEmpty()) {
+            CaptionChoiceCard(
+                label = linkLabel,
+                tracks = captionChoices,
+                hasAutomatic = allCaptionTracks.any { it.automatic },
+                includeAutomatic = includeAutomatic,
+                onToggleAutomatic = { enabled ->
+                    includeAutomatic = enabled
+                    captionChoices = allCaptionTracks.filter {
+                        !it.automatic || enabled
+                    }
+                },
+                onPick = { fetchCaptionTrack(it) },
+                onTranscribeInstead = {
+                    captionChoices = emptyList()
+                    val link = pendingLinkUrl
+                    if (link.isNotBlank()) queueLinkDownload(link)
+                },
+            )
+        } else if (captionState != null) {
+            // Human captions found for the pasted link: playback can start
+            // immediately, no transcription needed.
+            CaptionResultCard(
+                caption = captionState!!,
+                label = linkLabel,
+                onDismiss = { captionState = null },
+            )
+        } else if (downloadState != null) {
+            // A pasted link went to the server-side download queue: show its
+            // progress, and play/transcribe it once it finishes.
+            LinkDownloadCard(
+                entry = downloadState!!,
+                onCancel = { downloadState = null },
+            )
         } else if (error != null) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(text = error!!, color = MaterialTheme.colorScheme.error)
@@ -563,8 +695,9 @@ private fun SubtitleResultsList(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            val dateSuffix = result.date?.let { " · $it" } ?: ""
                             Text(
-                                text = "${result.channel}${result.date?.let { " · $it" } ?: ""}",
+                                text = "${result.channel}$dateSuffix",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -693,6 +826,260 @@ private fun OnlineResultCard(
             }
         }
     }
+}
+
+/**
+ * Progress card for a pasted link handed to the server-side download queue.
+ * Reuses the same download entry the library/home screens show, so a link
+ * behaves like any other source: queue -> file -> player.
+ */
+@Composable
+private fun LinkDownloadCard(entry: DownloadEntry, onCancel: () -> Unit) {
+    val statusLabel = when (entry.status) {
+        "pending" -> "Queued"
+        "processing" -> "Downloading"
+        "merging" -> "Merging audio"
+        "completed" -> "Ready"
+        "failed" -> "Failed"
+        else -> entry.status
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = entry.title ?: MediaLinks.label(entry.source),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = MediaLinks.label(entry.source),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (entry.status == "completed" || entry.status == "failed") {
+                    if (entry.status == "completed") {
+                        Icon(
+                            Icons.Filled.CheckCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    } else {
+                        Icon(
+                            Icons.Filled.Error,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = statusLabel,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (entry.status == "failed") {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        progress = { ((entry.progress ?: 0.0) / 100.0).toFloat() },
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "$statusLabel ${(entry.progress ?: 0.0).toInt()}%",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                }
+            }
+            entry.progress?.let { p ->
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { (p / 100.0).toFloat() },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            entry.speed_mbps?.let { speed ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = String.format("%.1f MB/s", speed),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            entry.error?.let { err ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = err,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            TextButton(onClick = onCancel) { Text("Dismiss") }
+        }
+    }
+}
+
+/**
+ * A pasted link whose human captions were fetched straight from YouTube:
+ * subtitles are ready without transcribing anything.
+ */
+@Composable
+private fun CaptionResultCard(
+    caption: CaptionFetchResponse,
+    label: String,
+    onDismiss: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = label.ifBlank { caption.rel_path ?: "Link" },
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                val captionLang = caption.lang ?: "?"
+                Text(
+                    text = "Captions ready ($captionLang) — no transcription needed",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            if (caption.automatic) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Automatic captions: quality varies, timestamps may drift",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            TextButton(onClick = onDismiss) { Text("Dismiss") }
+        }
+    }
+}
+
+/**
+ * A pasted link's caption tracks, before anything is fetched: the user picks
+ * a language (or skips captions and transcribes instead).
+ */
+@Composable
+private fun CaptionChoiceCard(
+    label: String,
+    tracks: List<CaptionTrackInfo>,
+    hasAutomatic: Boolean,
+    includeAutomatic: Boolean,
+    onToggleAutomatic: (Boolean) -> Unit,
+    onPick: (CaptionTrackInfo) -> Unit,
+    onTranscribeInstead: () -> Unit,
+) {
+    // One row per language; YouTube lists several formats for the same
+    // language, and the server converts the cheapest, so show the format too.
+    val byLang = tracks.groupBy { it.lang.lower().split("-")[0] }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item {
+            val heading = label.ifBlank { "this link" }
+            Text(
+                text = "Captions for $heading",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "Pick a language, or transcribe instead.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (hasAutomatic) {
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = includeAutomatic,
+                        onCheckedChange = onToggleAutomatic,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Include automatic captions",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        byLang.forEach { (lang, options) ->
+            item {
+                val best = options.minByOrNull { formatRank(it.ext) }
+                    ?: options.first()
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(best) },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = best.lang,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (best.automatic) {
+                            Text(
+                                text = "auto",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "Use ${best.lang}",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+        }
+        item {
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = onTranscribeInstead,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Transcribe instead (ignore captions)") }
+        }
+    }
+}
+
+private fun formatRank(ext: String): Int = when (ext) {
+    "srt" -> 0
+    "vtt" -> 1
+    else -> 2
 }
 
 private fun formatDuration(seconds: Double): String {

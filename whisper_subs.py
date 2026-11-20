@@ -3352,12 +3352,12 @@ def main():
             audio_track=args.audio_track,
             diarize_engine=args.diarize_engine,
             vad_engine=args.vad_engine,
-                    vad_params_extra=vad.parse_vad_params(args.vad_param),
-                    inpaint=args.inpaint,
-                    inpaint_min_gap=args.inpaint_min_gap,
-                    save_video=args.video,
-                    save_thumbnail=args.save_thumbnail,
-                    show=args.show,
+            vad_params_extra=vad.parse_vad_params(args.vad_param),
+            inpaint=args.inpaint,
+            inpaint_min_gap=args.inpaint_min_gap,
+            save_video=args.video,
+            save_thumbnail=args.save_thumbnail,
+            show=args.show,
             playlist_mode=(
                 "channel"
                 if args.playlist_channel

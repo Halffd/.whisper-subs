@@ -278,3 +278,113 @@ data class SuggestionsResponse(
     val suggestions: List<Suggestion>,
     val query: String
 )
+
+/** One recorded search query (server-side per-user history). */
+@Serializable
+data class HistoryEntry(
+    val q: String,
+    val scope: String? = null,
+    val at: String? = null,
+)
+
+/** Response of GET /api/v1/search/history. */
+@Serializable
+data class HistoryResponse(
+    val history: List<HistoryEntry>,
+)
+
+/** One caption track reported by GET /api/v1/captions. */
+@Serializable
+data class CaptionTrackInfo(
+    val lang: String,
+    val ext: String = "srt",
+    val automatic: Boolean = false,
+    val name: String = "",
+)
+
+@Serializable
+data class CaptionListResponse(
+    val url: String = "",
+    val tracks: List<CaptionTrackInfo> = emptyList(),
+    val has_human: Boolean = false,
+)
+
+@Serializable
+data class CaptionFetchResponse(
+    val ok: Boolean = false,
+    val path: String? = null,
+    val rel_path: String? = null,
+    val lang: String? = null,
+    val automatic: Boolean = false,
+    val subtitle_url: String? = null,
+)
+// ---------------------------------------------------------------------------
+// YouTube: channel discovery, subscriptions, feed (server /api/v1/youtube/*)
+// ---------------------------------------------------------------------------
+
+/** A channel found via YouTube search, or resolved from a typed reference. */
+@Serializable
+data class YtChannel(
+    val id: String = "",
+    val name: String = "",
+    val url: String = "",
+    val handle: String = "",
+    val avatar: String = "",
+    val subscribers: Int? = null,
+    val video_count: Int? = null,
+    val description: String = "",
+    /** How many search hits pointed here (rank signal). */
+    val hits: Int = 0,
+    /** Whether this account already follows the channel. */
+    val subscribed: Boolean = false,
+)
+
+@Serializable
+data class YtChannelSearchResponse(
+    val results: List<YtChannel> = emptyList(),
+    val count: Int = 0,
+    val query: String = "",
+)
+
+/** A video from a followed channel (the feed / channel-videos shape). */
+@Serializable
+data class YtVideo(
+    val id: String = "",
+    val title: String = "",
+    val url: String = "",
+    val duration: Double? = null,
+    val views: Long? = null,
+    val timestamp: Double? = null,
+    val thumbnail_url: String? = null,
+    val channel: String = "",
+    val channel_url: String = "",
+    val live: Boolean = false,
+    /** Feed only: rank score and the reasons it earned. */
+    val score: Double? = null,
+    val reasons: List<String> = emptyList(),
+)
+
+@Serializable
+data class YtChannelVideosResponse(
+    val channel: String = "",
+    val videos: List<YtVideo> = emptyList(),
+    val count: Int = 0,
+)
+
+@Serializable
+data class YtSubscriptionsResponse(
+    val subscriptions: List<YtChannel> = emptyList(),
+    val count: Int = 0,
+)
+
+@Serializable
+data class YtSubscribeRequest(
+    val channel: YtChannel,
+)
+
+@Serializable
+data class YtFeedResponse(
+    val feed: List<YtVideo> = emptyList(),
+    val count: Int = 0,
+    val subscribed: Int = 0,
+)

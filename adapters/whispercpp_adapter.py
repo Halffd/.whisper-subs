@@ -227,6 +227,11 @@ class WhisperCppAdapter(TranscriptionAdapter):
     #: chunk, never to the whole file. 0 disables it.
     CHUNK_TIMEOUT_BASE = 3600.0
 
+    #: Seconds between two intra-chunk progress lines. A chunk has to run
+    #: long enough to show any: a fast model finishes a 2-minute chunk in
+    #: seconds, where the per-chunk completion line is the useful report.
+    PROGRESS_INTERVAL = 15.0
+
     def __init__(self):
         # Set when the installed whisper-cli rejected -pp: report it once
         # and keep transcribing without progress output.
@@ -248,9 +253,28 @@ class WhisperCppAdapter(TranscriptionAdapter):
             return False
 
     def get_model_names(self) -> List[str]:
+        # Names match the ggml files in ggerganov/whisper.cpp, so
+        # `<name>` resolves to `ggml-<name>.bin` both on disk and in the
+        # auto-download URL. Quantized builds trade a little accuracy for
+        # a much smaller file and noticeably faster CPU decoding - useful
+        # on the weak machines where a full large-v3 run takes hours.
         return [
             "tiny", "base", "small", "medium", "large-v2", "large-v3",
+            "large-v3-turbo",
             "tiny.en", "base.en", "small.en", "medium.en",
+            # Quantized variants published by whisper.cpp (q5_0 / q5_1 /
+            # q8_0 depending on the model).
+            "tiny-q5_1", "tiny-q8_0",
+            "base-q5_1", "base-q8_0",
+            "small-q5_1", "small-q8_0",
+            "medium-q5_0", "medium-q8_0",
+            "large-v2-q5_0", "large-v2-q8_0",
+            "large-v3-q5_0",
+            "large-v3-turbo-q5_0", "large-v3-turbo-q8_0",
+            "tiny.en-q5_1", "tiny.en-q8_0",
+            "base.en-q5_1", "base.en-q8_0",
+            "small.en-q5_1", "small.en-q8_0",
+            "medium.en-q5_0", "medium.en-q8_0",
         ]
 
     def _find_binary(self) -> str:
@@ -291,7 +315,7 @@ class WhisperCppAdapter(TranscriptionAdapter):
         dirs.append(os.path.join(os.path.dirname(__file__), "..", "models"))
         return dirs
 
-    def _find_model_file(self, model: str) -> str:
+    def _find_model_file(self, model: str, write: Callable = print) -> str:
         """Locate the ggml model file.
 
         Accepts an explicit path to a .bin file, or a model name that is
@@ -315,7 +339,7 @@ class WhisperCppAdapter(TranscriptionAdapter):
         # (faster-whisper, HF) download transparently; this one should too,
         # so a fresh machine can run `wsub whispercpp:medium.en ...` without
         # a manual fetch step.
-        downloaded = self._download_model(model, print)
+        downloaded = self._download_model(model, write)
         if downloaded:
             return downloaded
 
@@ -417,7 +441,7 @@ class WhisperCppAdapter(TranscriptionAdapter):
                 "whisper.cpp binary not found in PATH "
                 f"(looked for: {', '.join(self.BINARY_CANDIDATES)})"
             )
-        model_file = self._find_model_file(model)
+        model_file = self._find_model_file(model, write)
 
         chunk_seconds = self._number(
             kwargs.get("chunk_seconds"), "WHISPERCPP_CHUNK_SECONDS", self.CHUNK_SECONDS
@@ -648,6 +672,9 @@ class WhisperCppAdapter(TranscriptionAdapter):
         timeout_detail = None
         deadline = started + timeout if timeout and timeout > 0 else None
         last_report = 0.0
+        interval = self._number(
+            None, "WHISPERCPP_PROGRESS_SECONDS", self.PROGRESS_INTERVAL
+        )
 
         while True:
             try:
@@ -670,7 +697,7 @@ class WhisperCppAdapter(TranscriptionAdapter):
                     f"model such as large-v3-q5_0)."
                 )
                 break
-            if now - last_report >= 15:
+            if now - last_report >= interval:
                 last_report = now
                 progress = self._progress(readers)
                 if progress is not None:

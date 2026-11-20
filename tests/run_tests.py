@@ -4329,6 +4329,237 @@ class TestRunner:
         except Exception as e:
             self._record("whisper.cpp adapter", "FAIL", str(e))
 
+        # --- whisper.cpp chunked streaming: cues land while the CLI runs ---
+        # Regression for a whole-file whisper-cli run that hit the 3600s
+        # timeout and left only the metadata block in the .unfinished SRT.
+        try:
+            import shutil as _sh_cs
+            import stat as _st_cs
+            import wave as _wave_cs
+
+            from adapters.whispercpp_adapter import (
+                WhisperCppAdapter as _WCCAdapter,
+                WhisperCppTimeout as _WCTimeout,
+            )
+            import transcribe as _tr_cs
+
+            tmp = tempfile.mkdtemp()
+            try:
+                # Fake whisper-cli: one cue per audio second, with a tag
+                # unique to each process so the loop detector does not
+                # treat identical chunk-relative text as a hallucination.
+                # The optional marker makes it sleep, to exercise timeout.
+                shim_dir = os.path.join(tmp, "bin")
+                os.makedirs(shim_dir)
+                argv_log = os.path.join(shim_dir, "argv.log")
+                slow_marker = os.path.join(shim_dir, "slow")
+                shim_source = r'''
+import os, sys, time, wave
+args = sys.argv[1:]
+log, marker = __LOG__, __MARKER__
+
+def value(flag, default=None):
+    return args[args.index(flag) + 1] if flag in args else default
+
+with open(log, "a", encoding="utf-8") as fh:
+    fh.write(" ".join(args) + "\n")
+
+inp, out = value("-f", ""), value("-of")
+with wave.open(inp, "rb") as handle:
+    seconds = handle.getnframes() / float(handle.getframerate())
+
+slow = os.path.exists(marker)
+for step in range(10, 101, 10):
+    print("whisper_print_progress_callback: progress = %d%%" % step,
+          file=sys.stderr, flush=True)
+    if slow:
+        time.sleep(0.3)
+
+tag = "%07d" % os.getpid()
+lines = []
+for index in range(int(seconds)):
+    start, end = index, index + 1
+    lines.append("%d\n00:%02d:%02d,000 --> 00:%02d:%02d,000\ntext-%s-%04d" % (
+        index + 1, start // 60, start % 60, end // 60, end % 60, tag, index))
+with open((out or inp[:-4]) + ".srt", "w", encoding="utf-8") as fh:
+    fh.write("\n\n".join(lines) + "\n\n")
+print("system_info: n_threads = %s | AVX2 = 1 | CUDA = 0" % value("-t", "4"),
+      file=sys.stderr)
+'''
+                shim = os.path.join(shim_dir, "whisper-cli")
+                with open(shim, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        "#!" + sys.executable + "\n"
+                        + shim_source.replace("__LOG__", repr(argv_log))
+                        .replace("__MARKER__", repr(slow_marker))
+                    )
+                os.chmod(shim, os.stat(shim).st_mode | _st_cs.S_IEXEC)
+
+                models_dir = os.path.join(tmp, "models")
+                os.makedirs(models_dir)
+                with open(os.path.join(models_dir, "ggml-base.bin"), "wb") as fh:
+                    fh.write(b"GGUF")
+
+                # 300s of silence: the fake CLI only reads its duration.
+                audio = os.path.join(tmp, "clip.wav")
+                with _wave_cs.open(audio, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+                    wav.writeframes(b"\0\0" * (300 * 16000))
+
+                def runs():
+                    if not os.path.exists(argv_log):
+                        return []
+                    with open(argv_log, encoding="utf-8") as fh:
+                        return [line for line in fh.read().splitlines() if line.strip()]
+
+                def clear_runs():
+                    with open(argv_log, "w", encoding="utf-8"):
+                        pass
+
+                keys = (
+                    "PATH", "WHISPERCPP_MODELS_DIR", "WHISPERCPP_TMPDIR",
+                    "WHISPERCPP_CACHE_DIR", "WHISPERCPP_CHUNK_SECONDS",
+                    "WHISPERCPP_TIMEOUT", "WHISPERCPP_NO_CACHE",
+                    "WHISPERCPP_OVERLAP_SECONDS", "WHISPERCPP_PROGRESS_SECONDS",
+                )
+                saved = {key: os.environ.get(key) for key in keys}
+                try:
+                    os.environ.update({
+                        "PATH": shim_dir + os.pathsep + (saved["PATH"] or ""),
+                        "WHISPERCPP_MODELS_DIR": models_dir,
+                        "WHISPERCPP_TMPDIR": os.path.join(tmp, "scratch"),
+                        "WHISPERCPP_CACHE_DIR": os.path.join(tmp, "cache"),
+                        "WHISPERCPP_CHUNK_SECONDS": "60",
+                        "WHISPERCPP_PROGRESS_SECONDS": "0.05",
+                    })
+                    for key in (
+                        "WHISPERCPP_TIMEOUT", "WHISPERCPP_NO_CACHE",
+                        "WHISPERCPP_OVERLAP_SECONDS",
+                    ):
+                        os.environ.pop(key, None)
+
+                    def transcribe(**kwargs):
+                        return _WCCAdapter().transcribe(
+                            audio_file=audio, model="base", language="en",
+                            write=lambda message: None, cpu_threads=4, **kwargs,
+                        )
+
+                    # The first cue must be available after the FIRST chunk,
+                    # not after the whole file has been decoded.
+                    segments, info = transcribe()
+                    stream = iter(segments)
+                    first = next(stream)
+                    assert len(runs()) == 1, f"first cue took {len(runs())} chunks"
+                    cues = [first] + list(stream)
+                    starts = [cue.start for cue in cues]
+                    assert starts == [float(i) for i in range(300)], starts[:5]
+                    assert all(abs(cue.end - cue.start - 1.0) < 0.01 for cue in cues)
+                    assert abs(info.duration - 300) < 0.01, info.duration
+
+                    # 60s chunks over 300s (2s overlap) = 6 CLI runs, each
+                    # in its own process with progress and a pinned SRT.
+                    lines = runs()
+                    assert len(lines) == 6, f"{len(lines)} runs"
+                    assert all("-pp" in line and "-osrt" in line and "-of " in line
+                               for line in lines), lines[:1]
+                    assert not os.path.exists(os.path.join(tmp, "scratch"))
+
+                    # Finished chunks come back from the cache, with no CLI
+                    # run at all: an interrupted job can resume.
+                    clear_runs()
+                    cached, _ = transcribe()
+                    assert [cue.start for cue in cached] == starts, "cache changed cues"
+                    assert runs() == [], f"cache did not prevent CLI runs: {runs()[:1]}"
+
+                    # A per-chunk limit gives an actionable error instead of
+                    # killing the run after all work was lost.
+                    with open(slow_marker, "w"):
+                        pass
+                    # A fresh cache: the chunks transcribed above would
+                    # otherwise be reused without running the slow CLI.
+                    os.environ["WHISPERCPP_CACHE_DIR"] = os.path.join(tmp, "timeout-cache")
+                    os.environ["WHISPERCPP_TIMEOUT"] = "1"
+                    timed_out = None
+                    try:
+                        slow_segments, _ = transcribe()
+                        for _cue in slow_segments:
+                            pass
+                    except Exception as exc:
+                        timed_out = exc
+                    finally:
+                        os.remove(slow_marker)
+                        os.environ.pop("WHISPERCPP_TIMEOUT", None)
+                        os.environ["WHISPERCPP_CACHE_DIR"] = os.path.join(tmp, "cache")
+                    assert isinstance(timed_out, _WCTimeout), repr(timed_out)
+                    assert "WHISPERCPP_TIMEOUT=0" in str(timed_out), timed_out
+                    assert "large-v3-q5_0" in str(timed_out), timed_out
+
+                    # The real pipeline writes cues into .unfinished while
+                    # the model is still running, then finalizes the SRT.
+                    # Drop the cache so this exercises the CLI path again.
+                    _sh_cs.rmtree(os.path.join(tmp, "cache"), ignore_errors=True)
+                    clear_runs()
+                    srt_file = os.path.join(tmp, "final.srt")
+                    unfinished = srt_file + ".unfinished"
+                    sizes = []
+
+                    def observe(_message):
+                        if os.path.exists(unfinished):
+                            sizes.append(os.path.getsize(unfinished))
+
+                    assert _tr_cs._transcribe_with_adapter(
+                        audio_file=audio, model_name="whispercpp:base",
+                        srt_file=srt_file, language="en", cpu_threads=4,
+                        write=observe,
+                    ) is True, "pipeline did not finish"
+                    assert len(sizes) >= 3 and sizes[-1] > sizes[0], sizes
+                    with open(srt_file, encoding="utf-8") as fh:
+                        blocks = [block for block in fh.read().strip().split("\n\n")
+                                  if " --> " in block]
+                    assert len(blocks) == 300, f"{len(blocks)} cues in final SRT"
+                    assert not os.path.exists(unfinished), "unfinished file not finalized"
+                finally:
+                    for key, value in saved.items():
+                        if value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = value
+            finally:
+                _sh_cs.rmtree(tmp, ignore_errors=True)
+
+            self._record(
+                "whisper.cpp chunked streaming",
+                "PASS", "streams cues, resumes from cache, per-chunk timeout",
+            )
+        except Exception as e:
+            self._record("whisper.cpp chunked streaming", "FAIL", str(e))
+
+        # --- whisper.cpp quantized model names ---
+        # Quantized ggml builds are much faster on CPU (the reason the
+        # timeout message suggests one); they must be selectable through
+        # the adapter and the shared API/GUI catalog alike.
+        try:
+            from adapters.whispercpp_adapter import WhisperCppAdapter as _WCCQ
+            from model import ADAPTER_MODEL_NAMES as _catalog
+
+            names = _WCCQ().get_model_names()
+            quant = [name for name in names if "-" in name and any(
+                tag in name for tag in ("q5_0", "q5_1", "q8_0")
+            )]
+            assert "large-v3-q5_0" in quant, names
+            assert "large-v3-turbo-q8_0" in quant, names
+            assert all("whispercpp:" + name in _catalog for name in quant), (
+                "quantized models missing from the shared catalog"
+            )
+            self._record(
+                "whisper.cpp quantized model names", "PASS",
+                f"{len(quant)} quantized models in adapter and catalog",
+            )
+        except Exception as e:
+            self._record("whisper.cpp quantized model names", "FAIL", str(e))
+
 
         # --- Parakeet: chunked, streaming transcription ---
         try:

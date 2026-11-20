@@ -73,7 +73,7 @@ All adapters implement the `TranscriptionAdapter` ABC and return `List[Segment]`
 | Adapter | Prefix | Models | Type | Dependency / Env Var |
 |---|---|---|---|---|
 | **Faster Whisper** | *(bare name)* | `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `*.en`, `distil-*` | Local | `faster-whisper` pip package |
-| **whisper.cpp** | `whispercpp:` | `base`, `small`, `medium`, `large-v3`, `tiny`, `large-v2` | Local | `whisper-cpp` or `main` binary in PATH |
+| **whisper.cpp** | `whispercpp:` | `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`, `tiny`, `large-v2`, plus quantized `*-q5_0`/`*-q5_1`/`*-q8_0` variants | Local | `whisper-cpp` or `main` binary in PATH |
 | **WhisperX** | `whisperx:` | `large-v3`, `medium`, `base`, `small`, `tiny`, `*.en` | Local | `whisperx` pip package |
 | **Whisper Turbo** | `whisperturbo:` | `whisper-large-v3-turbo` | Local | `torch` + `transformers` |
 | **Moonshine** | `moonshine:` | `moonshine/base`, `moonshine/tiny` | Local | `moonshine` or `transformers` |
@@ -353,7 +353,11 @@ pip install requests    # Groq, Deepgram, HuggingFace adapters use requests
 #   export WHISPERCPP_NO_CACHE=1            # disable the resume cache
 #   export WHISPERCPP_CACHE_DIR=/path       # where the cached chunks live
 #   export WHISPERCPP_TMPDIR=/path          # scratch dir for the chunk wavs
+#   export WHISPERCPP_PROGRESS_SECONDS=15    # intra-chunk progress interval
 # The cache defaults to ~/.cache/whisper-subs/whispercpp/<model-key>/.
+# Quantized ggml files work too (smaller/faster on CPU, slight accuracy
+# cost): whispercpp:large-v3-q5_0, whispercpp:large-v3-turbo-q8_0, etc.
+# They resolve to ggml-<name>.bin and download on first use like the rest.
 
 # WhisperX
 pip install whisperx

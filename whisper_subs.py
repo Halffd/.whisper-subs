@@ -2922,6 +2922,14 @@ Examples:
         default=1.02,
         help="Livestream growth threshold factor (default: 1.02 = 2%% growth).",
     )
+    advanced_group.add_argument(
+        "--no-live-vad",
+        action="store_false",
+        dest="live_vad",
+        default=True,
+        help="Disable VAD for livestream passes (enabled by default: silence "
+        "otherwise triggers repeated hallucinated cues).",
+    )
     return parser
 
 
@@ -3291,6 +3299,7 @@ def main():
             log_func=lambda msg: print(f"[LIVE] {msg}"),
             live_poll=args.live_poll,
             live_growth=args.live_growth,
+            vad_filter=args.live_vad,
             mpv_auto=getattr(args, "mpv", False),
             mpv_socket=args.mpv_socket,
             show_segments=getattr(args, "show", False),

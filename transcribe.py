@@ -61,10 +61,41 @@ _GAP_REPORT_SECONDS = 3.0
 _GAP_PROBLEM_COUNT = 4
 _GAP_PROBLEM_SECONDS = 20.0
 
+# After a hallucination loop is detected, skip a small buffer past its last
+# cue on the retry. Re-transcribing the same silent stretch just reproduced
+# the loop and lost every real cue after it.
+_LOOP_SKIP_MARGIN_SECONDS = 2.0
+
 
 def ends_sentence(text: str) -> bool:
     """True when a cue's text closes a thought, so a following hole is normal."""
     return bool(re.search(r"[.!?…:;\"'\)\]]\s*$", (text or "").strip()))
+
+
+def effective_language(language: Optional[str], current_model: str) -> str:
+    """Canonical language value used for both metadata and resume checks.
+
+    ``_language_param`` forces ``en`` for ``*.en`` models and writes ``None``
+    (Python null in JSON) when auto-detecting, while the adapter path records
+    the string ``auto-detect``. Comparing those raw values made every live
+    pass look like a language change and discard its progress.
+    """
+    if ".en" in current_model:
+        return "en"
+    lang = (language or "").strip().lower()
+    if lang in _AUTO_LANGUAGE_SPELLINGS:
+        return "auto-detect"
+    return lang
+
+
+def _normalize_metadata_language(value: Any) -> str:
+    """Normalize any historical language spelling to the canonical form."""
+    if value is None:
+        return "auto-detect"
+    normalized = str(value).strip().lower()
+    if normalized in _AUTO_LANGUAGE_SPELLINGS:
+        return "auto-detect"
+    return normalized
 
 
 def resume_mismatch(
@@ -86,7 +117,16 @@ def resume_mismatch(
             f"⚠️  Model changed "
             f"({metadata.get('model')} → {current_model}), starting fresh"
         )
-    if metadata.get("language") != (language or "auto-detect"):
+    recorded_language = _normalize_metadata_language(metadata.get("language"))
+    expected_language = effective_language(language, current_model)
+    # Older .en metadata may say "auto-detect" even though the model always
+    # forced English. Both describe the same effective setting.
+    language_matches = (
+        recorded_language in ("en", "auto-detect")
+        if ".en" in current_model
+        else recorded_language == expected_language
+    )
+    if not language_matches:
         return "⚠️  Language changed, starting fresh"
     if metadata.get("vad_enabled") != vad_filter:
         return (
@@ -903,7 +943,7 @@ def _transcribe_with_adapter(
                     "model": stripped_model,
                     "provider": prefix,
                     "source_file": os.path.basename(audio_file),
-                    "language": language or "auto-detect",
+                    "language": effective_language(language, model_name),
                     "segments_count": segment_count,
                     "duration_seconds": last_segment_end if segment_count else None,
                     "start_offset_seconds": start_offset_seconds,
@@ -1109,6 +1149,69 @@ def _trim_srt_to_timestamp(srt_path: str, max_end_seconds: float):
                 f.write("\n".join(lines) + "\n\n")
     except Exception as e:
         print(f"Warning: Could not trim SRT file: {e}")
+
+
+def _loop_skip_path(unfinished_srt: str) -> str:
+    """Marker file recording audio to skip after a hallucination loop."""
+    return unfinished_srt.replace(".srt", ".loop_skip")
+
+
+def _parse_loop_detect(path: str) -> Tuple[float, float]:
+    """Read a loop marker as (start, end), accepting legacy plain numbers."""
+    if not os.path.exists(path):
+        return 0.0, 0.0
+    try:
+        with open(path, "r", encoding="utf-8") as lf:
+            raw = lf.read().strip()
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            data = raw
+        if isinstance(data, dict):
+            start = float(data.get("start", 0.0) or 0.0)
+            end = float(data.get("end", start) or start)
+            return start, end
+        value = float(data)
+        return value, value
+    except (OSError, TypeError, ValueError) as e:
+        print(f"Warning: Could not read loop detect file: {e}")
+        return 0.0, 0.0
+
+
+def _write_loop_skip(unfinished_srt: str, skip_to: float) -> None:
+    """Persist the point the next pass should resume from after a loop."""
+    try:
+        with open(_loop_skip_path(unfinished_srt), "w", encoding="utf-8") as lf:
+            lf.write(str(max(0.0, skip_to)))
+    except OSError as e:
+        print(f"Warning: Could not record loop skip: {e}")
+
+
+def _consume_loop_skip(unfinished_srt: str) -> float:
+    """Return and clear the pending loop-skip timestamp, if any."""
+    path = _loop_skip_path(unfinished_srt)
+    if not os.path.exists(path):
+        return 0.0
+    skip_to = 0.0
+    try:
+        with open(path, "r", encoding="utf-8") as lf:
+            skip_to = float(lf.read().strip())
+    except (OSError, TypeError, ValueError) as e:
+        print(f"Warning: Could not read loop skip file: {e}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return max(0.0, skip_to)
+
+
+def _clear_loop_skip(unfinished_srt: str) -> None:
+    """Drop a stale skip marker when a run cannot resume its SRT."""
+    try:
+        os.remove(_loop_skip_path(unfinished_srt))
+    except OSError:
+        pass
 
 
 def dict_to_segment(data: Dict[str, Any]) -> Segment:
@@ -1537,7 +1640,7 @@ def transcribe_audio(
         # Distil-whisper models need special parameters for best performance
         transcribe_params = {
             "language": language,
-            "vad_filter": False,
+            "vad_filter": vad_filter,
         }
 
         # Add distil-specific parameters
@@ -1747,7 +1850,7 @@ def transcribe_audio(
                         )
                         if total_duration
                         else None,
-                        "language": language or "auto-detect",
+                        "language": effective_language(language, model_name),
                         "device": device,
                         "compute_type": compute_type,
                         "cpu_threads": cpu_threads,
@@ -3000,11 +3103,19 @@ def try_transcribe(
                 if mismatch:
                     write(mismatch)
                     can_resume = False
+                    _clear_loop_skip(unfinished_srt)
             except Exception as e:
                 write(f"⚠️  Could not read metadata: {e}")
 
         if can_resume:
             last_end_time, last_segment_number = get_srt_resume_info(unfinished_srt)
+            loop_skip_to = _consume_loop_skip(unfinished_srt)
+            if loop_skip_to > last_end_time:
+                write(
+                    f"✓ Skipping repeated audio up to {loop_skip_to:.2f}s "
+                    f"(SRT ends at {last_end_time:.2f}s)"
+                )
+                last_end_time = loop_skip_to
 
             if last_end_time > 0.1:  # Resume if there's more than 0.1s transcribed
                 write(
@@ -3137,6 +3248,7 @@ def try_transcribe(
             write(f"Could not create symlink, skipping")
 
         language_param = _language_param(language, current_model)
+        metadata_language = effective_language(language, current_model)
         whisper_log = srt_file.replace(".srt", ".whisper.log")
 
         # Initialize audio_duration for progress tracking (will be updated after model loads)
@@ -3150,6 +3262,7 @@ sys.path.insert(0, r"{os.path.dirname(os.path.abspath(__file__))}")
 import faster_whisper
 import os
 import re
+import json
 import threading
 import queue
 import time
@@ -3263,7 +3376,7 @@ def write_segments():
                     if loop_start is not None:
                         print("Loop detected: '" + text_normalized[:40] + "' from " + format(loop_start, ".1f") + "s")
                         with open(loop_detect_file, "w") as lf:
-                            lf.write(str(loop_start))
+                            json.dump({{"start": loop_start, "end": adjusted_end}}, lf)
                         stop_event.set()
                         os._exit(42)
 
@@ -3432,7 +3545,7 @@ try:
                 {{
                     "model": "{current_model}",
                     "source_file": r"{audio_to_transcribe}",
-                    "language": {language_param},
+                    "language": {metadata_language!r},
                     "device": "{device}",
                     "compute_type": "{compute_type}",
                     "cpu_threads": {cpu_threads if cpu_threads else "None"},
@@ -3565,20 +3678,23 @@ finally:
 
         if exit_code == 42:
             loop_detect_file = unfinished_srt.replace(".srt", ".loop_detect")
-            loop_timestamp = 0.0
-            if os.path.exists(loop_detect_file):
-                try:
-                    with open(loop_detect_file, "r") as lf:
-                        loop_timestamp = float(lf.read().strip())
-                    os.remove(loop_detect_file)
-                except Exception as e:
-                    write(f"Warning: Could not read loop detect file: {e}")
+            loop_timestamp, loop_end = _parse_loop_detect(loop_detect_file)
+            try:
+                os.remove(loop_detect_file)
+            except OSError:
+                pass
 
             if loop_timestamp > 0:
                 write(
                     f"Loop detected at {loop_timestamp:.1f}s, trimming SRT and retrying..."
                 )
                 _trim_srt_to_timestamp(unfinished_srt, loop_timestamp)
+                skip_to = max(loop_timestamp, loop_end) + _LOOP_SKIP_MARGIN_SECONDS
+                _write_loop_skip(unfinished_srt, skip_to)
+                write(
+                    f"Skipping {skip_to - loop_timestamp:.1f}s of repeated audio "
+                    f"on the next pass"
+                )
 
             if _loop_retry_count < 2:
                 write(f"Retrying transcription (attempt {_loop_retry_count + 1}/2)...")

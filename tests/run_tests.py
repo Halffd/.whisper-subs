@@ -1161,6 +1161,145 @@ class TestRunner:
         except Exception as e:
             self._record("Live incremental + finalize", "FAIL", str(e))
 
+        # --- Resume language normalization: .en / auto-detect must not reset ---
+        try:
+            import transcribe as tr
+
+            en_meta = {
+                "model": "base.en",
+                "language": "en",
+                "vad_enabled": True,
+            }
+            assert (
+                tr.resume_mismatch(en_meta, "base.en", None, True) is None
+            ), en_meta
+            # Legacy .en metadata recorded the requested (auto) language.
+            legacy_en = dict(en_meta, language="auto-detect")
+            assert tr.resume_mismatch(legacy_en, "base.en", None, True) is None
+
+            for spelling in (None, "auto-detect", "null", "None", "AUTO"):
+                meta = {
+                    "model": "large-v3",
+                    "language": spelling,
+                    "vad_enabled": False,
+                }
+                assert (
+                    tr.resume_mismatch(meta, "large-v3", None, False) is None
+                ), meta
+
+            assert tr.effective_language(None, "base.en") == "en"
+            assert tr.effective_language("FR", "large-v3") == "fr"
+            changed = tr.resume_mismatch(
+                {"model": "large-v3", "language": "es", "vad_enabled": False},
+                "large-v3",
+                "en",
+                False,
+            )
+            assert changed and "Language changed" in changed, changed
+            self._record("Resume language normalization", "PASS")
+        except Exception as e:
+            self._record("Resume language normalization", "FAIL", str(e))
+
+        # --- Ctrl+C / error: stop() must save the partial SRT before cleanup ---
+        try:
+            from livestream_transcriber import LiveStreamTranscriber
+
+            with tempfile.TemporaryDirectory() as tmp:
+                outdir = os.path.join(tmp, "out")
+                os.makedirs(outdir)
+                tempdir = os.path.join(tmp, "whisper_live_partial")
+                os.makedirs(tempdir)
+                audio = os.path.join(tempdir, "live.m4a")
+                with open(audio, "wb") as f:
+                    f.write(b"\0" * 128)
+                srt = os.path.join(tempdir, "live.srt")
+                unfinished = os.path.join(tempdir, "live.unfinished.srt")
+                with open(unfinished, "w", encoding="utf-8") as f:
+                    f.write("1\n00:00:01,000 --> 00:00:02,000\npartial text\n\n")
+                os.symlink(os.path.basename(unfinished), srt)
+
+                ls = LiveStreamTranscriber(
+                    output_dir=outdir, log_func=lambda m: None
+                )
+                ls.temp_dir = tempdir
+                ls._srt_file = srt
+                ls._audio_file = audio
+
+                ls.stop()  # the path Ctrl+C takes via finally: self.stop()
+                final_srt = os.path.join(outdir, "live.srt")
+                assert os.path.exists(final_srt), final_srt
+                assert not os.path.islink(final_srt)
+                with open(final_srt, encoding="utf-8") as f:
+                    assert "partial text" in f.read()
+                assert not os.path.exists(tempdir), "temp dir was not cleaned up"
+
+                # The CLI also calls stop() in its KeyboardInterrupt handler.
+                ls.stop()
+                assert os.path.exists(final_srt), "second stop removed the SRT"
+            self._record("Live partial SRT on stop", "PASS")
+        except Exception as e:
+            self._record("Live partial SRT on stop", "FAIL", str(e))
+
+        # --- Live passes enable VAD by default and pass it to every pass ---
+        try:
+            import transcribe as tr
+            from livestream_transcriber import LiveStreamTranscriber
+
+            assert LiveStreamTranscriber().vad_filter is True
+            with tempfile.TemporaryDirectory() as tmp:
+                audio = os.path.join(tmp, "live.m4a")
+                with open(audio, "wb") as f:
+                    f.write(b"\0" * 600_000)
+                records = []
+                real_pc = tr.process_create
+
+                def fake_process_create(**kwargs):
+                    records.append(kwargs)
+                    return True
+
+                tr.process_create = fake_process_create
+                try:
+                    ls = LiveStreamTranscriber(
+                        output_dir=tmp,
+                        log_func=lambda m: None,
+                        live_poll=0.05,
+                    )
+                    ls.is_running = True
+                    ls.transcribe_in_background(
+                        audio, os.path.join(tmp, "live.srt")
+                    )
+                    ls.is_running = False
+                    ls.transcription_process.join(timeout=10)
+                    assert records, "process_create was not called"
+                    assert all(r["vad_filter"] is True for r in records), records
+                finally:
+                    tr.process_create = real_pc
+            self._record("Live VAD passes", "PASS")
+        except Exception as e:
+            self._record("Live VAD passes", "FAIL", str(e))
+
+        # --- Loop skip: remember the end of a loop so retry skips that audio ---
+        try:
+            import transcribe as tr
+
+            with tempfile.TemporaryDirectory() as tmp:
+                unfinished = os.path.join(tmp, "live.unfinished.srt")
+                detect = unfinished.replace(".srt", ".loop_detect")
+                with open(detect, "w", encoding="utf-8") as f:
+                    json.dump({"start": 302.0, "end": 312.0}, f)
+                assert tr._parse_loop_detect(detect) == (302.0, 312.0)
+
+                with open(detect, "w", encoding="utf-8") as f:
+                    f.write("77.5")
+                assert tr._parse_loop_detect(detect) == (77.5, 77.5)
+
+                tr._write_loop_skip(unfinished, 314.0)
+                assert tr._consume_loop_skip(unfinished) == 314.0
+                assert tr._consume_loop_skip(unfinished) == 0.0
+            self._record("Loop skip marker", "PASS")
+        except Exception as e:
+            self._record("Loop skip marker", "FAIL", str(e))
+
         # --- Two-pass merge extras: empty pass, multiline text, CRLF, order ---
         try:
             import transcribe as tr

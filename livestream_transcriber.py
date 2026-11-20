@@ -35,11 +35,15 @@ class LiveStreamTranscriber:
         live_growth: float = 1.02,
         mpv_auto: bool = False,
         mpv_socket: str = "/tmp/mpvsocket",
+        vad_filter: bool = True,
         show_segments: bool = False,
     ):
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
+        # Live streams spend long stretches on silence/music; without VAD the
+        # model hallucinates repeated cues ("I'll be right back") forever.
+        self.vad_filter = vad_filter
         self.output_dir = output_dir or os.path.expanduser("~/Documents/Youtube-Subs")
         self.log_func = log_func
         self.mpv_ipc_reload = mpv_ipc_reload
@@ -54,6 +58,9 @@ class LiveStreamTranscriber:
         self.transcription_process = None
         self.is_running = False
         self.temp_dir = None
+        self._srt_file = None
+        self._audio_file = None
+        self._finalized_paths = set()
 
     def log(self, message):
         """Log message with timestamp."""
@@ -129,6 +136,7 @@ class LiveStreamTranscriber:
                 media_source=audio_file,
                 show_segments=True,
                 keep_unfinished=True,
+                vad_filter=self.vad_filter,
             )
 
             if not success:
@@ -174,6 +182,7 @@ class LiveStreamTranscriber:
                         media_source=audio_file,
                         show_segments=True,
                         keep_unfinished=True,
+                        vad_filter=self.vad_filter,
                     )
 
                     if success:
@@ -208,6 +217,10 @@ class LiveStreamTranscriber:
             srt_file = os.path.join(
                 self.temp_dir, f"live_{timestamp}_{clean_title}.srt"
             )
+            # Remember the paths so stop() can save partial output even when
+            # Ctrl+C unwinds this method before the normal end-of-stream path.
+            self._srt_file = srt_file
+            self._audio_file = audio_file
 
             # Callback for real-time subtitle streaming
             if self.on_srt_created:
@@ -260,10 +273,13 @@ class LiveStreamTranscriber:
 
             self._finalize_live_files(srt_file, audio_file)
 
+        except KeyboardInterrupt:
+            self.log("Interrupted — saving partial subtitles before exiting...")
+            raise
         except Exception as e:
             self.log(f"Error during live transcription: {e}")
         finally:
-            # Cleanup
+            # stop() finalizes any in-progress SRT before removing temp_dir.
             self.stop()
 
     def _finalize_live_files(self, srt_file, audio_file):
@@ -272,15 +288,23 @@ class LiveStreamTranscriber:
         While running, srt_file is a symlink to the in-progress file (kept
         between passes so transcription is incremental). Moving a symlink
         would leave a dangling link once the temp dir is cleaned up, so the
-        real file is renamed over it first.
+        real file is renamed over it first. Safe to call twice: stop() may be
+        invoked both by this class and by the CLI's KeyboardInterrupt handler.
         """
+        if not srt_file:
+            return
+        key = (srt_file, audio_file)
+        if key in self._finalized_paths:
+            return
+
         import transcribe  # lazy: avoid circular import at module load
+
+        os.makedirs(self.output_dir, exist_ok=True)
 
         if not os.path.exists(srt_file) or os.path.islink(srt_file):
             transcribe.finalize_unfinished(srt_file)
 
         final_srt = os.path.join(self.output_dir, os.path.basename(srt_file))
-        final_audio = os.path.join(self.output_dir, os.path.basename(audio_file))
 
         if os.path.exists(srt_file) and not os.path.islink(srt_file):
             shutil.move(srt_file, final_srt)
@@ -288,12 +312,15 @@ class LiveStreamTranscriber:
         else:
             self.log(f"No subtitles to save (missing {srt_file})")
 
-        if os.path.exists(audio_file):
+        if audio_file and os.path.exists(audio_file):
+            final_audio = os.path.join(self.output_dir, os.path.basename(audio_file))
             shutil.move(audio_file, final_audio)
             self.log(f"Final audio saved to: {final_audio}")
 
+        self._finalized_paths.add(key)
+
     def stop(self):
-        """Stop live transcription."""
+        """Stop live transcription, saving partial output before cleanup."""
         self.is_running = False
 
         # Kill download process if running
@@ -303,6 +330,22 @@ class LiveStreamTranscriber:
                 self.download_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.download_process.kill()
+
+        # Give the worker a bounded chance to flush its current cue. The
+        # normal end-of-stream path already joined with a longer timeout.
+        if self.transcription_process and self.transcription_process.is_alive():
+            self.transcription_process.join(timeout=15)
+
+        # This is the Ctrl+C / error safety net: finalize the in-progress SRT
+        # *before* the temp directory that holds it is removed.
+        if self._srt_file and (
+            self._srt_file,
+            self._audio_file,
+        ) not in self._finalized_paths:
+            try:
+                self._finalize_live_files(self._srt_file, self._audio_file)
+            except Exception as e:
+                self.log(f"Could not save partial subtitles: {e}")
 
         # Cleanup temp directory
         if self.temp_dir and os.path.exists(self.temp_dir):
